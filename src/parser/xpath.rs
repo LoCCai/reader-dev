@@ -3,9 +3,9 @@
 //! 容错（legado strToJXDocument 同级处理）：
 //! - 常见 HTML 命名实体（&nbsp; 等）归一为字符——sxd 仅支持 XML 预定义实体与数字引用
 //! - `<td>`/`<tr>`/`<tbody>` 结尾片段自动包裹（表格行/单元格可直接 XPath）
-//!
-//! 残余限制：sxd-document 为严格 XML 解析器——非良构 HTML（未闭合标签等）无法解析；
-//! legado 侧 JsoupXpath 基于 jsoup HTML 解析器可容错。规避：规则链中先用 CSS 定位再 XPath。
+//! - EG2：非良构 HTML（未闭合标签/未引号属性/裸 `&` 等）严格解析失败时，
+//!   经 html5ever（HTML5 容错解析，jsoup 同级）重建 DOM 并序列化为良构 XML 再求值
+//!   ——对齐 JsoupXpath 基于 jsoup HTML 解析器的强容错
 
 use sxd_document::parser;
 use sxd_xpath::nodeset::Node;
@@ -15,11 +15,23 @@ use sxd_xpath::{Context, Factory, Value};
 pub fn xpath_select(rule: &str, xml: &str) -> Vec<String> {
     let normalized = normalize_html_entities(xml);
     let wrapped = wrap_fragments(&normalized);
-    let package = match parser::parse(&wrapped) {
+    match try_evaluate(rule, &wrapped) {
+        Some(result) => result,
+        // EG2：严格 XML 解析失败 → html5ever 容错重建良构 XML 后再试
+        None => {
+            let repaired = repair_to_well_formed_xml(xml);
+            try_evaluate(rule, &repaired).unwrap_or_default()
+        }
+    }
+}
+
+/// 编译并求值；文档解析失败返回 None（区别于规则/求值失败返回空列表）
+fn try_evaluate(rule: &str, xml: &str) -> Option<Vec<String>> {
+    let package = match parser::parse(xml) {
         Ok(p) => p,
         Err(e) => {
             tracing::debug!("XPath 文档解析失败: {e}");
-            return vec![];
+            return None;
         }
     };
     let document = package.as_document();
@@ -28,11 +40,11 @@ pub fn xpath_select(rule: &str, xml: &str) -> Vec<String> {
         Ok(Some(x)) => x,
         Ok(None) => {
             tracing::debug!("XPath 规则无效（空表达式） [{rule}]");
-            return vec![];
+            return Some(vec![]);
         }
         Err(e) => {
             tracing::debug!("XPath 规则编译失败 [{rule}]: {e}");
-            return vec![];
+            return Some(vec![]);
         }
     };
     let context = Context::new();
@@ -40,10 +52,88 @@ pub fn xpath_select(rule: &str, xml: &str) -> Vec<String> {
         Ok(v) => v,
         Err(e) => {
             tracing::debug!("XPath 求值失败 [{rule}]: {e}");
-            return vec![];
+            return Some(vec![]);
         }
     };
-    value_to_strings(&value)
+    Some(value_to_strings(&value))
+}
+
+/// EG2：非良构 HTML → 良构 XML。
+/// html5ever 按浏览器规则容错解析（自动闭合、纠错、实体解码、标签名小写化——与
+/// JsoupXpath 的 jsoup 底座一致），再自序列化为每个标签闭合、属性引号包裹、
+/// 文本/属性转义的 XML。非法 XML 名称的元素/属性跳过（如 `svg:svg` 前缀化名保留末段）。
+fn repair_to_well_formed_xml(html: &str) -> String {
+    let dom = scraper::Html::parse_document(html);
+    let mut out = String::with_capacity(html.len() + 64);
+    serialize_xml_node(dom.tree.root(), &mut out);
+    out
+}
+
+/// 深度优先序列化 DOM 树为良构 XML
+fn serialize_xml_node(node: ego_tree::NodeRef<'_, scraper::node::Node>, out: &mut String) {
+    for child in node.children() {
+        match child.value() {
+            scraper::node::Node::Document | scraper::node::Node::Fragment => {
+                serialize_xml_node(child, out);
+            }
+            // 良构 XML 不需要 doctype；注释/处理指令对 XPath 取值无贡献，一并略去
+            scraper::node::Node::Doctype(_)
+            | scraper::node::Node::Comment(_)
+            | scraper::node::Node::ProcessingInstruction(_) => {}
+            scraper::node::Node::Text(text) => {
+                out.push_str(&escape_xml_text(text));
+            }
+            scraper::node::Node::Element(element) => {
+                let Some(name) = sanitize_xml_name(element.name()) else {
+                    continue;
+                };
+                out.push('<');
+                out.push_str(name);
+                for (attr_name, attr_value) in element.attrs() {
+                    if let Some(attr) = sanitize_xml_name(attr_name) {
+                        out.push(' ');
+                        out.push_str(attr);
+                        out.push_str("=\"");
+                        out.push_str(&escape_xml_attr(attr_value));
+                        out.push('"');
+                    }
+                }
+                if child.children().next().is_none() {
+                    out.push_str("/>");
+                } else {
+                    out.push('>');
+                    serialize_xml_node(child, out);
+                    out.push_str("</");
+                    out.push_str(name);
+                    out.push('>');
+                }
+            }
+        }
+    }
+}
+
+/// XML 名称清洗：去命名空间前缀（xlink:href → href；JsoupXpath 求值不依赖前缀），
+/// 非法 XML 名称（首字符非字母/`_`，或含字母数字/`_`/`-`/`.` 之外字符）返回 None
+fn sanitize_xml_name(name: &str) -> Option<&str> {
+    let name = name.rsplit(':').next()?;
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return None,
+    }
+    if chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+fn escape_xml_text(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+fn escape_xml_attr(s: &str) -> String {
+    escape_xml_text(s).replace('"', "&quot;")
 }
 
 /// 常见 HTML 命名实体 → 字符（sxd 仅认识 XML 预定义实体；amp/lt/gt/quot/apos 由 sxd 原生处理，
@@ -464,9 +554,39 @@ mod tests {
     }
 
     #[test]
-    fn xpath_non_wellformed_html_returns_empty() {
-        // 非良构 HTML（未闭合标签）→ sxd 解析失败 → 空（残余限制，见模块注释）
+    fn xpath_non_wellformed_html_repaired_via_html5ever() {
+        // EG2：未闭合标签——严格解析失败 → html5ever 重建良构 XML → 正常取值
+        // （旧行为返回空；对齐 JsoupXpath 的 jsoup 容错）
         let html = "<div><p>未闭合";
-        assert!(xpath_select("//p/text()", html).is_empty());
+        assert_eq!(xpath_select("//p/text()", html), vec!["未闭合"]);
+
+        // 未引号属性 + 标签名大小写归一（jsoup 同语义）
+        let html2 = r#"<DIV><A href=/book/1>第一章</A></DIV>"#;
+        assert_eq!(xpath_select("//a/@href", html2), vec!["/book/1"]);
+
+        // void 元素（未闭合 <br>/<img>）+ 裸 & 实体
+        let html3 = r#"<div><img src="a.png"><br>甲&乙<p>段落</p></div>"#;
+        assert_eq!(xpath_select("//img/@src", html3), vec!["a.png"]);
+        assert_eq!(xpath_select("//p/text()", html3), vec!["段落"]);
+        // & 解码：HTML5 规范下裸 & 保留原样（未构成实体）
+        assert_eq!(xpath_select("//div/text()", html3).join(""), "甲&乙");
+
+        // table 片段缺闭合（真实书源常见）
+        let html4 = "<table><tr><td>1</td><td>2</td>";
+        assert_eq!(xpath_select("//tr/td[2]/text()", html4), vec!["2"]);
+
+        // 良构文档仍走严格路径（结果不受影响）
+        assert_eq!(
+            xpath_select("//book/title", r#"<book><title>三体</title></book>"#),
+            vec!["三体"]
+        );
+    }
+
+    #[test]
+    fn xpath_repair_keeps_script_content_escaped() {
+        // script/style 原始文本中的 < & 不破坏序列化产物（转义喂 sxd，取值还原原文）
+        let html = r#"<html><head><script>if (a < b && c > d) { x("<div>"); }</script></head><body><p>正文</p></body></html>"#;
+        // 良构外壳但 script 含裸 < → 严格解析失败 → 修复路径
+        assert_eq!(xpath_select("//p/text()", html), vec!["正文"]);
     }
 }

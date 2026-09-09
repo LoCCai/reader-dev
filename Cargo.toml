@@ -30,6 +30,7 @@ dotenvy = "0.15"
 
 # 解析（legado 多规则引擎）
 scraper = "0.20"          # CSS Selector
+ego-tree = "0.6"          # DOM 树遍历（scraper 内部树类型；EG2 XPath 容错序列化用）
 jsonpath_lib = "0.3"      # JSONPath
 regex = "1"               # Regex
 sxd-document = "0.3"      # XPath（XML 文档）

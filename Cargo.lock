@@ -4928,6 +4928,7 @@ dependencies = [
  "cipher 0.4.4",
  "des",
  "dotenvy",
+ "ego-tree",
  "encoding_rs",
  "fancy-regex",
  "feed-rs",

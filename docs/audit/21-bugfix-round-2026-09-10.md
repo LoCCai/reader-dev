@@ -56,3 +56,17 @@
    exit 1/127（cc-rs 编 C 依赖失败且无报错输出）。构建命令：
    `export PATH="/c/msys64/mingw64/bin:/c/Users/LoCCai/rust-gnu/bin:$PATH"`。
 3. Rust 内嵌前端（rust-embed）需先 `cd web-ui && npm ci && npm run build` 生成 dist/。
+
+---
+
+# 第二轮（同日）：遗留 P1/P2 清单
+
+> 验证：cargo test 全绿（725→727 lib + 14 e2e）/ 前端不受影响。
+
+| # | 项 | 处置 |
+|---|---|---|
+| EG2 | **XPath 非良构 HTML 容错**【P1】 | `parser/xpath.rs`：严格 XML 解析失败时，经 html5ever（scraper 内置 HTML5 容错解析，与 JsoupXpath 的 jsoup 底座同级）重建 DOM，自定义序列化为良构 XML（标签闭合/属性引号/文本与属性转义/命名空间前缀剥离/非法 XML 名称跳过）后求值。良构文档仍走原严格路径（零开销）。覆盖：未闭合标签、未引号属性、void 元素、script 原始文本、实体解码。新增依赖 `ego-tree = "0.6"`（scraper 内部树类型，版本共用）。测试 2 例 + 旧「返回空」断言翻转为新语义 |
+| F11 | 备份 zip 并入本地书原文件 | `storage/mod.rs`：`write_backup_zip` 收集 origin=loc_book 且实际存在于 storage 根内的原文件，按相对路径写入 zip `books/` 前缀（对齐 legacy createUserBackup 的 webdav/books 打包；epub 目录书按 index.epub/首个 .epub 实际文件入包）；`restore_backup_zip` 对 books/ 条目组件级防穿越（`..`/点开头/冒号/反斜杠拒收）后写回 storage 根内对应路径，`RestoreCounts` 增加 `bookFiles` 计数（serde default，向前兼容）。测试：跨实例回环 + 穿越拒收 |
+| PJ2 | /reader3/uploadFile assets 上传 | 核实已实现（router.rs:496 + 端到端测试 19398），文档漏记，积压清单翻 [x] |
+
+遗留不变：m9/m12/m13/m14、backupToMongodb 全命名空间、C3 人工验收。

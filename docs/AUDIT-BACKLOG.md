@@ -52,7 +52,7 @@
 - [x] F8 getBookToc refresh 参数生效 + 成功回写 latestChapterTitle/totalChapterNum/lastCheck* + 失败 lastCheckError
 - [ ] F9 getBookContent 本地 EPUB(__API_ROOT__)/CBZ(img)/PDF(页图) 三模式
 - [~] F10 exportBook：isEpub 参数/《name》作者文件名/Cache-Control:300 已完成；本地原文件直传分支待办
-- [ ] F11 backupToWebdav zip 并入 books/ + 增量合并；backupToMongodb 遍历全命名空间
+- [x] F11 backupToWebdav zip 并入 books/（2026-09-10：origin=loc_book 原文件按 storage 相对路径入包，restore 回填 + 组件级防穿越；legacy 的 webdav/books 目录在 master 架构下由 storage 根内 loc_book 文件取代；backupToMongodb 全命名空间遍历待办）
 - [x] F12 saveUserConfig @updateTime 戳 + getUserConfig 裸对象直出 + 无配置 err「没有备份文件」
 
 ## 四、P2 打磨项（择机）
@@ -100,7 +100,7 @@
 
 ### Pro 独有功能（整模块或端点缺失）
 ~~PJ1 LicenseController 授权系统~~ 用户决定移除，不实现
-- [ ] PJ2 uploadFile 同名异义：legacy /reader3/uploadFile 是 assets/{ns}/{type}/ 上传返 URL 列表（非书仓上传）；需新增独立 handler
+- [x] PJ2 uploadFile 同名异义（已实现：router.rs /reader3/uploadFile assets/{ns}/{type}/ 上传返 URL——2026-09-10 代码核实，本文档此前漏记）
 - [x] PJ3 file/restore 别名路由（2026-09-10 R6b 补齐 books/ 进度恢复扩展仍待办）
 - [x] PJ4 textToSpeechCn 引擎实现（commit 6916b48，本文档此前漏记）
 - [ ] PJ5 mergeBookCacheInfo/saveBookInfoCache 进程内书籍信息缓存（已在 P2 批完成 ✓）

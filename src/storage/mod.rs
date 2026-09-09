@@ -4466,9 +4466,38 @@ impl Storage {
             "bookSourceCookies.json",
             &serde_json::to_vec_pretty(&cookies)?,
         )?;
+
+        // F11：文件型本地书原文件并入 books/（legacy createUserBackup 对齐——webdav/books
+        // 整目录入包）。仅收 origin=loc_book 且实际落在 storage 根内的文件；
+        // epub 目录书（{书名}.epub/index.epub）按实际文件相对路径入包，恢复后可再解析。
+        let storage_dir = self.config.storage_dir();
+        let mut packed_files = 0usize;
+        for book in &books {
+            if book.origin != "loc_book" {
+                continue;
+            }
+            for abs in collect_loc_book_files(&storage_dir, &book.book_url) {
+                let Ok(rel) = abs.strip_prefix(&storage_dir) else {
+                    continue;
+                };
+                let entry_name = format!(
+                    "books/{}",
+                    rel.to_string_lossy().replace('\\', "/")
+                );
+                match std::fs::read(&abs) {
+                    Ok(bytes) => {
+                        if write_zip_entry(&mut writer, &entry_name, &bytes).is_ok() {
+                            packed_files += 1;
+                        }
+                    }
+                    Err(e) => tracing::warn!("备份本地书文件失败 {}: {e}", abs.display()),
+                }
+            }
+        }
+
         writer.finish()?;
 
-        tracing::info!("备份完成 [{ns}]: {}", zip_path.display());
+        tracing::info!("备份完成 [{ns}]: {}（本地书文件 {packed_files} 个）", zip_path.display());
         Ok(zip_path.to_string_lossy().into_owned())
     }
 
@@ -4946,6 +4975,35 @@ impl Storage {
             }
         }
 
+        // F11：books/ 前缀条目 = 文件型本地书原文件 → 写回 storage 根内对应相对路径
+        // （legacy syncFromWebdav 对齐：zip books/ 整目录回填；组件级校验防穿越）
+        let storage_root = self.config.storage_dir();
+        for (name, bytes) in &entries {
+            let Some(rel) = name.strip_prefix("books/") else {
+                continue;
+            };
+            if !is_safe_storage_rel_path(rel) {
+                tracing::warn!("restore [{ns}] books/{rel} 含非法路径组件，跳过");
+                report.skipped.book_files += 1;
+                continue;
+            }
+            let dest = storage_root.join(rel);
+            if !overwrite && dest.is_file() {
+                report.skipped.book_files += 1;
+                continue;
+            }
+            if let Some(parent) = dest.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::write(&dest, bytes) {
+                Ok(_) => report.restored.book_files += 1,
+                Err(e) => {
+                    tracing::warn!("restore [{ns}] 写本地书文件失败 {}: {e}", dest.display());
+                    report.skipped.book_files += 1;
+                }
+            }
+        }
+
         tracing::info!(
             "恢复完成 [{ns}] overwrite={overwrite}: restored={:?} skipped={:?}",
             report.restored,
@@ -4990,6 +5048,8 @@ pub struct RestoreCounts {
     pub bookmarks: u64,
     /// 书源登录态（按 sourceUrl）
     pub cookies: u64,
+    /// 本地书原文件（F11：books/ 条目，按文件相对路径）
+    pub book_files: u64,
 }
 
 /// 恢复报告（restoreFromZip / restoreFromWebdav 返回：restored/skipped 各类目计数）
@@ -5010,6 +5070,48 @@ fn write_zip_entry(
     writer.start_file(name, zip::write::FileOptions::default())?;
     writer.write_all(bytes)?;
     Ok(())
+}
+
+/// F11：收集文件型本地书的实际文件（解析回退链与 api::resolve_loc_book_file 一致——
+/// 文件本身 / 目录内 index.epub / 目录内首个 .epub），并钳位在 storage 根内
+fn collect_loc_book_files(storage_dir: &std::path::Path, book_url: &str) -> Vec<std::path::PathBuf> {
+    let path = storage_dir.join(book_url.trim_start_matches("storage/"));
+    let mut found: Vec<std::path::PathBuf> = Vec::new();
+    if path.is_file() {
+        found.push(path);
+    } else if path.is_dir() {
+        found.extend(loc_book_epub_dir_file(&path));
+    } else if let Some(parent) = path.parent() {
+        found.extend(loc_book_epub_dir_file(parent));
+    }
+    found.retain(|p| p.starts_with(storage_dir) && p.is_file());
+    found
+}
+
+/// legacy 目录书布局（{书名}.epub/ 内含 index.epub，否则取目录内首个 .epub 文件）
+fn loc_book_epub_dir_file(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let idx = dir.join("index.epub");
+    if idx.is_file() {
+        return Some(idx);
+    }
+    let rd = std::fs::read_dir(dir).ok()?;
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_file() && p.to_string_lossy().to_lowercase().ends_with(".epub") {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// F11：books/ 条目相对路径安全性——POSIX 分隔、无空/点/穿越/冒号组件、
+/// 组件不以点开头（与上传白名单同口径）
+fn is_safe_storage_rel_path(rel: &str) -> bool {
+    !rel.is_empty()
+        && !rel.contains('\\')
+        && rel.split('/').all(|c| {
+            !c.is_empty() && c != "." && c != ".." && !c.starts_with('.') && !c.contains(':')
+        })
 }
 
 /// F-35：扫描 books 表 can_update=1 的书 → analyze_toc → 回写
@@ -7970,6 +8072,68 @@ mod tests {
         writer.finish().unwrap();
         drop(writer);
         buf.into_inner()
+    }
+
+    /// F11：备份 zip 并入文件型本地书原文件（books/）→ 恢复回填 + 穿越条目拒收
+    #[tokio::test]
+    async fn test_backup_zip_books_files_roundtrip() {
+        let storage = test_storage("locbooks").await;
+        let file_path = storage.config.storage_dir().join("localStore/mybook.txt");
+        std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        std::fs::write(&file_path, b"chapter one").unwrap();
+        storage
+            .upsert_book(
+                "default",
+                &crate::model::Book {
+                    book_url: "localStore/mybook.txt".into(),
+                    name: "我的书".into(),
+                    origin: "loc_book".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // 备份：原文件并入 books/localStore/mybook.txt
+        let zip_path = storage.create_backup_zip("default").await.unwrap();
+        let zip = std::fs::read(&zip_path).unwrap();
+
+        // 恢复到全新实例（跨机迁移形态）：书 + 原文件都回来
+        let storage2 = test_storage("locbooks2").await;
+        let report = storage2
+            .restore_backup_zip("default", &zip, false)
+            .await
+            .unwrap();
+        assert_eq!(report.restored.books, 1);
+        assert_eq!(
+            report.restored.book_files, 1,
+            "应回填 1 个本地书文件: {report:?}"
+        );
+        let restored = storage2.config.storage_dir().join("localStore/mybook.txt");
+        assert!(restored.is_file(), "原文件应写回 storage 根内对应路径");
+        assert_eq!(std::fs::read(&restored).unwrap(), b"chapter one");
+
+        // 非法条目拒收（穿越/点开头），合法条目照常
+        let evil = make_backup_zip(&[
+            ("books/../evil.txt", "x"),
+            ("books/.hidden.txt", "h"),
+            ("books/ok.txt", "y"),
+            (
+                "bookshelf.json",
+                r#"[{"bookUrl":"https://x.com","name":"X"}]"#,
+            ),
+        ]);
+        let report = storage2
+            .restore_backup_zip("default", &evil, true)
+            .await
+            .unwrap();
+        assert_eq!(report.skipped.book_files, 2, "穿越/点开头应拒收: {report:?}");
+        assert_eq!(report.restored.book_files, 1);
+        assert!(!storage2.config.storage_dir().join("evil.txt").exists());
+        assert!(storage2.config.storage_dir().join("ok.txt").is_file());
+
+        cleanup(storage, "locbooks").await;
+        cleanup(storage2, "locbooks2").await;
     }
 
     /// F-55：备份 zip 恢复（最小备份 zip → 各表断言；幂等 skip / overwrite）
