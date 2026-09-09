@@ -225,14 +225,19 @@ impl ImageCache {
     }
 
     /// 读盘命中：索引查扩展名 → 读文件 → 刷新 LRU 时钟。
-    /// 文件读取在索引锁内完成（与 LRU 清理互斥，避免删读竞态）。
+    /// m9：文件读取在索引锁**外**完成（大图读盘不再阻塞其他请求的索引访问）；
+    /// 代价是与 LRU 清理存在良性竞态——极端下条目刚被清理导致读盘失败，
+    /// 按未命中处理回源即可。
     fn read_disk(&self, key: &str) -> Option<(Vec<u8>, &'static str)> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let ext = state.entries.get(key).map(|e| e.ext.clone())?;
+        let ext = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.entries.get(key).map(|e| e.ext.clone())?
+        };
         let path = self.dir.join(format!("{key}.{ext}"));
         let bytes = std::fs::read(&path).ok()?;
-        // 命中：刷新 LRU 时钟
+        // 命中：刷新 LRU 时钟（锁外读盘后条目可能已被清理——缺了就跳过刷新）
         let now = self.clock.fetch_add(1, Ordering::Relaxed);
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(e) = state.entries.get_mut(key) {
             e.last_used = now;
         }
@@ -282,26 +287,35 @@ impl ImageCache {
         self.evict_lru();
     }
 
-    /// 容量超限 → LRU 清理（最近最少使用：last_used 最小者先删），直到总字节 ≤ 上限
+    /// 容量超限 → LRU 清理（最近最少使用：last_used 最小者先删），直到总字节 ≤ 上限。
+    /// m9：索引摘除与字节数记账在锁内一次完成，文件删除在锁外逐个执行
+    /// （删除失败仅留孤儿文件——启动时 seed_from_disk 会重新纳管，不影响正确性）。
     fn evict_lru(&self) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        while state.total_bytes > self.max_bytes {
-            let victim = state
-                .entries
-                .iter()
-                .min_by_key(|(_, e)| e.last_used)
-                .map(|(k, _)| k.clone());
-            let Some(victim) = victim else { break };
-            let entry = state
-                .entries
-                .remove(&victim)
-                .expect("victim 刚取自 entries，必然存在");
-            state.total_bytes = state.total_bytes.saturating_sub(entry.size);
-            let path = self.dir.join(format!("{victim}.{}", entry.ext));
+        let victims: Vec<(String, String)> = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut victims = Vec::new();
+            while state.total_bytes > self.max_bytes {
+                let victim = state
+                    .entries
+                    .iter()
+                    .min_by_key(|(_, e)| e.last_used)
+                    .map(|(k, _)| k.clone());
+                let Some(victim) = victim else { break };
+                let entry = state
+                    .entries
+                    .remove(&victim)
+                    .expect("victim 刚取自 entries，必然存在");
+                state.total_bytes = state.total_bytes.saturating_sub(entry.size);
+                victims.push((victim, entry.ext));
+            }
+            victims
+        };
+        for (key, ext) in &victims {
+            let path = self.dir.join(format!("{key}.{ext}"));
             if std::fs::remove_file(&path).is_err() {
                 tracing::debug!("图片缓存 LRU 删除失败（可能已被外部清理）: {path:?}");
             }
-            tracing::debug!("图片缓存 LRU 清理: {victim}.{}", entry.ext);
+            tracing::debug!("图片缓存 LRU 清理: {key}.{ext}");
         }
     }
 
@@ -765,5 +779,56 @@ mod tests {
         assert_ne!(key, cache_key("alice", "https://example.com/cover.png"));
         // 确为 md5(ns|url) 完整 32 位
         assert_eq!(key, md5_encode("default|https://example.com/cover.png"));
+    }
+
+    /// m9 锁外 IO 重构回归：高并发读写 + 强制 LRU 驱逐下，
+    /// 记账一致（total_bytes ≤ 上限、索引条目数与盘面收敛）且无 panic
+    #[tokio::test]
+    async fn test_concurrent_mixed_traffic_under_eviction() {
+        let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true);
+        // 512B 容量：144 个 ~7B 文件必然持续触发驱逐
+        let (cache, dir) = temp_cache("stress", 512).await;
+        let (addr, _count) = mock_server(0).await;
+
+        let mut handles = Vec::new();
+        for i in 0..24usize {
+            let cache = cache.clone();
+            let base = format!("http://{addr}/stress{i}.png");
+            handles.push(tokio::spawn(async move {
+                for j in 0..6usize {
+                    // 24 键 × 6 轮 = 144 个不同 URL，远超容量 → 持续驱逐
+                    let url = format!("{base}?v={j}");
+                    let _ = cache.get_or_fetch("default", &url, None, 10, 64 * 1024).await;
+                }
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // 记账一致：容量不超限；条目数 = 盘面文件数（索引与磁盘最终一致）
+        let state = cache.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            state.total_bytes <= 512,
+            "容量应不超限: {}",
+            state.total_bytes
+        );
+        let disk_files = std::fs::read_dir(&dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| e.path().is_file())
+                    .filter(|e| {
+                        e.file_name()
+                            .to_string_lossy()
+                            .ends_with(".png")
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(
+            state.entries.len(),
+            disk_files,
+            "索引条目数应与盘面 png 文件数一致（孤儿/缺失都算破坏）"
+        );
     }
 }
