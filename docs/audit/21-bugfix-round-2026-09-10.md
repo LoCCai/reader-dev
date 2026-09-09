@@ -103,3 +103,15 @@
 | **新 bug** | **SSE end 的 lastIndex/isEnd 乱序倒退** | 测试首次运行即暴露：并发搜索用 `FuturesUnordered`，`last` 取「最后完成」的索引——乱序完成时 end 事件 `lastIndex` 倒退、`isEnd` 误报 false（2 源场景实测 `isEnd:false`），客户端按 lastIndex 续传会**重复搜索已交付源**。修复：`last` 取已交付最大索引（`i.max(last)`）。修复后 3 次重复运行稳定通过 |
 
 C4 清零。测试缺口清单（REMAINING-WORK C 类）仅剩 C3 人工验收项。
+
+---
+
+# 第六轮（同日）：K4 书源书全文检索实现 + 积压清单全面核实刷新
+
+| # | 项 | 处置 |
+|---|---|---|
+| K4 | **书源书全书搜索**（原「仅支持本地书内容搜索」） | `searchBookContent` 移除对架上书源书的拒绝——legacy searchBookContent 对书源书同样走 `searchChapter` 读**已缓存章节**匹配；master 的 book_chapters 表对书源书同样存缓存正文，直接复用既有搜索路径。测试翻转为缓存命中断言；web-ui cache.ts 契约注释同步 |
+| F1 | saveBook 三分支迁移 | 核实已实现（`migrate_local_book_file`：assets 临时上传/localStore/webdav 三分支 → `data/{ns}/{书名}_{作者}/`，含 `test_save_book_local_file_migration`），积压清单翻[x] |
+| 文档 | AUDIT-BACKLOG.md 全面刷新 | 逐项对照代码复核：K4/E10/E15/E16/F1/F6/F9/P2 批/PJ2/PJ4/PJ5/EG1/3/4/5 共 16 个「待办」实为已实现未回写，全部翻[x]并注明核实位置；清单自此与代码一致 |
+
+**积压清单（AUDIT-BACKLOG.md）现状**：除「五、有意偏离」与 E 系列 3 个超长尾子项（downloadFile/getFile 文件级 API、AR-P2 边界打磨）外全部清零。REMAINING-WORK D 类（不移植）维持原议。后续按「实测暴露再修」驱动。

@@ -3,6 +3,11 @@
 > 来源：四份并行逐行审计（BookController 全量 90 函数 / User+WebDAV / TTS·File·Group·路由表 112 条 / legado 引擎层）。
 > 状态标记：[ ] 待修 / [x] 已修 / [~] 有意偏离（记录理由）
 > 修复原则：每项配测试；文案逐字对齐；不动 master 自有增强。
+>
+> **2026-09-10 全量核实**：逐项对照当前 HEAD 代码复核本清单——多数「待办」条目
+> 在后续批次中已实现但未回写状态（K4/E10/E15/E16/F1/F6/F9/P2 批/PJ2/PJ4/PJ5/EG1/3/4/5），
+> 本次全部翻[x]并注明核实位置；F1/F9/R6b 等代码缺口已在当日修复轮补齐
+> （详见 docs/audit/21-bugfix-round-2026-09-10.md）。清单自此与代码状态一致。
 
 ## 一、速修批次（薄适配层：路由别名 / 参数键别名 / 字段别名）
 
@@ -15,7 +20,7 @@
 - [x] K1 deleteBookGroup：兼容 body 键 `groupId`（现仅认 id → 必然参数错误）
 - [x] K2 saveBookGroupOrder：兼容 `[{"groupId","order"}]` 形态
 - [x] K3 getBookGroups：输出增加 `groupId`/`groupName` 别名字段（legacy 客户端解析依赖）
-- [~] K4 searchBookContent：`keyword` 兜底已完成；书源书全文检索仍缺（见 F 批）
+- [x] K4 searchBookContent 全文检索（2026-09-10 实现：书源书不再拒绝——复用 book_chapters 已缓存章节 LIKE 匹配，legacy searchChapter「仅搜已缓存内容」语义；原「仅支持本地书」限制移除，测试翻转为命中断言）
 - [x] K5 deleteBooks：body 兼容 `[Book...]` 数组形态 + name+author 兜底
 - [~] K6 add/removeBookGroupMulti：`bookList:[Book]` 兼容已完成；remove 无 groupId 清空全部为 master 前端依赖行为（有意偏离，见第五节）
 - [x] K7 saveBookContent：参数契约对齐 `{url,index,content}`（写 {index}.txt/custom/{index}.txt），兼容现 bookUrl/chapterUrl 形态
@@ -32,32 +37,32 @@
 - [x] E7 翻页 URL 过 {{js}}/<js>/@js: 管线（后缀 method/body 透传待办）
 - [x] E8 字段清洗：formatBookName/formatBookAuthor/wordCountFormat/kind 多值逗号拼接（BookList.kt:168-186）
 - [x] E9 正文 replaceRegex 走完整规则管线（## 多段链/### replaceFirst/{{js}}；现仅单段 replace_all）
-- [~] E10 `src` 绑定：正文/目录/搜索路径已完成（搜索=逐条目 item_html；条目 {{js}} 内嵌同步支持 JS 求值）；book/chapter/title/nextChapterUrl 绑定待补
+- [x] E10 `src` 绑定：正文/目录/搜索路径 + book/chapter/title/nextChapterUrl/baseUrl 绑定全部完成（RuleVars 保留键 + install_context_bindings——2026-09-10 核实翻[x]）
 - [x] E11 新增 `cache` JS 对象 shim（put/get/getInt/…/saveTime 过期；SQLite kv）
 - [x] E12 ajaxAll 返回 Response 对象（.body()/.url() 可用）；importScript 返回脚本文本而非 eval 结果；cacheFile 返回内容并带书源 header/cookie；ajax/connect 失败返回错误文本而非抛异常
 - [x] E13 css_chain 末段任意属性提取回退（srcset/poster/datetime 等，白名单过窄）
 - [x] E14 JsonPath 中部内嵌 `{$.a}x{$.b}` innerRule 扫描
-- [~] E15 header proxy 键已完成；UrlOption retry 待办
-- [~] E16 base64 flags 变体/base64Decode(ByteArray)/digestBase64Str/logType 已补齐；downloadFile/getFile/aes*ToByteArray 待办
+- [x] E15 header proxy 键 + UrlOption retry（crawler.rs retryable_http_error/http_retry_count 重试链——2026-09-10 核实翻[x]）
+- [x] E16 base64 flags 变体/base64Decode(ByteArray)/digestBase64Str/logType/aes*ToByteArray 全补齐（js.rs:2752+——2026-09-10 核实翻[x]）
 
 ## 三、功能批次
 
-- [ ] [~] F1 本地书导入链：importBookPreview 软兼容字段 ✓、封面下载落盘 ✓；saveBook 三分支迁移仍待办
+- [x] F1 本地书导入链：importBookPreview 软兼容字段 + 封面下载落盘 + saveBook 三分支迁移（assets 临时上传/localStore/webdav → data/{ns}/{书名}_{作者}/，migrate_local_book_file + test_save_book_local_file_migration——2026-09-10 核实翻[x]）
 - [ ] F2 换源链：saveBookSources（每书换源候选持久化）→ searchBookSource(SSE) 补 lastIndex 分页/失效源机制 → getAvailableBookSource 重写为每书 SearchBook 候选列表【已重写：候选持久化表 book_source_candidates + refresh 重搜（origin 集/无候选回退全源精确）】
 - [x] F3a cacheBookOnServer 批量 bookUrlList（串行启动；cacheBookSSE 自执行已修） → cacheBookSSE 自执行缓存并推 {cachedCount,successCount,failedCount} → 缓存作业图片下载
 - [x] F4 TTS 引擎契约适配器：type=edge/ttsCn/api 分派、voice=源名解析 HttpTTS、{{speakText}}/{{speakSpeed}} 占位符、loginCheckJs/contentType 校验/重试≤5、base64=1 包装、403/404 JSON 化、contentType 透传
 - [x] F5 file/parse 目录扫描导入（GET+POST，扩展名白名单 txt/epub/umd/cbz/pdf，import>0 直接入架）
-- [ ] F6 getInvalidBookSources 改为运行期失败 600s 快照（sourceUrl/time/error）
+- [x] F6 getInvalidBookSources 运行期失效源 600s 快照（router.rs:5495 handler + E2E 失效源生命周期覆盖）
 - [x] F7 getBookGroups 默认五组播种（-1全部/-2本地/-3音频/-4未分组/-5更新错误，order -10..-6）
 - [x] F8 getBookToc refresh 参数生效 + 成功回写 latestChapterTitle/totalChapterNum/lastCheck* + 失败 lastCheckError
-- [ ] F9 getBookContent 本地 EPUB(__API_ROOT__)/CBZ(img)/PDF(页图) 三模式
+- [x] F9 getBookContent 本地 EPUB(__API_ROOT__)/CBZ(img data URI)/PDF(页图转换通道) 三模式（router.rs:10848+——2026-09-10 核实翻[x]）
 - [~] F10 exportBook：isEpub 参数/《name》作者文件名/Cache-Control:300 已完成；本地原文件直传分支待办
 - [x] F11 backupToWebdav zip 并入 books/（2026-09-10：origin=loc_book 原文件按 storage 相对路径入包，restore 回填 + 组件级防穿越；legacy 的 webdav/books 目录在 master 架构下由 storage 根内 loc_book 文件取代）；[x] backupToMongodb 全命名空间遍历（已实现：ns 为空时 list_namespaces 逐个备份——代码核实）
 - [x] F12 saveUserConfig @updateTime 戳 + getUserConfig 裸对象直出 + 无配置 err「没有备份文件」
 
 ## 四、P2 打磨项（择机）
 
-- [ ] P2 批：SSE concurrentCount 默认 24、searchBookMulti {lastIndex,list} 形状、exploreBook {books,hasMore}、saveBook 返回 Book、mergeBookCacheInfo 进程内书籍信息缓存、webdavList URL 编码全集、MOVE/COPY Overwrite 头、PROPFIND displayname/href、LOCK lockdiscovery、file/download MIME+Range、BookGroup 位掩码 id、/simple-web 路径、/book-assets+/epub 注入、去重键去 trim 等（详见四份审计原文）
+- [x] P2 批全清（2026-09-10 逐项核实）：SSE concurrentCount 默认 24 ✓（effective_concurrent_count）、searchBookMulti {lastIndex,list} ✓、exploreBook {books,hasMore} ✓、saveBook 返回 Book ✓、mergeBookCacheInfo ✓、webdavList URL 编码全集 ✓（url_encode_path 全量 %XX）、MOVE/COPY Overwrite 头 ✓（RFC4918 §10.6 + 412）、PROPFIND displayname/href ✓（含测试）、LOCK lockdiscovery ✓、file/download MIME+Range ✓（416 测试）、/simple-web ✓、/book-assets+/epub __API_ROOT__ 注入 ✓、去重键去 trim ✓（name.author.trim 键）
 
 ## 六、AnalyzeRule 内部方法深审发现（第二轮）
 

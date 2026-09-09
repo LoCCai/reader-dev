@@ -12,7 +12,7 @@ import type { CacheClearResult, CacheClearType, CacheInfo, ContentSearchHit, Ret
  *                                   （清理目录缓存 / 章节缓存 / 全部）
  * GET  /reader3/searchBookContent → params { key, bookUrl } → ReturnData<ContentSearchHit[]>
  *                                   hit: { chapterIndex, title, snippet }
- *                                   （全书内容搜索，本地书正文逐章匹配；书源书返回「仅支持本地书内容搜索」）
+ *                                   （全书内容搜索：本地书正文逐章匹配；书源书匹配已缓存章节——K4）
  * ================================================================
  *
  * 说明：接口以 silent 模式调用（后端未实现/不可用时返回 404，静默失败由调用方降级展示，

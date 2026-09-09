@@ -1685,7 +1685,8 @@ async fn clear_cache(
 
 /// GET/POST /reader3/searchBookContent：全书搜索（params key + bookUrl）
 /// 本地书：book_chapters 表 LIKE 匹配正文 → data: [{chapterIndex, title, snippet}]
-/// 书源书：返回提示“仅支持本地书内容搜索”
+/// 书源书（K4）：同样匹配 book_chapters **已缓存**章节（legacy searchChapter 语义——
+/// 未缓存章节不参与搜索）；文件型本地书解析文件逐章匹配
 async fn search_book_content(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -1722,15 +1723,12 @@ async fn search_book_content(
         .await
         .unwrap_or(0)
         > 0;
-    match &shelf {
-        Some(book) => {
-            if !crate::service::local_book::is_local_book(&book.book_url, &book.origin) {
-                return Json(ReturnData::err("仅支持本地书内容搜索"));
-            }
-        }
-        None if !has_chapters => return Json(ReturnData::err("书籍不存在")),
-        None => {}
+    if shelf.is_none() && !has_chapters {
+        return Json(ReturnData::err("书籍不存在"));
     }
+    // K4：书源书不再拒绝——legacy searchBookContent 对书源书同样走**已缓存章节**
+    // 全文匹配（searchChapter 读章节缓存），未缓存章节天然不参与搜索；
+    // master 的 book_chapters 表对书源书同样存缓存正文，直接复用同一搜索路径
     // 文件型本地书（legacy loc_book：正文不入章节表）——解析文件逐章匹配
     if let Some(book) = &shelf {
         if book.origin == "loc_book" && book.book_url.starts_with("storage/") {
@@ -15106,7 +15104,18 @@ mod tests {
         assert!(ret.0.is_success);
         assert_eq!(ret.0.data.as_array().unwrap().len(), 1);
 
-        // 书源书 → 仅支持本地书内容搜索
+        // 书源书（K4）：不再拒绝——走已缓存章节全文匹配（legacy searchChapter 语义）
+        state
+            .storage
+            .save_chapters(
+                "https://book.com/web",
+                &[(
+                    "第一章".to_string(),
+                    "网文正文第一章，关键词在缓存里。".to_string(),
+                )],
+            )
+            .await
+            .unwrap();
         let params: HashMap<String, String> = [
             ("key".into(), "关键词".into()),
             ("bookUrl".into(), "https://book.com/web".into()),
@@ -15120,8 +15129,11 @@ mod tests {
             None,
         )
         .await;
-        assert!(!ret.0.is_success);
-        assert_eq!(ret.0.error_msg, "仅支持本地书内容搜索");
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+        let hits = ret.0.data.as_array().unwrap();
+        assert_eq!(hits.len(), 1, "书源书应命中缓存章节: {:?}", ret.0.data);
+        assert_eq!(hits[0]["chapterIndex"], 0);
+        assert!(hits[0]["snippet"].as_str().unwrap().contains("关键词"));
 
         // 不存在的书 → 书籍不存在；缺 key / 缺 bookUrl → 参数错误
         let params: HashMap<String, String> = [
