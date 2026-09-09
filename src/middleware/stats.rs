@@ -45,8 +45,12 @@ where
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         // 按路径（不含 query）计数；uri().path() 无分配以外开销可忽略
-        let path = req.uri().path().to_string();
-        crate::service::monitor::record_request(&path);
+        let path = req.uri().path();
+        // m10：监控轮询不计自身——监控页每 10s 轮询两个端点，计入会显著虚增今日请求量
+        if path != "/reader3/getServerStats" && path != "/reader3/getSystemInfo" {
+            crate::service::monitor::record_request(path);
+        }
+        let path = path.to_string();
         let fut = self.inner.call(req);
         Box::pin(fut)
     }

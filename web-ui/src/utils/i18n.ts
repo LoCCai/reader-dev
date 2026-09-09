@@ -88,6 +88,7 @@ const zh: LangDict = {
   'route.store': '书仓',
   'route.users': '用户管理',
   'route.notFound': '页面不存在',
+  'route.serverStats': '服务监控',
 
   /* ============ 服务监控 ============ */
   'monitor.title': '服务监控',
@@ -523,6 +524,7 @@ const en: LangDict = {
   'route.store': 'Book Store',
   'route.users': 'User Manager',
   'route.notFound': 'Page Not Found',
+  'route.serverStats': 'Server Monitor',
 
   /* ============ Server monitor ============ */
   'monitor.title': 'Server Monitor',

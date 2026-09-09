@@ -2,7 +2,7 @@
 //!
 //! - 磁盘缓存：`storage/cache/images/{md5("{ns}|{url}")}.{ext}`（M2：键含命名空间——
 //!   跨用户隔离，用户 A 的会话 cookie 回源结果不会串给用户 B）——命中直接读盘，避免每次回源；
-//!   命中方（router）下发长 Cache-Control（public, max-age=31536000, immutable）
+//!   命中方（router）下发天级 Cache-Control（public, max-age=86400——m8：immutable 会钉死上游换图）
 //! - 容量上限：env `READER_IMAGE_CACHE_MB`（默认 512MB，0 = 禁用磁盘缓存），
 //!   超限按 LRU（最近最少使用，进程内单调时钟序）清理
 //! - 并发去重：同 (ns,url) 同时请求共享一次回源（内存 in-flight map + 每 key 信号量）
@@ -100,6 +100,28 @@ pub struct ImageCache {
 /// 取图结果：(字节, Content-Type, 上游状态码, 是否磁盘命中)
 pub type FetchOutcome = (Vec<u8>, Option<String>, u16, bool);
 
+/// m6：in-flight 条目 RAII 清理——请求（await 点）被取消时 Drop 仍会执行，
+/// 条目不再永久滞留。最后一个持有 gate 引用的参与者（无其余等待者/取图者时）
+/// 负责把条目从 inflight 表移除；仍有等待者则留给它们（唤醒后重查盘或接管回源）。
+struct InflightGuard<'a> {
+    cache: &'a ImageCache,
+    key: String,
+    gate: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl Drop for InflightGuard<'_> {
+    fn drop(&mut self) {
+        // map 内条目(1) + 本 guard(1) = 2 → 已无其他参与者；> 2 → 有等待者接管
+        if Arc::strong_count(&self.gate) <= 2 {
+            self.cache
+                .inflight
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&self.key);
+        }
+    }
+}
+
 impl ImageCache {
     /// 从应用配置构建：目录 = {storage_dir}/cache/images，容量 = env READER_IMAGE_CACHE_MB
     /// （默认 512MB；0 = 禁用磁盘缓存）
@@ -174,6 +196,13 @@ impl ImageCache {
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
         };
+        // m6：guard 先于锁 guard 构造 → 作用域结束时后析构（在锁释放后做计数清理）；
+        // 无显式读取，析构即生效
+        let _inflight_cleanup = InflightGuard {
+            cache: self,
+            key: key.clone(),
+            gate: gate.clone(),
+        };
         let _guard = gate.lock().await;
         // 等待期间可能已被并发请求写入 → 再次查盘
         if self.max_bytes > 0 {
@@ -190,12 +219,8 @@ impl ImageCache {
                 }
             }
         }
-        // 先释放信号量再移除条目：等待者此刻已被唤醒（重新查盘命中）；移除后新请求开新条目
-        drop(_guard);
-        self.inflight
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&key);
+        // m6：条目移除交由 inflight_cleanup（Drop）——等待者尚未全部退出时留给
+        // 最后退出者清理；此处无需（也不能）手动 remove
         result.map(|(bytes, ct, status)| (bytes, ct, status, false))
     }
 

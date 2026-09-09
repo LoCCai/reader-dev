@@ -163,6 +163,12 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
             "/reader3/file/parse",
             get(crate::api::files::parse).post(crate::api::files::parse),
         )
+        // R6b：文件管理器本地书导入预览 / zip 备份还原（legacy FileController 对齐）
+        .route("/reader3/file/importPreview", post(crate::api::files::import_preview))
+        .route(
+            "/reader3/file/restore",
+            get(crate::api::files::restore).post(crate::api::files::restore),
+        )
         .route("/reader3/file/get", get(crate::api::files::get))
         .route("/reader3/file/save", post(crate::api::files::save))
         .route("/reader3/file/mkdir", post(crate::api::files::mkdir))
@@ -565,7 +571,7 @@ fn sanitize_proxy_content_type(content_type: Option<&str>) -> String {
 /// 超时 10s；大小上限 5MB（Content-Length 预检 + 流式累计兜底）；Content-Type 透传。
 /// GAP 130：?fmt=webp&q=80 → 转码 webp 输出（image 编解码，失败回退原图透传）。
 /// GAP：磁盘缓存（storage/cache/images，LRU 容量上限 env READER_IMAGE_CACHE_MB 默认 512MB）——
-/// 命中直接读盘（Cache-Control 长缓存 public, max-age=31536000, immutable），未命中回源后写盘；
+/// 命中直接读盘（Cache-Control 天级 public, max-age=86400——m8），未命中回源后写盘；
 /// 同 URL 并发请求共享一次回源（内存 in-flight map）。
 /// secure 模式下按 accessToken 解析用户命名空间（与 /reader3 一致）。
 async fn assets_proxy(
@@ -605,9 +611,10 @@ async fn assets_proxy(
         .await
     {
         Ok((bytes, content_type, status, from_cache)) => {
-            // 磁盘命中 → 长缓存（内容按 URL 定址；上游图片变更依赖 LRU 淘汰换新）
+            // m8：盘命中也只给天级缓存——immutable 一年会把上游换图后的旧封面
+            // 钉死在浏览器（LRU 只按容量淘汰，不感知上游变更）
             let cache_control = if from_cache {
-                "public, max-age=31536000, immutable"
+                "public, max-age=86400"
             } else {
                 "public, max-age=3600"
             };
@@ -10380,7 +10387,7 @@ fn resolve_storage_path(
 }
 
 /// 用户 TXT 目录规则正则列表（启用 + 按 serialNumber 排序；失败/无规则返回空 → 调用方回退默认）
-async fn txt_toc_rule_regexes(state: &AppState, ns: &str) -> Vec<String> {
+pub(crate) async fn txt_toc_rule_regexes(state: &AppState, ns: &str) -> Vec<String> {
     match state.storage.get_txt_toc_rules(ns).await {
         Ok(rules) => rules
             .into_iter()
@@ -20624,8 +20631,8 @@ mod tests {
             resp.headers()
                 .get("Cache-Control")
                 .and_then(|v| v.to_str().ok()),
-            Some("public, max-age=31536000, immutable"),
-            "磁盘命中应下发长 Cache-Control"
+            Some("public, max-age=86400"),
+            "磁盘命中应下发天级 Cache-Control（m8：immutable 会钉死上游换图）"
         );
         let bytes = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
         assert_eq!(bytes.to_vec(), png);

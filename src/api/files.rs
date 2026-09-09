@@ -951,6 +951,203 @@ pub async fn parse(
     Json(ReturnData::ok(Value::Array(out)))
 }
 
+/// R6b：POST /reader3/file/importPreview（legacy FileController.importPreview）
+/// body `{"path": ["a.epub", ...]}`（相对 file home，兼容单字符串）→ 逐个构建本地书预览，
+/// 返回 `[{book, chapters}]`（不入架——saveBook 才入）。文件缺失/目录跳过（legacy continue）；
+/// 扩展名不在 txt/epub/umd/cbz/pdf 白名单 → 整单报错（文案含扩展名）。
+/// 解析失败按空章节返回（对齐 legacy TocEmptyException 形态，避免单坏文件拖垮整批）。
+pub async fn import_preview(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let ns = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body.and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    let paths: Vec<String> = body_json
+        .as_ref()
+        .and_then(|b| b.get("path"))
+        .map(|v| match v {
+            Value::Array(arr) => arr
+                .iter()
+                .map(|p| p.as_str().unwrap_or_default().to_string())
+                .collect(),
+            Value::String(s) => vec![s.clone()],
+            _ => Vec::new(),
+        })
+        .unwrap_or_default();
+    if paths.is_empty() {
+        return Json(ReturnData::err("参数错误"));
+    }
+    let home = str_param(&params, body_json.as_ref(), "home");
+    let user = state.storage.find_user(&ns).await.ok().flatten();
+    let manager = manager_ok(&state.storage.config, &params, body_json.as_ref());
+    let base = match file_home(
+        &state.storage.config,
+        &ns,
+        &home,
+        false,
+        false,
+        manager,
+        user.as_ref(),
+    ) {
+        Ok(b) => b,
+        Err(ret) => return Json(ret),
+    };
+    const BOOK_EXTS: &[&str] = &["txt", "epub", "umd", "cbz", "pdf"];
+    let storage_root = state.storage.config.storage_dir();
+    let user_rules = crate::api::router::txt_toc_rule_regexes(&state, &ns).await;
+    let mut out: Vec<Value> = Vec::new();
+    for path in paths {
+        if path.is_empty() {
+            continue;
+        }
+        let Some(file) = resolve_secure_path(&base, &path) else {
+            continue;
+        };
+        // legacy：不存在或是目录 → 跳过该条
+        if !file.is_file() {
+            continue;
+        }
+        let file_name = file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let ext = crate::service::local_book::file_ext(&file_name);
+        if !BOOK_EXTS.contains(&ext.as_str()) {
+            return Json(ReturnData::err(format!("不支持导入{ext}格式的书籍文件")));
+        }
+        // bookUrl：相对 storage 根的 POSIX 路径（与 file/parse 入架及 resolve_loc_book_file 一致）
+        let rel_from_storage = file
+            .strip_prefix(&storage_root)
+            .map(|rp| rp.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| file.to_string_lossy().replace('\\', "/"));
+        let (bname, bauthor) = crate::service::local_book::analyze_name_author(&file_name);
+        let display_name = if bname.is_empty() {
+            std::path::Path::new(&file_name)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or(file_name.clone())
+        } else {
+            bname
+        };
+        let titles: Vec<String> =
+            crate::service::local_book::parse_loc_book_path(
+                &file,
+                &user_rules,
+                crate::service::local_book::DEFAULT_EPUB_TOC_MODE,
+                false,
+            )
+            .map(|imported| imported.chapters.iter().map(|c| c.title.clone()).collect())
+            .unwrap_or_default();
+        let chapters: Vec<Value> = titles
+            .iter()
+            .enumerate()
+            .map(|(i, title)| {
+                json!({
+                    "title": title,
+                    "url": format!("{rel_from_storage}#{i}"),
+                    "index": i,
+                    "isVolume": false,
+                })
+            })
+            .collect();
+        out.push(json!({
+            "book": {
+                "name": display_name,
+                "author": bauthor,
+                "kind": format!("{}书籍", ext.to_uppercase()),
+                "bookUrl": rel_from_storage,
+                "origin": "loc_book",
+                "tocUrl": rel_from_storage,
+                "type": crate::service::local_book::local_book_type(&ext),
+            },
+            "chapters": chapters,
+        }));
+    }
+    Json(ReturnData::ok(Value::Array(out)))
+}
+
+/// R6b：GET+POST /reader3/file/restore（legacy FileController.restore）
+/// path（POST body / GET query，默认 "/"）指向 file home 内的 zip 备份文件 →
+/// 复用 restore_backup_zip 核心恢复。非 zip 报「路径不是zip备份文件」；缺失报「路径不存在」。
+pub async fn restore(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let ns = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body.and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    let path = {
+        let p = str_param(&params, body_json.as_ref(), "path");
+        if p.is_empty() {
+            "/".to_string()
+        } else {
+            p
+        }
+    };
+    if crate::service::local_book::file_ext(&path) != "zip" {
+        return Json(ReturnData::err("路径不是zip备份文件"));
+    }
+    let home = str_param(&params, body_json.as_ref(), "home");
+    let user = state.storage.find_user(&ns).await.ok().flatten();
+    let manager = manager_ok(&state.storage.config, &params, body_json.as_ref());
+    let base = match file_home(
+        &state.storage.config,
+        &ns,
+        &home,
+        false,
+        false,
+        manager,
+        user.as_ref(),
+    ) {
+        Ok(b) => b,
+        Err(ret) => return Json(ret),
+    };
+    let Some(file) = resolve_secure_path(&base, &path) else {
+        return Json(ReturnData::err("路径不存在"));
+    };
+    if !file.is_file() {
+        return Json(ReturnData::err("路径不存在"));
+    }
+    let bytes = match tokio::fs::read(&file).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!("file/restore 读取失败 [{}]: {e}", file.display());
+            return Json(ReturnData::err("读取失败"));
+        }
+    };
+    let overwrite = params
+        .get("overwrite")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+        || body_json
+            .as_ref()
+            .and_then(|b| b.get("overwrite"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    match state
+        .storage
+        .restore_backup_zip(&ns, &bytes, overwrite)
+        .await
+    {
+        Ok(report) => Json(ReturnData::ok(
+            serde_json::to_value(report).unwrap_or(json!(null)),
+        )),
+        Err(e) => {
+            tracing::error!("file/restore 恢复失败 [{ns}] {path}: {e}");
+            Json(ReturnData::err(format!("恢复失败：{e}")))
+        }
+    }
+}
+
 pub async fn delete_multi(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -1736,6 +1933,86 @@ mod tests {
                 .unwrap(),
             b"hello range"
         );
+
+        cleanup(state, dir).await;
+    }
+
+    /// R6b：importPreview 逐文件预览 {book, chapters}；restore 非 zip / 缺失路径文案对齐
+    #[tokio::test]
+    async fn test_import_preview_and_restore() {
+        let (state, dir) = test_state("r6b").await;
+        let base = state
+            .storage
+            .config
+            .storage_dir()
+            .join("data")
+            .join("default");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("mybook.txt"), "第一章 开端\n正文一\n\n第二章 发展\n正文二\n").unwrap();
+        std::fs::write(base.join("bad.exe"), "MZ").unwrap();
+
+        // importPreview：txt → [{book, chapters}]（章节标题解析 + bookUrl 相对 storage 根）
+        let body = Bytes::from(r#"{"path":["/mybook.txt","/missing.txt"],"home":""}"#);
+        let ret = import_preview(
+            State(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Some(body),
+        )
+        .await;
+        assert!(ret.0.is_success, "importPreview 应成功: {}", ret.0.error_msg);
+        let arr = ret.0.data.as_array().cloned().unwrap_or_default();
+        assert_eq!(arr.len(), 1, "缺失文件应跳过: {arr:?}");
+        assert_eq!(arr[0]["book"]["origin"], "loc_book");
+        assert_eq!(arr[0]["book"]["type"], 0, "txt → 文本型本地书");
+        assert!(
+            !arr[0]["chapters"].as_array().is_some_and(|c| c.is_empty()),
+            "txt 章节应可解析: {arr:?}"
+        );
+
+        // importPreview：扩展名白名单外 → 整单报错（文案含扩展名）
+        let body = Bytes::from(r#"{"path":["/bad.exe"],"home":""}"#);
+        let ret = import_preview(
+            State(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Some(body),
+        )
+        .await;
+        assert!(!ret.0.is_success);
+        assert_eq!(ret.0.error_msg, "不支持导入exe格式的书籍文件");
+
+        // importPreview：缺 path → 参数错误
+        let ret = import_preview(
+            State(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Some(Bytes::from(r#"{"home":""}"#)),
+        )
+        .await;
+        assert!(!ret.0.is_success);
+
+        // restore：非 zip → 路径不是zip备份文件
+        let ret = restore(
+            State(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Some(Bytes::from(r#"{"path":"/mybook.txt","home":""}"#)),
+        )
+        .await;
+        assert!(!ret.0.is_success);
+        assert_eq!(ret.0.error_msg, "路径不是zip备份文件");
+
+        // restore：文件不存在 → 路径不存在
+        let ret = restore(
+            State(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Some(Bytes::from(r#"{"path":"/nope.zip","home":""}"#)),
+        )
+        .await;
+        assert!(!ret.0.is_success);
+        assert_eq!(ret.0.error_msg, "路径不存在");
 
         cleanup(state, dir).await;
     }

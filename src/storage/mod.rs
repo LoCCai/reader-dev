@@ -3907,19 +3907,23 @@ impl Storage {
 
     /// 新建用户
     pub async fn insert_user(&self, user: &User) -> Result<()> {
+        // m1：token_map 一并写入——MongoDB 恢复路径（restore_from_mongodb → insert_user）
+        // 否则会 INSERT OR REPLACE 清空 users.token_map，多设备会话全部掉线
+        let token_map_json = user.token_map.as_ref().map(|v| v.to_string());
         sqlx::query(
             r#"
             INSERT OR REPLACE INTO users
-                (username, password, salt, token, enable_webdav, enable_local_store,
+                (username, password, salt, token, token_map, enable_webdav, enable_local_store,
                  enable_book_source, enable_rss_source, book_source_limit, book_limit,
                  is_admin, last_login_at, created_at, user_namespace)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
             "#,
         )
         .bind(&user.username)
         .bind(&user.password)
         .bind(&user.salt)
         .bind(&user.token)
+        .bind(&token_map_json)
         .bind(user.enable_webdav)
         .bind(user.enable_local_store)
         .bind(user.enable_book_source)
@@ -7039,6 +7043,27 @@ mod tests {
             .is_empty());
         assert_eq!(storage.logout_user("ghost").await.unwrap(), 0);
         cleanup(storage, "logout").await;
+    }
+
+    /// m1：insert_user 必须写入 token_map——MongoDB 恢复路径经 insert_user 落库，
+    /// 漏写会导致 INSERT OR REPLACE 清空多设备会话（全部次设备掉线）
+    #[tokio::test]
+    async fn test_insert_user_preserves_token_map() {
+        let storage = test_storage("insmap").await;
+        let token_map = serde_json::json!({ "tok-a": 111, "tok-b": 222 });
+        storage
+            .insert_user(&User {
+                username: "alice".into(),
+                token: "t0".into(),
+                token_map: Some(token_map.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let user = storage.find_user("alice").await.unwrap().unwrap();
+        assert_eq!(user.token_map, Some(token_map), "恢复的 token_map 必须保留");
+
+        cleanup(storage, "insmap").await;
     }
 
     /// GAP 59：登录追加 token（token_map 上限 5、去重）；登出仅移除当前设备 token
