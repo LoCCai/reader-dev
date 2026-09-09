@@ -106,6 +106,19 @@ C4 清零。测试缺口清单（REMAINING-WORK C 类）仅剩 C3 人工验收�
 
 ---
 
+# 第七轮（同日）：真实书源实测——导入兼容性修复 + 环境限制确认
+
+按「实测驱动」策略，用 `scripts/backup-book-sources-431.json`（431 个真实书源备份）做导入与逐源搜索实测：
+
+| # | 发现 | 处置 |
+|---|---|---|
+| **新 bug** | **真实书源备份整批导入失败**（实测 12/12 全拒）：① 布尔字段以 `1/0` 整数编码（Gson 宽容、serde 严格拒绝）；② `header` 为 JSON 对象、`exploreUrl` 为分类数组、`loginUi` 为控件数组（serde String 拒绝容器） | 新增 `util/serde_bool.rs`（bool/1/0/"true"/null 宽容反序列化）与 `util/json_text.rs`（容器→紧凑 JSON 字符串规范），接入 BookSource 的 enabled/enabledExplore/enabledCookieJar/header/exploreUrl/loginUi；`parse_explore_entries` 支持 JSON 数组形态。修复后 12/12 导入成功；单元测试 4 例 |
+| 环境 | **reader-dev.exe 出站被安全软件按应用拦截**（http_fetch os error 10013——与 rustup 下载失败同根源；curl/python 白名单放行而新编译 exe 被拦，80zw 经 curl 301 可达而服务进程内 10013） | 非代码问题。真实源实测需先在安全软件中放行 reader-dev.exe；固化 `scripts/real-source-probe.py`（含本机地址校验与 10013 诊断提示）供放行后复测 |
+
+实测方法论沉淀：导入兼容性这类问题只有真实数据能暴露（431 源备份 100% 复现，而全部 743 个合成测试用例均通过）。
+
+---
+
 # 第六轮（同日）：K4 书源书全文检索实现 + 积压清单全面核实刷新
 
 | # | 项 | 处置 |

@@ -50,10 +50,33 @@ fn entry_type(title: &str, url: &str) -> String {
 }
 
 /// 解析 exploreUrl（legado 语义）：
+/// - JSON 数组（[{"title","url"},...]，真实书源常见形态——导入时规范为紧凑 JSON 字符串）
 /// - `@js:代码`：执行 JS（返回 JSON.stringify([{title,url},...])）→ 解析条目
 /// - 普通多行 URL：每行一个条目（title 从 URL 尾部提取）
 pub fn parse_explore_entries(explore_url: &str) -> Vec<ExploreEntry> {
     let mut entries = Vec::new();
+    let trimmed = explore_url.trim();
+    // 整段 JSON 数组：直接结构化解析（失败/全空落回逐行）
+    if trimmed.starts_with('[') {
+        if let Ok(serde_json::Value::Array(list)) =
+            serde_json::from_str::<serde_json::Value>(trimmed)
+        {
+            for item in list {
+                let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                if !url.is_empty() {
+                    entries.push(ExploreEntry {
+                        title: title.to_string(),
+                        url: url.to_string(),
+                        r#type: entry_type(title, url),
+                    });
+                }
+            }
+            if !entries.is_empty() {
+                return entries;
+            }
+        }
+    }
     let lines: Vec<&str> = explore_url.lines().collect();
     let mut i = 0;
     while i < lines.len() {
