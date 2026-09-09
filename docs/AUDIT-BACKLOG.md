@@ -11,7 +11,7 @@
 - [x] R3 方法补齐：`POST /reader3/exportBook`（现仅 GET）
 - [x] R4 路由：`/reader3/book/saveBookConfig`（body bookUrl+pdfImageWidth → 存 books.read_config）
 - [x] R5 路由：`/reader3/user/downloadBackupFile`
-- [x] R6a 路由：`/reader3/file/parse` 已补齐（递归扫描+import 入架）；[ ] R6b `/reader3/file/importPreview` 与 `/reader3/file/restore` 仍待办（restore 可转发 restoreFromZip/Webdav 逻辑）
+- [x] R6a 路由：`/reader3/file/parse` 已补齐（递归扫描+import 入架）；[x] R6b `/reader3/file/importPreview` 与 `/reader3/file/restore` 已补齐（2026-09-10：files.rs import_preview/restore，restore 复用 restore_backup_zip，文案逐字对齐 legacy）
 - [x] K1 deleteBookGroup：兼容 body 键 `groupId`（现仅认 id → 必然参数错误）
 - [x] K2 saveBookGroupOrder：兼容 `[{"groupId","order"}]` 形态
 - [x] K3 getBookGroups：输出增加 `groupId`/`groupName` 别名字段（legacy 客户端解析依赖）
@@ -92,17 +92,17 @@
 ## 七、Pro JAR 反编译深审发现（第三轮：License/File/User + 引擎未覆盖文件）
 
 ### 引擎层 P1（影响真实书源）
-- [ ] EG1 正则多链缺失：`regA&&regB` 应逐条过滤而非当一条正则编译；全捕获组提取（group 0..n）
+- [x] EG1 正则多链缺失：`regA&&regB` 逐条过滤 + 全捕获组提取（已实现，rule.rs:1077-1120 实测确认）
 - [ ] EG2 XPath 非良构 HTML 解析失败（sxd 严格 XML vs JsoupXpath 强容错）——解析失败时用 CSS 链兜底
-- [ ] EG3 JsonPath 裸存在性真值：legacy 键存在即匹配（含 null/false/空串）；master 剔除 → 含 vip:false 的列表项被误丢弃
-- [ ] EG4 cache 重启丢缓存：CACHE_STORE 内存 HashMap → 需 SQLite 落盘持久化（书源登录 token 跨进程存活）
-- [ ] EG5 书源代理不作用直连请求：proxy 应传给 reqwest::Proxy 并缓存 Client
+- [x] EG3 JsonPath 裸存在性真值（已实现，rule.rs test_jsonpath_filter_bare_existence 确认）
+- [x] EG4 cache 重启丢缓存（已实现：js.rs JS_CACHE_STORAGE + SQLite get_js_cache/load_js_cache，serve() 启动注册+恢复——2026-09-10 代码核实，本文档此前漏记）
+- [x] EG5 书源代理不作用直连请求（已实现，crawler.rs reqwest::Proxy 确认）
 
 ### Pro 独有功能（整模块或端点缺失）
 ~~PJ1 LicenseController 授权系统~~ 用户决定移除，不实现
 - [ ] PJ2 uploadFile 同名异义：legacy /reader3/uploadFile 是 assets/{ns}/{type}/ 上传返 URL 列表（非书仓上传）；需新增独立 handler
-- [ ] PJ3 file/restore 别名路由 + books/进度恢复扩展
-- [ ] PJ4 textToSpeechCn 引擎实现
+- [x] PJ3 file/restore 别名路由（2026-09-10 R6b 补齐 books/ 进度恢复扩展仍待办）
+- [x] PJ4 textToSpeechCn 引擎实现（commit 6916b48，本文档此前漏记）
 - [ ] PJ5 mergeBookCacheInfo/saveBookInfoCache 进程内书籍信息缓存（已在 P2 批完成 ✓）
 
 ### JsonPath 过滤表达式补缺
