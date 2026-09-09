@@ -8301,9 +8301,14 @@ async fn search_book_multi_sse(
                 (i as i64, format!("data: {payload}\n\n"))
             }));
         }
+        // 并发完成顺序随机（FuturesUnordered）——last 必须取已交付的最大索引：
+        // 若用「最后完成的索引」，乱序时 end 的 lastIndex/isEnd 会倒退，
+        // 客户端按 lastIndex 续传将重复搜索已交付的源（C4 e2e 实测捕获）
         let mut last = last_index;
         while let Some((i, text)) = tasks.next().await {
-            last = i;
+            if i > last {
+                last = i;
+            }
             if tx.send(Ok(Bytes::from(text))).await.is_err() {
                 break; // 客户端断开
             }

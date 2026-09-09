@@ -92,3 +92,14 @@
 | m9 | 图片缓存同步 IO 阻塞 worker | `read_disk`/`evict_lru` 重构为「锁内只做索引查改与字节记账，文件 IO 在锁外」——大图读盘/删除不再拖着索引锁，其他请求的缓存命中路径不再被阻塞。良性竞态（读盘瞬间条目被 LRU 清理）按未命中回源处理，正确性不变；孤儿文件由启动 seed 重新纳管。新增并发压力测试（24 线程 × 144 URL 持续驱逐下记账一致），重复跑 5 次无偶发 |
 
 至此本轮审计清单中可自动化处置项全部清零；剩余：m13（已有 8192 封顶，风险低，留档观察）、C3（EPUB 真机人工验收）。
+
+---
+
+# 第五轮（同日）：C4 SSE e2e——并捕获一个真实并发 bug
+
+| # | 项 | 处置 |
+|---|---|---|
+| C4 | searchBookMultiSSE 无集成测试 | 新增 `tests/e2e_sse.rs`：起**完整 HTTP 应用**（`router()` 首次用于集成测试）+ 双源 mock 书站 + reqwest 走真实 SSE 流。断言：①不过滤双源结果齐 + `event: end` 收尾；②`bookSourceUrl` 精确单源过滤（origin 全为指定源）；③`concurrentCount=1` 收敛单飞仍正常；④`lastIndex` 越界语义 |
+| **新 bug** | **SSE end 的 lastIndex/isEnd 乱序倒退** | 测试首次运行即暴露：并发搜索用 `FuturesUnordered`，`last` 取「最后完成」的索引——乱序完成时 end 事件 `lastIndex` 倒退、`isEnd` 误报 false（2 源场景实测 `isEnd:false`），客户端按 lastIndex 续传会**重复搜索已交付源**。修复：`last` 取已交付最大索引（`i.max(last)`）。修复后 3 次重复运行稳定通过 |
+
+C4 清零。测试缺口清单（REMAINING-WORK C 类）仅剩 C3 人工验收项。
