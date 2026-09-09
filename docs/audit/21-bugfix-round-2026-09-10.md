@@ -70,3 +70,15 @@
 | PJ2 | /reader3/uploadFile assets 上传 | 核实已实现（router.rs:496 + 端到端测试 19398），文档漏记，积压清单翻 [x] |
 
 遗留不变：m9/m12/m13/m14、backupToMongodb 全命名空间、C3 人工验收。
+
+---
+
+# 第三轮（同日）：mongodb 备份性能 + 安全标注
+
+| # | 项 | 处置 |
+|---|---|---|
+| F11 尾 | backupToMongodb 全命名空间遍历 | 核实已实现（`backup_to_mongodb` ns 为空 → `list_namespaces` 逐个备份，router.rs:6716 注释即 legacy 语义；`mongo_backup_ns` 接受 body/query ns），积压清单翻 [x] |
+| m14 | MongoDB 备份逐文档往返 | `write_docs` 改为**有界并发（16）replace_one**——千本文档书架墙钟时间约降一个数量级；语义与串行等价（_id 互异、顺序无关）。注：driver 3.8 的 `bulk_write` 仅 MongoDB 8.0+ 服务端可用，备份目标版本不可控，故不用 bulkWrite（实测源码 `action/bulk_write.rs:27`） |
+| m12 | camoufox cookie 外传 | `docs/SECURITY.md` 已知限制第 8 条：默认 127.0.0.1 无风险，配置远端地址时的风险与缓解（自控实例/加密隧道/TLS）如实标注 |
+
+剩余留档：m9（image_cache 同步 IO，需锁结构重构）、m13（login_limit 表已 8192 封顶，风险低）、C3（人工验收）。
