@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "mimosa-hook-status/v1",
+  "recordedAt": "2026-09-09T19:29:38.796Z",
+  "sessionId": "sess_f72b493e-1fbc-4e2a-9a70-d93fe7deb26a",
+  "event": "PostToolUse",
+  "toolName": "Edit",
+  "file": "docs/audit/21-bugfix-round-2026-09-10.md",
+  "outcome": "clear",
+  "coverage": "complete",
+  "findingCount": 0,
+  "durationMs": 4,
+  "hostState": "hook_complete",
+  "reportHint": ".mimosa/reports/"
+}
