@@ -119,6 +119,35 @@ C4 清零。测试缺口清单（REMAINING-WORK C 类）仅剩 C3 人工验收�
 
 ---
 
+# 第八轮（同日）：全量 431 源离线引擎复现——org.jsoup.Jsoup 等 shim 补齐
+
+写离线复现器（全量 431 源的 JS 型 searchUrl 直接过当前引擎的 URL 构造管线，不出网），
+把 8 月书源审计报告的「js 缺口 70 源」重新度量：
+
+| 度量 | 修复前 | 修复后 |
+|---|---|---|
+| URL 构造 OK | 32 | **38** |
+| null-to-object | 11 | **4**（剩余为 `.match()` 未命中的离线预期行为） |
+| not-callable | 8 | 9（诊断确认多为**书源自身 bug**，如蓝批系模板把 `Array` 当 `String` 调 `.startsWith`） |
+| jsLib 函数未定义 | 3 | 3（源引用的辅助函数不在其 jsLib 中——书源侧问题） |
+
+## 引擎修复（实测驱动）
+
+| # | 缺口 | 影响 | 修复 |
+|---|---|---|---|
+| JS-1 | **`org.jsoup.Jsoup` 类名缺失**——shim 只装了 `org.jsoup.parse`，真实书源标准写法 `org.jsoup.Jsoup.parse(html)` 全部断链 | 42 源 / 184 处调用 | `Jsoup` 类（含 parse）挂到 `org.jsoup.Jsoup`；旧形态 `org.jsoup.parse` 保留 |
+| JS-2 | `Jsoup.connect(url)` 缺失 | 4 源 | 极简 Connection shim：`data/header/headers/timeout/ignoreContentType/requestBody/method` 链式 + `get()/post()` 经 java.ajax 管线返回 Document |
+| JS-3 | `java.getStringList` 缺失 | 120 处调用 | `java.getString` 列表形态（css_chain 全量结果逐条提取） |
+| JS-4 | `java.startBrowser` 缺失 | 178 处调用 | fire-and-forget stub（返回 false 不中断脚本流；真实求解走 crawler webView/camoufox） |
+| JS-5 | Response `headers()` 不支持 jsoup Map 语义 | `cs.headers().get("set-cookie")` 型消费（城堡小说） | 双模式：`headers(name)`→值数组（原语义）；`headers()`→含 `.get(name)` 的 Map 对象 |
+
+诊断方法：逐行累积求值定位首个失败行 + `typeof` 全局内省（本轮排除了 org/cookie/baseUrl 等 8 月报告中的缺口——AR5/E12 修复已覆盖）。
+
+剩余实测失败均为**书源侧问题或离线预期行为**：蓝批系模板数组调 startsWith（作者 bug）、
+`.match()` 离线未命中、jsLib 未定义的辅助函数、API 型源需在线签名。
+
+---
+
 # 第六轮（同日）：K4 书源书全文检索实现 + 积压清单全面核实刷新
 
 | # | 项 | 处置 |

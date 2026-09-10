@@ -2035,16 +2035,27 @@ fn install_globals(context: &mut Context, bridge: &JsBridge) -> Result<()> {
         .register_global_property(JsString::from("cache"), cache_obj, Attribute::all())
         .map_err(|e| anyhow!("cache 对象注册失败: {e}"))?;
 
-    // org.jsoup.Jsoup.parse(html)：Document/Elements shim（scraper 后端）
-    let jsoup = ObjectInitializer::new(context)
+    // org.jsoup：真实书源标准调用 `org.jsoup.Jsoup.parse(html)`（大写类名——实测 42 源
+    // 184 处）；`parse` 同时挂在 org.jsoup（旧兼容形态）
+    let jsoup_parse_fn = unsafe { NativeFunction::from_closure(jsoup_parse) };
+    let jsoup_class = ObjectInitializer::new(context)
+        .function(jsoup_parse_fn, JsString::from("parse"), 1)
+        .function(
+            jsoup_connect_factory(Arc::clone(&bridge.inner)),
+            JsString::from("connect"),
+            1,
+        )
+        .build();
+    let jsoup_legacy = ObjectInitializer::new(context)
         .function(
             unsafe { NativeFunction::from_closure(jsoup_parse) },
             JsString::from("parse"),
             1,
         )
+        .property(JsString::from("Jsoup"), jsoup_class, Attribute::all())
         .build();
     let org = ObjectInitializer::new(context)
-        .property(JsString::from("jsoup"), jsoup, Attribute::all())
+        .property(JsString::from("jsoup"), jsoup_legacy, Attribute::all())
         .build();
     context
         .register_global_property(JsString::from("org"), org, Attribute::all())
@@ -2626,6 +2637,16 @@ fn build_bridge_objects(bridge: &JsBridge, context: &mut Context) -> Result<(JsO
             bind(bridge, java_start_browser_await),
             JsString::from("startBrowserAwait"),
             3,
+        )
+        .function(
+            bind(bridge, java_start_browser),
+            JsString::from("startBrowser"),
+            3,
+        )
+        .function(
+            bind(bridge, java_get_string_list),
+            JsString::from("getStringList"),
+            1,
         )
         .function(
             bind(bridge, java_set_content),
@@ -3663,6 +3684,41 @@ fn java_get_string(
         None => String::new(),
     };
     Ok(JsValue::from(JsString::from(text)))
+}
+
+/// `java.getStringList(ruleStr[, mContent[, isUrl]])`：java.getString 列表形态——
+/// css_chain 全量结果逐条提取文本（legacy AnalyzeRule.getStringList）
+fn java_get_string_list(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let rule = js_value_to_string(args.get_or_undefined(0), context);
+    let doc = current_doc(inner)?;
+    let arr = JsArray::new(context);
+    for r in crate::parser::css_chain::css_chain(&rule, &doc) {
+        let f = scraper::Html::parse_fragment(&r);
+        let t = f
+            .root_element()
+            .text()
+            .collect::<String>()
+            .trim()
+            .to_string();
+        let item = if t.is_empty() { r } else { t };
+        arr.push(JsValue::from(JsString::from(item)), context)?;
+    }
+    Ok(JsValue::from(arr))
+}
+
+/// `java.startBrowser(url, title[, isForeground])`：fire-and-forget 语义 stub——
+/// 引擎层 CF/质询经 crawler webView/camoufox 链路统一处理；返回 false 不中断脚本流
+/// （真实浏览器等待版为 `java.startBrowserAwait`）
+fn java_start_browser(
+    _inner: &JsBridgeInner,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(JsValue::from(false))
 }
 
 /// `java.getElements(rule)`：对已存文档用 css_chain 规则求值。
@@ -5740,6 +5796,34 @@ fn http_response_object(
         obj.function(
             unsafe {
                 NativeFunction::from_closure(move |_t, args, ctx| {
+                    // 双模式（jsoup Connection.Response 语义）：
+                    // - headers(name) → 该名下值数组
+                    // - headers() → 全部响应头的 Map 对象（支持 .get(name)，城堡小说等源
+                    //   以 `cs.headers().get("set-cookie")` 消费）
+                    if args.first().map_or(true, |v| v.is_undefined() || v.is_null()) {
+                        let headers = Arc::clone(&headers_arc);
+                        let mut map = ObjectInitializer::new(ctx);
+                        map.function(
+                            unsafe {
+                                NativeFunction::from_closure(move |_t, args, ctx| {
+                                    let name = js_value_to_string(
+                                        args.get_or_undefined(0),
+                                        ctx,
+                                    )
+                                    .to_lowercase();
+                                    let hit = headers
+                                        .iter()
+                                        .find(|(k, _)| k.to_lowercase() == name)
+                                        .map(|(_, v)| v.clone())
+                                        .unwrap_or_default();
+                                    Ok(JsValue::from(JsString::from(hit)))
+                                })
+                            },
+                            JsString::from("get"),
+                            1,
+                        );
+                        return Ok(map.build().into());
+                    }
                     let name = js_value_to_string(args.get_or_undefined(0), ctx).to_lowercase();
                     let vals: Vec<JsValue> = headers
                         .iter()
@@ -5852,6 +5936,201 @@ fn java_head(inner: &JsBridgeInner, args: &[JsValue], context: &mut Context) -> 
 fn jsoup_parse(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let html = js_value_to_string(_args.get_or_undefined(0), context);
     jsoup_document(&html, context)
+}
+
+// ---- org.jsoup.Jsoup.connect(url)：jsoup Connection 极简 shim（4 个真实源使用）----
+// 链式 data(k,v)/header(k,v)/headers(map)/timeout(ms)/ignoreContentType(b)/requestBody(b)
+// + get()/post() → 经 java.ajax 管线抓取，返回 Document shim
+
+#[derive(Default)]
+struct JsoupConnectState {
+    url: String,
+    data: Vec<(String, String)>,
+    headers: std::collections::HashMap<String, String>,
+    body_override: Option<String>,
+    method_post: bool,
+}
+
+fn jsoup_connect_factory(inner: std::sync::Arc<JsBridgeInner>) -> NativeFunction {
+    unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            jsoup_connect(&inner, args, ctx)
+        })
+    }
+}
+
+fn jsoup_connect(
+    inner: &std::sync::Arc<JsBridgeInner>,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let url = js_value_to_string(args.get_or_undefined(0), context);
+    let state = Rc::new(RefCell::new(JsoupConnectState {
+        url,
+        ..Default::default()
+    }));
+    let obj = JsObject::with_object_proto(context.intrinsics());
+
+    macro_rules! chain_store {
+        ($name:literal, $store:expr) => {
+            let st = Rc::clone(&state);
+            obj.set(
+                JsString::from($name),
+                FunctionObjectBuilder::new(context.realm(), unsafe {
+                    NativeFunction::from_closure(move |this, args: &[JsValue], ctx| {
+                        $store(&st, args, ctx);
+                        Ok(this.clone().into())
+                    })
+                })
+                .name($name)
+                .length(2)
+                .build(),
+                true,
+                context,
+            )?;
+        };
+    }
+
+    chain_store!("data", |st: &Rc<RefCell<JsoupConnectState>>,
+                          args: &[JsValue],
+                          ctx: &mut Context| {
+        let k = js_value_to_string(args.get_or_undefined(0), ctx);
+        let v = js_value_to_string(args.get_or_undefined(1), ctx);
+        st.borrow_mut().data.push((k, v));
+    });
+    chain_store!("header", |st: &Rc<RefCell<JsoupConnectState>>,
+                            args: &[JsValue],
+                            ctx: &mut Context| {
+        let k = js_value_to_string(args.get_or_undefined(0), ctx);
+        let v = js_value_to_string(args.get_or_undefined(1), ctx);
+        st.borrow_mut().headers.insert(k, v);
+    });
+    chain_store!("headers", |st: &Rc<RefCell<JsoupConnectState>>,
+                            args: &[JsValue],
+                            ctx: &mut Context| {
+        if let Ok(json) = args.get_or_undefined(0).to_json(ctx) {
+            if let Some(map) = json.as_object() {
+                for (k, v) in map {
+                    let v = match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };                    st.borrow_mut().headers.insert(k.clone(), v);
+                }
+            }
+        }
+    });
+    chain_store!(
+        "requestBody",
+        |st: &Rc<RefCell<JsoupConnectState>>, args: &[JsValue], ctx: &mut Context| {
+            st.borrow_mut().body_override =
+                Some(js_value_to_string(args.get_or_undefined(0), ctx));
+        }
+    );
+    // timeout/ignoreContentType/method：记录语义、无需处理
+    chain_store!("timeout", |_: &Rc<RefCell<JsoupConnectState>>,
+                            _: &[JsValue],
+                            _: &mut Context| {});
+    chain_store!(
+        "ignoreContentType",
+        |_: &Rc<RefCell<JsoupConnectState>>, _: &[JsValue], _: &mut Context| {}
+    );
+    chain_store!(
+        "method",
+        |st: &Rc<RefCell<JsoupConnectState>>, args: &[JsValue], ctx: &mut Context| {
+            let m = js_value_to_string(args.get_or_undefined(0), ctx);
+            st.borrow_mut().method_post = m.to_ascii_uppercase().contains("POST");
+        }
+    );
+
+    // get()/post()：执行抓取
+    for name in ["get", "post"] {
+        let st = Rc::clone(&state);
+        let inner = std::sync::Arc::clone(inner);
+        obj.set(
+            JsString::from(name),
+            FunctionObjectBuilder::new(context.realm(), unsafe {
+                NativeFunction::from_closure(move |_this, _args, ctx| {
+                    let (method, body_override, op) = if name == "post" {
+                        ("POST", None, "Jsoup.connect.post")
+                    } else {
+                        ("GET", None, "Jsoup.connect.get")
+                    };
+                    let (url, data, headers, body_override, forced_post) = {
+                        let st = st.borrow();
+                        let mut url = st.url.clone();
+                        if method == "GET" && !st.data.is_empty() {
+                            let q = st
+                                .data
+                                .iter()
+                                .map(|(k, v)| {
+                                    format!(
+                                        "{}={}",
+                                        urlencoding::encode(k),
+                                        urlencoding::encode(v)
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join("&");
+                            url.push(if url.contains('?') { '&' } else { '?' });
+                            url.push_str(&q);
+                        }
+                        let body = if method == "POST" {
+                            Some(
+                                body_override.clone().unwrap_or_else(|| {
+                                    st.data
+                                        .iter()
+                                        .map(|(k, v)| {
+                                            format!(
+                                                "{}={}",
+                                                urlencoding::encode(k),
+                                                urlencoding::encode(v)
+                                            )
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("&")
+                                }),
+                            )
+                        } else {
+                            body_override.clone()
+                        };
+                        (
+                            url,
+                            st.data.clone(),
+                            st.headers.clone(),
+                            body,
+                            st.method_post,
+                        )
+                    };
+                    let _ = data;
+                    let method = if forced_post && name == "get" { "POST" } else { method };
+                    match java_ajax_fetch(
+                        &inner,
+                        &url,
+                        method,
+                        body_override.as_deref(),
+                        15,
+                        op,
+                        true,
+                    ) {
+                        Ok((body, _, _)) => jsoup_document(&body, ctx),
+                        Err(e) => {
+                            let _ = headers;
+                            Err(e)
+                        }
+                    }
+                })
+            })
+            .name(name)
+            .length(0)
+            .build(),
+            true,
+            context,
+        )?;
+    }
+    Ok(obj.into())
 }
 
 /// Document 对象
@@ -8021,5 +8300,57 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r, "78SsqOio6VGktE4eStDdPw==");
+    }
+
+    // ---- 实测驱动补齐（2026-09-10，431 源离线复现器发现）----
+
+    #[test]
+    fn org_jsoup_jsoup_class_parse() {
+        // 真实书源标准形态 org.jsoup.Jsoup.parse（大写类名——42 源 184 处）
+        let r = eval_js(
+            r#"org.jsoup.Jsoup.parse('<b>hi</b>').select('b').text()"#,
+            &vars(&[]),
+        )
+        .unwrap();
+        assert_eq!(r, "hi");
+        // 旧兼容形态 org.jsoup.parse 仍在
+        let r2 = eval_js(r#"org.jsoup.parse('<i>x</i>').text()"#, &vars(&[])).unwrap();
+        assert_eq!(r2, "x");
+    }
+
+    #[test]
+    fn jsoup_connect_chain_builds_object() {
+        // connect 链式 API 可用且不中断脚本流（get() 离线失败返回错误文本的 Document）
+        let r = eval_js(
+            r#"(function(){
+                var c = org.jsoup.Jsoup.connect('http://127.0.0.1:1/x')
+                    .data('k','v')
+                    .header('X-A','b')
+                    .timeout(5000)
+                    .ignoreContentType(true);
+                var d = c.get();
+                return typeof d + '|' + typeof d.text;
+            })()"#,
+            &vars(&[]),
+        )
+        .unwrap();
+        assert_eq!(r, "object|function");
+    }
+
+    #[test]
+    fn java_start_browser_and_get_string_list_exist() {
+        // startBrowser：fire-and-forget stub（不抛错不中断脚本流）
+        let r = eval_js("java.startBrowser('http://x', 't')", &vars(&[])).unwrap();
+        assert_eq!(r, "false");
+        // getStringList：css_chain 列表形态（需先 setContent 提供文档）
+        let bridge = JsBridge::default();
+        eval_js_with_bridge("java.setContent('<ul><li>a</li><li>b</li></ul>')", &Default::default(), &bridge).unwrap();
+        let r = eval_js_with_bridge(
+            "JSON.stringify(java.getStringList('ul@li@text'))",
+            &Default::default(),
+            &bridge,
+        )
+        .unwrap();
+        assert!(r.contains("a") && r.contains("b"), "{r}");
     }
 }
