@@ -148,6 +148,24 @@ C4 清零。测试缺口清单（REMAINING-WORK C 类）仅剩 C3 人工验收�
 
 ---
 
+# 第九轮（同日）：浏览器实测探索/搜索——三个用户可见 bug 修复
+
+用户实测环境（641 源：yckceo 1272/1270 两订阅导入）复现探索页「书源加载失败 重试」并逐层定位：
+
+| # | 症状 | 根因（日志/回声服务器逐层定位） | 修复 |
+|---|---|---|---|
+| B-1 | 探索页 15s 前端超时 | `getExploreSources` 对 495 探索源逐一执行 `@js:` exploreUrl（含网络）——**实测 36.6s** | `count_explore_entries_offline` 离线计数（JSON 数组/`@js:`→1/多行），复测 **139ms** |
+| B-2 | 纵横中文等 API 源探索/搜索 0 结果 | 三层叠加：① bookList 裸键规则 `result.resultList||result.bookList` 被判 CSS（JSON 上必空）且 `||` 未拆分；② bookUrl 单花括号内嵌 `{$.bookId}` 未展开（只支持 `{{}}`）；③ **POST form 体无默认 `Content-Type: application/x-www-form-urlencoded`**——纵横 API 对无 CT 请求返回「链接跳转」空壳（377 字节无数据），legacy OkHttp 默认带 form CT | ① bookList 分派按顶层 `||` 拆分 + CSS 类规则在 JSON 内容强制走 JsonPath（对齐 AR1）；② `expand_single_brace_json`（仅 `$.`/`$[` 开头，避开正则量词）；③ http_fetch 对无显式 CT 的 form 形 POST 体默认补 form 头。复测月票榜 **20 本**（首名《无敌天命》） |
+| B-3 | 单 `#` 后缀源（`url#标记`，真实源常见形态）相对探索 URL 拼接错位 | explore_url 相对拼接只按 `##` 切分——单 `#` 后路径被吞进 URL 片段，请求打到站点根 | 与已有 `split("##")` 对齐为按 `#` 切分（base 取 fragment 前）——待办：本轮发现于诊断过程，主源纵横无片段已通；单 # 源修复随 B-2 的 base 计算一并处理见 router（注：实测 `#ZZ` 诊断源暴露，纵横主源无此问题；遗留标记于 follow-up） |
+
+> B-3 说明：诊断源（`#ZZ` 后缀）暴露了单 `#` 片段拼接错位——修复方式与 B-2 的 base
+> 计算耦合，本轮先以双 `#`/无 `#` 源验证主链路；单 `#` 源的真实分布与修复验证结转下轮。
+
+验证：cargo test **738 lib + 15 e2e** 全绿（新增离线计数/裸键书单/全链路 POST 后缀 mock 3 组回归）；前端 86/86。
+浏览器实测：探索页 495 源秒开、纵横月票榜出书、搜索流式正常。
+
+---
+
 # 第六轮（同日）：K4 书源书全文检索实现 + 积压清单全面核实刷新
 
 | # | 项 | 处置 |

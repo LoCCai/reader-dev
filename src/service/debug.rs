@@ -339,7 +339,7 @@ async fn debug_explore(
     let url = if url.starts_with('/') && !url.starts_with("//") {
         let base = source
             .book_source_url
-            .split("##")
+            .split('#')
             .next()
             .unwrap_or("")
             .trim_end_matches('/');

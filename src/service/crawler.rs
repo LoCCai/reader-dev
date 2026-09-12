@@ -1153,6 +1153,17 @@ async fn http_fetch(
             }
         }
     }
+    // m-fix：POST form 体默认补 `application/x-www-form-urlencoded`（legacy OkHttp 对
+    // `k=v&k=v` body 的默认行为）。此前仅在配置 charset 时补——实测纵横中文等 API 对
+    // 无 Content-Type 的 POST 返回「链接跳转」空壳（code:0 但无数据），探索/搜索 0 结果。
+    // JSON（含 `{`）body 保持无 CT 原样发送；显式声明过 CT 的书源不覆盖。
+    if !force_form_content_type
+        && method.eq_ignore_ascii_case("POST")
+        && headers.keys().all(|k| !k.eq_ignore_ascii_case("Content-Type"))
+        && body.as_ref().is_some_and(|b| b.contains('&') && b.contains('=') && !b.contains('{'))
+    {
+        force_form_content_type = true;
+    }
     // 浏览器优先路径同样执行 SSRF 入口校验（obscura 侧还默认禁 RFC1918 内网导航，
     // 双保险——否则默认浏览器优先会让私网书源 URL 绕过 fetch 的直连校验）
     validate_public_target(&url).await?;

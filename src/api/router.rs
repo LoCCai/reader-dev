@@ -8048,10 +8048,11 @@ async fn get_explore_sources(
         .iter()
         .filter(|s| s.enabled_explore && s.explore_url.is_some())
         .map(|s| {
-            let count = crate::service::explore::parse_explore_entries(
+            // 离线计数：@js: 型 exploreUrl 求值含网络调用，数百源累计拖垮列表接口
+            // （实测 431 源场景前端 15s 超时）——真实分类在点进源后 getExploreUrls 执行
+            let count = crate::service::explore::count_explore_entries_offline(
                 s.explore_url.as_deref().unwrap_or(""),
-            )
-            .len();
+            );
             serde_json::json!({
                 "bookSourceUrl": s.book_source_url,
                 "bookSourceName": s.book_source_name,

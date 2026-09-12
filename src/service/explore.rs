@@ -49,6 +49,42 @@ fn entry_type(title: &str, url: &str) -> String {
     "book".to_string()
 }
 
+/// 离线探索分类计数（getExploreSources 用——列表页对每个源计数，**不执行 JS**）：
+/// `@js:` 型 exploreUrl 的求值含 java.ajax 网络调用，数百源累计会拖垮列表接口
+/// （实测 431 源场景前端 15s 超时——"书源加载失败"）。真实分类在用户点进该源时
+/// 由 getExploreUrls 执行 JS 获得，此处：
+/// - JSON 数组 → 条目数
+/// - `@js:`/`js:`/`<js>` → 1（标记"有探索"）
+/// - 多行格式 → 非空非注释行数
+pub fn count_explore_entries_offline(explore_url: &str) -> usize {
+    let trimmed = explore_url.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+    if trimmed.starts_with('[') {
+        if let Ok(serde_json::Value::Array(list)) =
+            serde_json::from_str::<serde_json::Value>(trimmed)
+        {
+            return list
+                .iter()
+                .filter(|i| {
+                    i.get("url").and_then(|u| u.as_str()).map(|u| !u.is_empty()).unwrap_or(false)
+                })
+                .count();
+        }
+        return 0;
+    }
+    let low = trimmed.to_ascii_lowercase();
+    if low.starts_with("@js:") || low.starts_with("js:") || trimmed.contains("<js>") {
+        return 1;
+    }
+    trimmed
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .count()
+}
+
 /// 解析 exploreUrl（legado 语义）：
 /// - JSON 数组（[{"title","url"},...]，真实书源常见形态——导入时规范为紧凑 JSON 字符串）
 /// - `@js:代码`：执行 JS（返回 JSON.stringify([{title,url},...])）→ 解析条目
@@ -257,7 +293,7 @@ pub async fn explore_url(
     let raw_url = if url.starts_with('/') && !url.starts_with("//") {
         let base = source
             .book_source_url
-            .split("##")
+            .split('#')
             .next()
             .unwrap_or("")
             .trim_end_matches('/');
@@ -677,5 +713,66 @@ mod tests {
         assert_eq!(book.origin_order, 7);
         assert_eq!(book.book_url, "https://a.com/book/1");
         assert_eq!(book.book_type, 0);
+    }
+
+    /// 离线探索分类计数（getExploreSources 列表页用——不执行 JS/网络）
+    #[test]
+    fn count_explore_entries_offline_forms() {
+        use super::count_explore_entries_offline as cnt;
+        // JSON 数组（真实书源标准形态；空 url 的分组标题不计）
+        let json = r#"[{"title":"排行","url":"","style":{}},{"title":"月票榜","url":"/api/rank?p={{page}}"},{"title":"新书榜","url":"/api/new?p={{page}}"}]"#;
+        assert_eq!(cnt(json), 2);
+        // @js: 型 → 计 1（标记"有探索"，真实分类点进后执行）
+        assert_eq!(cnt("@js:
+java.ajax(source.getKey())"), 1);
+        assert_eq!(cnt("js:var u = key"), 1);
+        assert_eq!(cnt("<js>1</js>"), 1);
+        // 多行格式 → 非空非注释行数
+        assert_eq!(cnt("/a/1
+/a/2
+
+# 注释
+/a/3"), 3);
+        // 空 → 0
+        assert_eq!(cnt(""), 0);
+        assert_eq!(cnt("   "), 0);
+    }
+
+    /// 全链路：explore_url 从 `,{...}` POST 后缀到裸键 JSON 书单解析（纵横式 API mock）
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_explore_url_full_chain_post_suffix() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = r#"{"code":0,"result":{"resultList":[{"bookName":"剑来","bookId":"101"}]}}"#;
+        let app = axum::Router::new().route(
+            "/api/rank/details",
+            axum::routing::post(move || {
+                let body = body.to_string();
+                async move {
+                    axum::http::Response::builder()
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(body))
+                        .unwrap()
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let src = crate::model::BookSource {
+            book_source_url: format!("http://{addr}"),
+            rule_explore: Some(serde_json::json!({
+                "bookList": "result.resultList||result.bookList",
+                "name": "bookName||name",
+                "bookUrl": "/novel/{ $.bookId }"
+            })),
+            ..Default::default()
+        };
+        let _g = crate::service::crawler::ssrf_allow_private_guard(true);
+        let url = format!(
+            "http://{addr}/api/rank/details,{{\"method\":\"POST\",\"body\":\"pageNum={{{{page}}}}\"}}"
+        );
+        let books = explore_url("default", &url, 1, &src).await.unwrap();
+        println!("mock full-chain books: {} -> {:?}", books.len(), books.iter().map(|b| b.name.clone()).collect::<Vec<_>>());
+        assert!(!books.is_empty(), "全链路 mock 应解析出书");
     }
 }

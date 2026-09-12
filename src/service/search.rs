@@ -845,20 +845,36 @@ fn analyze_book_list_impl(
     // legado BookList：列表规则前缀 `-` = 结果倒序；`+` = 去掉前缀（兼容旧写法）
     let (list_rule, reverse) = strip_list_rule_prefix(book_list_rule);
     let list_rule = list_rule.as_str();
-    // bookList 规则类型检测
-    let parsed = parse_rule(list_rule);
-    let mut items: Vec<String> = match parsed.kind {
-        RuleKind::Css => css_items(list_rule, body),
-        RuleKind::JsonPath => apply(list_rule, body),
-        RuleKind::Regex => apply(list_rule, body),
-        RuleKind::Js => js_book_list(list_rule, body, base_url, bridge),
-        _ => vec![],
-    };
-    // JS 规则（<js> 或 @js: 开头——eval 返回 JSON 书单数组）
-    if items.is_empty()
-        && (list_rule.contains("<js>") || list_rule.trim_start().starts_with("@js:"))
-    {
+    let is_whole_js =
+        list_rule.contains("<js>") || list_rule.trim_start().starts_with("@js:") || list_rule.trim_start().starts_with("js:");
+    // bookList 规则求条目：
+    // - 整条 JS 规则（脚本内常含 ||，禁拆分）
+    // - 其余按 legado splitSource `||` 语义顶层拆分逐个备选尝试，首个非空生效
+    //   （实测纵横中文 `result.resultList||result.bookList` 型裸键规则此前被整体判为
+    //   CSS，在 JSON 响应上必然 0 条）
+    let mut items: Vec<String> = Vec::new();
+    if is_whole_js {
         items = js_book_list(list_rule, body, base_url, bridge);
+    } else {
+        for alt in crate::parser::rule::split_top_level(list_rule, "||") {
+            let alt = alt.trim();
+            if alt.is_empty() {
+                continue;
+            }
+            let parsed = parse_rule(alt);
+            let got = match parsed.kind {
+                // AR1 对齐（apply() 同语义）：CSS 类裸键规则在 JSON 内容上强制走 JsonPath
+                RuleKind::Css if crate::parser::rule::is_json_text(body) => apply(alt, body),
+                RuleKind::Css => css_items(alt, body),
+                RuleKind::JsonPath | RuleKind::Regex => apply(alt, body),
+                RuleKind::Js => js_book_list(alt, body, base_url, bridge),
+                _ => vec![],
+            };
+            if !got.is_empty() {
+                items = got;
+                break;
+            }
+        }
     }
     if reverse {
         items.reverse();
@@ -1170,10 +1186,13 @@ pub(crate) fn expand_embedded_with_vars(rule: &str, context: &str, vars: &RuleVa
 }
 
 fn expand_embedded_impl(rule: &str, context: &str, mut vars: Option<&mut RuleVars>) -> String {
+    // 单花括号 JSONPath 内嵌（{$.x} / {$[x]}——legado 内嵌规则单括号形态，实测纵横中文
+    // bookUrl `bookId={$.bookId}`；仅识别 `$.`/`$[` 开头，避免与正则量词 `{2,3}` 等冲突）
+    let rule = expand_single_brace_json(rule, context, vars.as_deref_mut());
     if !rule.contains("{{") {
-        return rule.to_string();
+        return rule;
     }
-    let mut result = rule.to_string();
+    let mut result = rule;
     loop {
         let Some(start) = result.find("{{") else {
             break;
@@ -1206,6 +1225,52 @@ fn expand_embedded_impl(rule: &str, context: &str, mut vars: Option<&mut RuleVar
             replacement = crate::parser::rule::inline_js(inner.trim(), context, vars.as_deref());
         }
         result.replace_range(start..=end + 1, &replacement);
+    }
+    result
+}
+
+/// 单花括号 JSONPath 内嵌展开（`{$.x}` / `{$[x]}` → 首个提取值；未命中 → 空串）。
+/// 仅当 `{` 后紧跟 `$.`/`$[` 且**前导不是另一个 `{`**（那是 `{{...}}` 双花括号形态）
+/// 才识别——普通大括号文本/正则量词不受影响
+fn expand_single_brace_json(
+    rule: &str,
+    context: &str,
+    mut vars: Option<&mut RuleVars>,
+) -> String {
+    if !rule.contains("{$.") && !rule.contains("{$[") {
+        return rule.to_string();
+    }
+    let mut result = rule.to_string();
+    let mut search_from = 0usize;
+    loop {
+        let hay = &result[search_from..];
+        let a = hay.find("{$.");
+        let b = hay.find("{$[");
+        let rel = match (a, b) {
+            (Some(x), Some(y)) => Some(x.min(y)),
+            (Some(x), None) => Some(x),
+            (None, Some(y)) => Some(y),
+            (None, None) => None,
+        };
+        let Some(rel) = rel else { break };
+        let start = search_from + rel;
+        // `{{$.` → 属于 {{...}} 双花括号内嵌，留给主循环处理
+        if start > 0 && result.as_bytes()[start - 1] == b'{' {
+            search_from = start + 1;
+            continue;
+        }
+        let Some(end_rel) = result[start..].find('}') else {
+            break;
+        };
+        let end = start + end_rel;
+        let inner = &result[start + 1..end];
+        let values = match vars.as_deref_mut() {
+            Some(v) => apply_with_vars(inner, context, v),
+            None => apply(inner, context),
+        };
+        let replacement = values.first().cloned().unwrap_or_default();
+        result.replace_range(start..=end, &replacement);
+        search_from = start;
     }
     result
 }
@@ -2442,4 +2507,44 @@ mod tests {
         assert_eq!(s.body_js.as_deref(), Some("result"));
     }
 
+    /// 裸键 JSON 书单 + `||` 备选（实测纵横中文 `result.resultList||result.bookList`
+    /// 被整体判为 CSS 在 JSON 上 0 条——bookList 分派需按备选拆分 + JSON 兜底）
+    #[test]
+    fn test_book_list_bare_json_keys_with_alternation() {
+        let src = BookSource {
+            book_source_url: "https://www.zongheng.com".into(),
+            rule_explore: Some(serde_json::json!({
+                "bookList": "result.resultList||result.bookList",
+                "name": "bookName||name",
+                "author": "pseudonym||authorName",
+                "bookUrl": "https://bookapi.zongheng.com/api/chapter/getChapterList,{\"method\":\"POST\",\"body\":\"bookId={$.bookId}\"}",
+                "coverUrl": "bookCover||picUrl",
+                "intro": "description"
+            })),
+            ..Default::default()
+        };
+        let rule: SearchRule =
+            serde_json::from_value(src.rule_explore.clone().unwrap()).unwrap();
+        let body = r#"{"code":0,"message":"Success","result":{"resultList":[
+            {"bookName":"剑来","author":"烽火戏诸侯","pseudonym":"烽火","bookId":"101","bookCover":"http://c/1.png","description":"简介一"},
+            {"bookName":"雪中悍刀行","author":"烽火戏诸侯","bookId":"102"}
+        ]}}"#;
+        let books = analyze_book_list_for_explore(
+            "default",
+            body,
+            "https://www.zongheng.com",
+            &src,
+            &rule,
+            "result.resultList||result.bookList",
+        );
+        assert_eq!(books.len(), 2, "裸键 + || 备选应解析出 2 本: {books:?}");
+        assert_eq!(books[0].name, "剑来");
+        assert_eq!(books[0].author, "烽火", "author 规则 pseudonym||authorName 应命中备选");
+        assert!(
+            books[0].book_url.contains("bookId=101"),
+            "bookUrl 内嵌 $.bookId 应展开: {}",
+            books[0].book_url
+        );
+        assert_eq!(books[1].name, "雪中悍刀行");
+    }
 }

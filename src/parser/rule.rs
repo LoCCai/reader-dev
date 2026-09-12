@@ -1280,7 +1280,7 @@ fn parse_json_value(text: &str) -> serde_json::Result<serde_json::Value> {
 /// 内容是否为 JSON（legacy AnalyzeRule.setContent 的 isJSON 判定，
 /// StringExtensions.kt:16 首字符 `{`/`[` + 尾字符配对；此处再经整体解析确认，
 /// 比纯首尾括号检查更严——非 JSON 花括号文本不误触发裸键强制 JsonPath）。
-fn is_json_text(text: &str) -> bool {
+pub(crate) fn is_json_text(text: &str) -> bool {
     let t = text.trim();
     let bracketed =
         (t.starts_with('{') && t.ends_with('}')) || (t.starts_with('[') && t.ends_with(']'));
@@ -1843,7 +1843,7 @@ fn cmp_str(a: &str, b: &str, op: &str) -> bool {
 }
 
 /// 顶层切分（引号/括号内不切）
-fn split_top_level<'a>(s: &'a str, sep: &str) -> Vec<&'a str> {
+pub(crate) fn split_top_level<'a>(s: &'a str, sep: &str) -> Vec<&'a str> {
     let b = s.as_bytes();
     let mut parts = Vec::new();
     let mut start = 0;

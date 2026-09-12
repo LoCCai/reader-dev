@@ -79,7 +79,7 @@ pub fn invalid_snapshot(ns: &str) -> Vec<(String, i64, String)> {
 pub async fn check_source(_ns: &str, source: &BookSource) -> (bool, String) {
     let base = source
         .book_source_url
-        .split("##")
+        .split('#')
         .next()
         .unwrap_or("")
         .trim();
