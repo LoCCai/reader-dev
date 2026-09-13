@@ -313,7 +313,12 @@ async fn debug_explore(
     step.detail = json!({
         "bookList": book_list_rule,
         "bookListKind": format!("{:?}", parsed.kind),
-        "exploreEntries": crate::service::explore::parse_explore_entries(source.explore_url.as_deref().unwrap_or("")).len(),
+        "exploreEntries": crate::service::explore::parse_explore_entries_for_source(
+            source.explore_url.as_deref().unwrap_or(""),
+            source,
+            ns,
+        )
+        .len(),
     });
     step.result_len = book_list_rule.len();
     on_step(&step);
@@ -322,8 +327,12 @@ async fn debug_explore(
     let raw = if !target_url.is_empty() {
         target_url.to_string()
     } else {
-        crate::service::explore::parse_explore_entries(source.explore_url.as_deref().unwrap_or(""))
-            .into_iter()
+        crate::service::explore::parse_explore_entries_for_source(
+            source.explore_url.as_deref().unwrap_or(""),
+            source,
+            ns,
+        )
+        .into_iter()
             .find(|e| e.r#type == "book")
             .map(|e| e.url)
             .unwrap_or_default()

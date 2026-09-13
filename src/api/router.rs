@@ -8084,9 +8084,10 @@ async fn get_explore_urls(
     let Some(source) = resolve_book_source(&state, &namespace, &bs_param).await else {
         return Json(ReturnData::err("书源不存在"));
     };
-    // legado 语义：exploreUrl 可能是 @js: 代码（执行后返回 [{title,url}]）或普通 URL 集合
+    // legado 语义：exploreUrl 可能是 @js:/<js> 脚本（执行后返回 [{title,url}]）或普通 URL 集合；
+    // 脚本经真实书源 bridge 执行——source.getBookSourceUrl() 等书源引用才能取到真实值
     let raw = source.explore_url.as_deref().unwrap_or("");
-    let entries = crate::service::explore::parse_explore_entries(raw);
+    let entries = crate::service::explore::parse_explore_entries_for_source(raw, &source, &namespace);
     Json(ReturnData::ok(
         serde_json::to_value(entries).unwrap_or(serde_json::Value::Null),
     ))

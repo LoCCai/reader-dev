@@ -2911,6 +2911,14 @@ fn build_bridge_objects(bridge: &JsBridge, context: &mut Context) -> Result<(JsO
     source
         .function(bind(bridge, source_get_key), JsString::from("getKey"), 0)
         .function(bind(bridge, source_get_name), JsString::from("getName"), 0)
+        // 别名方法（legado AnalyzerUrl/书源脚本两种调用形态并存——实测漫画站探索脚本
+        // 以 `{{source.getBookSourceUrl()}}` 模板引用，缺方法调用即断链）
+        .function(bind(bridge, source_get_key), JsString::from("getBookSourceUrl"), 0)
+        .function(
+            bind(bridge, source_get_name),
+            JsString::from("getBookSourceName"),
+            0,
+        )
         .function(bind(bridge, source_put), JsString::from("put"), 2)
         .function(bind(bridge, source_get), JsString::from("get"), 1)
         .function(

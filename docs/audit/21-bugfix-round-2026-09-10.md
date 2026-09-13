@@ -166,6 +166,26 @@ C4 清零。测试缺口清单（REMAINING-WORK C 类）仅剩 C3 人工验收�
 
 ---
 
+# 第十轮（同日）：正式部署（reader.icai.top）<js> 探索脚本断链修复
+
+用户在正式部署上报探索失败，错误信息即整段 `<js>` 脚本被当作抓取 URL（「目标 URL 非法:
+relative URL without a base」）。脚本来自漫画站书源（albums-index 分类形态）：
+
+| # | 根因 | 修复 |
+|---|---|---|
+| C-1 | `parse_explore_entries` 只认 `@js:`，`<js>...</js>` 整段脚本（legado jsRule 形态，漫画站探索主流写法）落入逐行分支——整段脚本成为条目 URL | 新增整段 `<js>` 处理：提取脚本 → `{{...}}` 模板经 bridge 展开 → eval 取 `[{title,url}]` 数组 |
+| C-2 | 脚本内 `{{source.getBookSourceUrl()}}` 模板无展开路径；且 `@js:`/`<js>` 路径用**空默认 bridge**——`source.*` 恒为空 | source shim 补 `getBookSourceUrl()`/`getBookSourceName()` 方法别名（此前仅 `bookSourceUrl` 属性）；新增 `parse_explore_entries_for_source(url, source, ns)`（JsBridge::from_source），getExploreUrls 与书源 debug 均改用 |
+| C-3 | 顺带：`entry_type` 的「更新」关键词把漫画站「最近更新」真实分类误判为外链（前端 window.open 打开） | 移除该过泛关键词 |
+
+实现细节坑：`</js>` 为 5 字节而 `<js>` 为 4——首版按等长截断致脚本尾残留 `<`（SyntaxError: abrupt end），改 strip_prefix/suffix。
+
+回归测试：用户报错原文脚本逐字复现（`test_parse_explore_js_script_with_source_url_template`）——断言模板展开为书源 URL、分组/按钮条目（无 url）跳过。
+另实测确认 QQ浏览器源（JSON 数组探索）详情/目录/简介全链路正常（圣墟）——用户部署上的「未知书名」为旧构建下游效应，换新构建即解。
+
+验证：cargo test **739 lib + 15 e2e** 全绿；前端 86/86。
+
+---
+
 # 第六轮（同日）：K4 书源书全文检索实现 + 积压清单全面核实刷新
 
 | # | 项 | 处置 |
