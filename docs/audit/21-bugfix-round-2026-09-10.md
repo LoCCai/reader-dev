@@ -195,3 +195,26 @@ relative URL without a base」）。脚本来自漫画站书源（albums-index �
 | 文档 | AUDIT-BACKLOG.md 全面刷新 | 逐项对照代码复核：K4/E10/E15/E16/F1/F6/F9/P2 批/PJ2/PJ4/PJ5/EG1/3/4/5 共 16 个「待办」实为已实现未回写，全部翻[x]并注明核实位置；清单自此与代码一致 |
 
 **积压清单（AUDIT-BACKLOG.md）现状**：除「五、有意偏离」与 E 系列 3 个超长尾子项（downloadFile/getFile 文件级 API、AR-P2 边界打磨）外全部清零。REMAINING-WORK D 类（不移植）维持原议。后续按「实测暴露再修」驱动。
+
+
+---
+
+# 第十一轮（2026-09-14）：三订阅 1291 源实测验证——阅读链路五连修
+
+导入 yckceo 1270/1271/1272 三订阅（2048 条记录，存量 1291 源/978 主机），构建四段链路
+探针（搜索→详情→目录→正文，scripts/reading-chain-probe.mjs）按主机去重抽样 24 源三轮验证：
+
+| # | Bug（实测复现） | 根因 | 修复 |
+|---|---|---|---|
+| D-1 | **156zwcc 搜到书点开全空**（用户报障原文复现） | ① bookUrl 为协议相对 `//host/path`（og:novel:read_url 原样）——`Url::parse` 无 base 报「目标 URL 非法」；② 搜索出口 field_url 对结果 `//` 前缀排除补全（误把 XPath 保守带到结果位置） | ① `normalize_with_source`（fetch_url 入口统一：`//`补 scheme/`/`拼 origin/相对 join）覆盖详情/目录/正文全链路；② 结果分支 `//` 也走 to_absolute |
+| D-2 | **详情 name 为空 ×10/24 源**（「未知书名」主因） | 大量源 ruleBookInfo 无 name/author 规则（只有 cover/intro），调用方（搜索点开）又不传名 | 三级回退：规则求值 > 传入名（handler 新增 name 参数） > **页面 h1/og:title/\<title\> 兜底提取**（含验证页标题黑名单与站点尾巴截断） |
+| D-3 | **`@html` 提取器返回带壳整串** → 正文管线清洗后空 | scraper 0.20 `parse_fragment` 序列化壳为 `<html>…</html>`（非 `<html><body>`），strip 不匹配 | 三形态前/后缀剥壳（回归测试锁定） |
+| D-4 | **单源搜索报「未配置书源」**（实为 600s 失效短路误伤） | 失效过滤无差别拦截——用户点名的源也被跳过且文案误导 | bookSourceUrl 单源指定绕过失效过滤（批量场景保持短路） |
+| D-5 | 探针工具修正 | data 形态 `{content}` / 单源参数名 bookSourceUrl | reading-chain-probe.mjs 固化（可复用） |
+
+**三轮探针对比**：info name 空 10→3、未配置书源 4→0、156zwcc 全链路（搜索 165 本/详情/目录
+1145 章/正文 2266 字）通。剩余 toc 0 章 ×14 抽查确认多为**站点拦截页**（m.yibige 详情被拦
+h1=「访问验证」→ 下游规则求值出垃圾 tocUrl）——站点侧为主，黑名单已防误报，结转下轮
+（tocUrl 垃圾值校验 + 拦截页检测）。
+
+验证：cargo test **741 lib + 15 e2e** 全绿；前端 86/86。

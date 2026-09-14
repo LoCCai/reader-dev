@@ -1328,9 +1328,21 @@ fn html_without_scripts(el: &ElementRef) -> String {
         }
     }
     let h = frag.html();
-    // parse_fragment 包裹的 html/body 外壳剥除
-    let h = h.strip_prefix("<html><body>").unwrap_or(&h);
-    h.strip_suffix("</body></html>").unwrap_or(h).to_string()
+    // parse_fragment 包裹的外壳剥除：html5ever 不同解析上下文的包裹形态有差异
+    // （<html><body>…</body></html> / <html>…</html> / <body>…</body>——实测 0.20
+    // fragment 序列化为 <html>…</html>，此前只剥第一种 → `@html` 提取器返回带壳整串，
+    // 正文管线清洗后为空——「基本中文」#nr@html 正文全空即此）
+    let h = h
+        .strip_prefix("<html><body>")
+        .or_else(|| h.strip_prefix("<html>"))
+        .or_else(|| h.strip_prefix("<body>"))
+        .unwrap_or(&h);
+    let h = h
+        .strip_suffix("</body></html>")
+        .or_else(|| h.strip_suffix("</html>"))
+        .or_else(|| h.strip_suffix("</body>"))
+        .unwrap_or(h);
+    h.to_string()
 }
 
 #[cfg(test)]
@@ -1844,5 +1856,21 @@ mod tests {
             css_chain("class.item:eq(0)@text", html2),
             vec!["甲".to_string()]
         );
+    }
+
+    /// `@html` 提取器：选择器+提取器两段式（`#nr@html`——「基本中文」正文规则）。
+    /// 此前 parse_fragment 壳只剥 <html><body> 形态（0.20 实际为 <html>…</html>）→
+    /// 返回带壳整串、正文管线清洗后为空
+    #[test]
+    fn test_html_extractor_strips_fragment_shell() {
+        let html = r#"<html><body><article id="nr"><p>有人跳河了</p><p>围观群众</p></article></body></html>"#;
+        let r = css_chain("#nr@html", html);
+        assert_eq!(r.len(), 1);
+        assert!(
+            r[0].starts_with("<article") && !r[0].starts_with("<html>"),
+            "应返回元素自身 html（不带 parse_fragment 壳）: {}",
+            &r[0][..r[0].len().min(50)]
+        );
+        assert!(r[0].contains("有人跳河了"));
     }
 }

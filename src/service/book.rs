@@ -85,9 +85,56 @@ pub struct ContentRule {
 ///
 /// legado AnalyzeUrl 语义：URL 可带 `,{...}` 后缀（js 修改 URL / headers / method+body /
 /// bodyJs 响应后处理 / charset）——目录/正文/详情/媒体/漫画抓取统一生效（搜索链路已支持）。
+/// bookUrl 相对书源规范化（legacy AnalyzeUrl：构造时以书源 URL 为 baseUrl）：
+/// - `//host/path`（协议相对，og:novel:read_url 原样）→ 书源 scheme 补全
+/// - `/path` → 书源 origin 拼接
+/// - 相对路径 → 相对书源 base join
+/// - 绝对 URL / data: / 非 http 形态原样返回
+/// 书源 URL 的 `##`/`#` 后缀（备用地址/标记）不参与 base 计算
+pub fn normalize_with_source(url: &str, source: &BookSource) -> String {
+    let trimmed = url.trim();
+    if trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("data:")
+        || trimmed.is_empty()
+    {
+        return url.to_string();
+    }
+    let base_raw = source
+        .book_source_url
+        .split('#')
+        .next()
+        .unwrap_or("")
+        .trim();
+    let Ok(base) = url::Url::parse(base_raw) else {
+        return url.to_string();
+    };
+    if trimmed.starts_with("//") {
+        return format!("{}:{}", base.scheme(), trimmed);
+    }
+    if trimmed.starts_with('/') {
+        let port = base.port().map(|p| format!(":{p}")).unwrap_or_default();
+        return format!(
+            "{}://{}{}{}",
+            base.scheme(),
+            base.host_str().unwrap_or(""),
+            port,
+            trimmed
+        );
+    }
+    match base.join(trimmed) {
+        Ok(joined) => joined.to_string(),
+        Err(_) => url.to_string(),
+    }
+}
+
 pub async fn fetch_url(ns: &str, url: &str, source: &BookSource) -> Result<crawler::FetchResponse> {
     // legado concurrentRate：详情/目录/正文/媒体抓取统一限速（A2 共享滑窗/间隔）
     crate::service::search::concurrent_rate_acquire(ns, source).await;
+    // 协议相对/相对 bookUrl 规范化（legacy AnalyzeUrl baseUrl 语义）：搜索规则产出的
+    // bookUrl 常为 `//host/path`（og:novel:read_url 原样）——Url::parse 无 base 直接
+    // 「目标 URL 非法」（实测 156zwcc：搜到书点开详情/目录/正文全空即此因）
+    let url = &normalize_with_source(url, source);
     let mut headers = source
         .header
         .as_deref()
@@ -281,6 +328,45 @@ pub fn analyze_related_books(
 /// 详情解析（ruleBookInfo 字段应用于详情页 HTML）
 /// F12/AR4：`book_name` 为解析前已知的书名（搜索结果/书架）——@get:{bookName} 回退源
 #[allow(clippy::too_many_arguments)]
+/// 详情页书名兜底提取：h1 → og:novel:book_name/og:title → <title>（截断站点尾巴）。
+/// 仅在规则求值与传入名均空时使用（保持规则优先级）
+fn fallback_title(html: &str) -> String {
+    let pick = |sel: &str| -> String {
+        crate::parser::css_chain::css_chain(sel, html)
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    for candidate in [
+        pick("h1@text"),
+        pick("meta[property=og:novel:book_name]@content"),
+        pick("meta[property=og:title]@content"),
+        pick("title@text"),
+    ] {
+        let c = candidate.trim();
+        if c.is_empty() {
+            continue;
+        }
+        // 验证/错误页标题黑名单——不作为书名（实测 m.yibige 详情被拦时 h1=「访问验证」）
+        const TITLE_BLACKLIST: [&str; 6] =
+            ["访问验证", "安全验证", "验证码", "403 forbidden", "404 not found", "just a moment"];
+        let lower = c.to_ascii_lowercase();
+        if TITLE_BLACKLIST.iter().any(|b| lower.contains(b)) {
+            continue;
+        }
+        // 常见站点尾巴截断（"书名-笔趣阁"/"书名_章节站"——保守取首段）
+        let head = c
+            .split(|ch| ch == '-' || ch == '_' || ch == '—')
+            .next()
+            .unwrap_or(c)
+            .trim();
+        return if head.is_empty() { c.to_string() } else { head.to_string() };
+    }
+    String::new()
+}
+
 pub fn analyze_book_info(
     ns: &str,
     html: &str,
@@ -322,13 +408,24 @@ pub fn analyze_book_info(
 
     let info = BookInfo {
         // legacy BookInfo.kt:61-90：name/author 经 formatBookName/Author 清洗，
-        // kind 多值归一，wordCount 走 wordCountFormat
-        name: crate::service::search::format_book_name(&crate::service::search::field_with_vars(
-            html,
-            rule.name.as_deref(),
-            "",
-            &mut vars,
-        )),
+        // kind 多值归一，wordCount 走 wordCountFormat；
+        // 详情规则无 name/求值空 → 回退传入书名（legacy WebBook.getBookInfo 沿用
+        // 进入时的书名——实测「基本中文」类源 ruleBookInfo 只有 cover/intro/lastChapter
+        // 三条规则，搜索点开详情若不回退则整页「未知书名」）
+        name: {
+            let evaluated = crate::service::search::format_book_name(
+                &crate::service::search::field_with_vars(html, rule.name.as_deref(), "", &mut vars),
+            );
+            if !evaluated.is_empty() {
+                evaluated
+            } else if let Some(passed) = book_name.filter(|n| !n.trim().is_empty()) {
+                passed.to_string()
+            } else {
+                // 兜底 3：详情页 h1 → og:title → <title>（实测 24 源抽样 10 源
+                // ruleBookInfo 无 name 规则且调用方未传名——页面标题几乎总含书名）
+                fallback_title(html)
+            }
+        },
         author: crate::service::search::format_book_author(
             &crate::service::search::field_with_vars(html, rule.author.as_deref(), "", &mut vars),
         ),
@@ -2636,5 +2733,45 @@ mod tests {
         let _ = fetch_url("default", &url, &src).await.unwrap();
         let recorded = times.lock().unwrap();
         assert_eq!(recorded.len(), 2);
+    }
+
+    /// bookUrl 相对书源规范化（legacy AnalyzeUrl baseUrl 语义——实测 156zwcc 搜索结果
+    /// 的 og:novel:read_url 原样 bookUrl 为 `//host/path`，Url::parse 无 base 报
+    /// 「目标 URL 非法」，详情/目录/正文全空）
+    #[test]
+    fn test_normalize_with_source() {
+        let src = BookSource {
+            book_source_url: "https://www.156zwcc.cc/".into(),
+            ..Default::default()
+        };
+        // 协议相对 → 书源 scheme 补全
+        assert_eq!(
+            normalize_with_source("//www.156zwcc.cc/book/998_998549.html", &src),
+            "https://www.156zwcc.cc/book/998_998549.html"
+        );
+        // 路径相对 → 书源 origin 拼接
+        assert_eq!(
+            normalize_with_source("/book/998_998549.html", &src),
+            "https://www.156zwcc.cc/book/998_998549.html"
+        );
+        // 相对路径 join（无书源尾斜杠时 join 目录语义）
+        let src2 = BookSource {
+            book_source_url: "https://a.com/base/##备用".into(),
+            ..Default::default()
+        };
+        assert_eq!(normalize_with_source("x.html", &src2), "https://a.com/base/x.html");
+        // 绝对 URL / data: / ## 后缀书源 base 均不影响
+        assert_eq!(
+            normalize_with_source("https://other.com/p", &src),
+            "https://other.com/p"
+        );
+        assert_eq!(normalize_with_source("data:;base64,QUJD", &src), "data:;base64,QUJD");
+        let src3 = BookSource {
+            book_source_url: "http://b.com#标记".into(),
+            ..Default::default()
+        };
+        assert_eq!(normalize_with_source("//b.com/x", &src3), "http://b.com/x");
+        // 空串原样
+        assert_eq!(normalize_with_source("", &src), "");
     }
 }

@@ -1159,7 +1159,9 @@ fn field_url_impl(
         return expanded;
     }
     // 规则解析（CSS/JSONPath/Regex 等）；结果为相对路径时转绝对
-    // （legado isUrl：URL 字段走 getString0 仅取首个）
+    // （legado isUrl：URL 字段走 getString0 仅取首个；提取结果的 `//host/path` 是
+    // 协议相对 URL（og:novel:read_url / 站点 href 原样——实测 156zwcc），to_absolute
+    // 内部按 base scheme 补全；`//` 的 XPath 排除只适用于上方规则文本位置，不适用于结果）
     let v = field_impl(
         context,
         Some(&expanded),
@@ -1168,7 +1170,7 @@ fn field_url_impl(
         vars.as_deref_mut(),
         true,
     );
-    if v.starts_with('/') && !v.starts_with("//") {
+    if v.starts_with('/') {
         to_absolute(&v, base)
     } else {
         v

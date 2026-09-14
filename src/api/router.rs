@@ -2561,10 +2561,16 @@ async fn search_book_multi(
         Ok(s) => s,
         Err(_) => return Json(ReturnData::err("系统错误")),
     };
+    // 失效短路仅用于批量场景提速——用户点名单源（bookSourceUrl）时绕过：
+    // 实测探针/前端单源搜索因 600s 失效标记被误报「未配置书源」
+    let bypass_invalid = !single_source_url.is_empty();
     let mut sources: Vec<crate::model::BookSource> = sources
         .into_iter()
         .filter(|s| s.enabled && s.search_url.is_some())
-        .filter(|s| !crate::service::health::is_source_invalid(&namespace, &s.book_source_url))
+        .filter(|s| {
+            bypass_invalid
+                || !crate::service::health::is_source_invalid(&namespace, &s.book_source_url)
+        })
         .filter(|s| book_source_group_matches(&group, s.book_source_group.as_deref()))
         .filter(|s| single_source_url.is_empty() || s.book_source_url == single_source_url)
         .collect();
@@ -3384,12 +3390,20 @@ async fn get_book_info(
     let Some(source) = resolve_book_source(&state, &namespace, &bs_param).await else {
         return Json(ReturnData::err("书源不存在"));
     };
+    // 书名回退链：书架已知名 > 调用方显式 name 参数（搜索点开时携带搜索结果书名——
+    // 「基本中文」类源 ruleBookInfo 无 name 规则，不回退则详情页「未知书名」）
+    let name_fallback = shelf_match
+        .map(|b| b.name.clone())
+        .or_else(|| {
+            let n = param_of(&params, body_json.as_ref(), "name");
+            if n.trim().is_empty() { None } else { Some(n) }
+        });
     match crate::service::book::fetch_book_info(
         &namespace,
         &url,
         &source,
-        // F12/AR4：书架书解析前已知名 → @get:{bookName} 内建回退（legacy setBook）
-        shelf_match.map(|b| b.name.as_str()),
+        // F12/AR4 + 详情回退：@get:{bookName} 内建回退 + name 求值空时沿用
+        name_fallback.as_deref(),
     )
     .await
     {
