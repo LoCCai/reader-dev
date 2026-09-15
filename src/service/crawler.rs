@@ -1453,12 +1453,17 @@ fn log_solve_failure_cooled(url: &str, e: &dyn std::fmt::Display) {
 /// 显式 `READER_BROWSER_FIRST=0`/`false`/`off` 可关闭，恢复“直连优先、反爬兜底”。
 /// 浏览器不可用或求解失败时自动降级直连，不会因缺浏览器导致抓取全部失败。
 fn browser_first_enabled() -> bool {
+    // 默认关闭（实测系统性污染：浏览器会话不带书源 header——Referer/Q-GUID 等，
+    // API 型站点大量返回「incorrect referer」类错误文本被当作 body，详情/正文整链
+    // 解析为空——QQ浏览器源详情 404 即此因）。legacy 语义仅 webView 显式或
+    // browser_needed（曾遇质询）才走浏览器；网络层失败的浏览器兜底保留。
+    // 显式开启：READER_BROWSER_FIRST=1
     std::env::var("READER_BROWSER_FIRST")
         .map(|v| {
             let v = v.trim().to_ascii_lowercase();
             !matches!(v.as_str(), "" | "0" | "false" | "off" | "no")
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 /// 浏览器求解后端是否可用：camoufox 启用即可（服务未启动时首次求解自动拉起）。
@@ -2000,6 +2005,11 @@ pub fn parse_header(header: &str) -> HashMap<String, String> {
 /// 合并书源登录头（legacy `getHeaderMap(true)` 语义：登录头覆盖源 header 同名键）
 fn merge_login_header(headers: &mut HashMap<String, String>, login_header: &str) {
     for (k, v) in parse_header(login_header) {
+        // 登录态空值不覆盖源头非空值（实测 QQ浏览器：搜索 JS 存的登录头含空 Referer，
+        // 覆盖源 header 的真实 Referer 后详情/目录请求全被「incorrect referer」拦）
+        if v.trim().is_empty() && headers.get(&k).is_some_and(|ov| !ov.trim().is_empty()) {
+            continue;
+        }
         headers.insert(k, v);
     }
 }
@@ -3063,5 +3073,17 @@ mod tests {
             .is_err());
         }
         assert_eq!(counter.load(Ordering::SeqCst), 6);
+    }
+
+    #[test]
+    fn tmp_dbg_parse_qq_header() {
+        let h = "{
+  \"User-Agent\": \"Mozilla/5.0 (Linux; Android 13) Mobile MQQBrowser/13.4\",
+  \"Referer\": \"https://bookshelf.html5.qq.com/qbread\",
+  \"Q-GUID\": \"4aa27c7cf2d9aca3359656ea186488cb\"
+}";
+        let m = parse_header(h);
+        println!("parsed keys: {:?}", m.keys().collect::<Vec<_>>());
+        assert!(m.contains_key("Referer"), "Referer 应被解析: {m:?}");
     }
 }

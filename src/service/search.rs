@@ -818,6 +818,34 @@ fn analyze_book_list(
     )
 }
 
+/// legado `{{book.xxx}}` 实体字段引用：条目字段循环中已求值的 SearchBook 字段
+/// （bookUrl 规则最后求值，此时 name/author/kind/intro 等均已就绪——实测 QQ浏览器
+/// `resourceId={{book.kind}}` 此前无绑定落进 JS 分支报 cannot convert null，bookUrl
+/// 恒为 `resourceId=` 空参，详情页 404 前端显示「未知」）
+fn replace_book_refs(rule: &str, book: &SearchBook) -> String {
+    if !rule.contains("{{book.") {
+        return rule.to_string();
+    }
+    let mut out = rule.to_string();
+    for (key, val) in [
+        ("name", book.name.as_str()),
+        ("author", book.author.as_str()),
+        ("kind", book.kind.as_deref().unwrap_or("")),
+        ("intro", book.intro.as_deref().unwrap_or("")),
+        ("bookUrl", book.book_url.as_str()),
+        ("bookUrlPattern", ""),
+        ("coverUrl", book.cover_url.as_deref().unwrap_or("")),
+        ("wordCount", book.word_count.as_deref().unwrap_or("")),
+        ("latestChapterTitle", book.latest_chapter_title.as_deref().unwrap_or("")),
+    ] {
+        if val.is_empty() {
+            continue;
+        }
+        out = out.replace(&format!("{{{{book.{key}}}}}"), val);
+    }
+    out
+}
+
 fn analyze_book_list_impl(
     ns: &str,
     body: &str,
@@ -937,7 +965,8 @@ fn analyze_book_list_impl(
             book.cover_url = rule
                 .cover_url
                 .as_deref()
-                .map(|r| field_url_with_vars(&item_html, Some(r), "", base_url, &mut vars))
+                .map(|r| replace_book_refs(r, &book))
+                .map(|r| field_url_with_vars(&item_html, Some(&r), "", base_url, &mut vars))
                 .filter(|v| !v.is_empty());
             book.word_count = opt_field_with_bridge_vars(
                 &item_html,
@@ -959,9 +988,14 @@ fn analyze_book_list_impl(
                 &mut vars,
             )
             .filter(|s| !s.trim().is_empty());
+            let book_url_rule = rule
+                .book_url
+                .as_deref()
+                .map(|r| replace_book_refs(r, &book))
+                .unwrap_or_default();
             let book_url = field_url_with_vars(
                 &item_html,
-                rule.book_url.as_deref(),
+                Some(&book_url_rule),
                 "",
                 base_url,
                 &mut vars,
@@ -2507,6 +2541,42 @@ mod tests {
         let (_, s) = split_url_suffix(r#"https://a.com/s,{"retry":"abc","bodyJs":"result"}"#);
         assert_eq!(s.retry, None);
         assert_eq!(s.body_js.as_deref(), Some("result"));
+    }
+
+    /// `{{book.kind}}` 实体字段引用（QQ浏览器 bookUrl `resourceId={{book.kind}}`——
+    /// 此前无绑定落 JS 分段报 cannot convert null，bookUrl 恒空参详情 404）
+    #[test]
+    fn test_book_ref_in_book_url() {
+        let src = BookSource {
+            book_source_url: "https://novel.html5.qq.com/".into(),
+            rule_search: Some(serde_json::json!({
+                "bookList": "$.data.state[*]",
+                "name": "$..title",
+                "author": "$..author",
+                "kind": "$..book_id",
+                "bookUrl": "https://novel.html5.qq.com/qbread/api/novel/bookInfo?resourceId={{book.kind}}"
+            })),
+            ..Default::default()
+        };
+        let body = r#"{"data":{"state":[
+            {"title":"测试书","author":"某人","book_id":"1134522101"}
+        ]}}"#;
+        let books = analyze_book_list(
+            "default",
+            body,
+            "https://so.html5.qq.com/search?q=x",
+            &src,
+            &serde_json::from_value(src.rule_search.clone().unwrap()).unwrap(),
+            "$.data.state[*]",
+            "测试",
+            &JsBridge::default(),
+        );
+        assert_eq!(books.len(), 1);
+        assert_eq!(
+            books[0].book_url,
+            "https://novel.html5.qq.com/qbread/api/novel/bookInfo?resourceId=1134522101",
+            "{{book.kind}} 应替换为条目 kind 字段值"
+        );
     }
 
     /// 裸键 JSON 书单 + `||` 备选（实测纵横中文 `result.resultList||result.bookList`

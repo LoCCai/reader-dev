@@ -218,3 +218,27 @@ h1=「访问验证」→ 下游规则求值出垃圾 tocUrl）——站点侧为
 （tocUrl 垃圾值校验 + 拦截页检测）。
 
 验证：cargo test **741 lib + 15 e2e** 全绿；前端 86/86。
+
+
+---
+
+# 第十二轮（2026-09-15）：QQ浏览器源「未知」六连修（正式部署实测）
+
+用户在正式部署报「📚QQ浏览器」搜到书点开未知。书源调试面板输出直指 `resourceId=` 空参 +
+jsError cannot convert null——逐层定位出**六个叠加缺陷**（每层修完暴露下一层）：
+
+| # | 缺陷 | 根因 | 修复 |
+|---|---|---|---|
+| E-1 | 搜索 bookUrl `resourceId={{book.kind}}` 恒空参 | legado `{{book.xxx}}` 实体字段引用（引当前条目已求值字段）无实现——落 JS 分支无 book 绑定即报错 | 搜索条目 `replace_book_refs`（bookUrl/coverUrl 求值前替换 name/author/kind/intro 等已求值字段） |
+| E-2 | 浏览器优先系统性污染 | `browser_first_enabled` 默认 true——所有 GET 先走内置浏览器，**浏览器会话不带书源 header**（Referer/Q-GUID 等），API 站大量返回错误文本被当 body | 默认改 false（legacy 语义：仅 webView 显式/browser_needed 标记/网络层失败兜底走浏览器；`READER_BROWSER_FIRST=1` 可显式开启） |
+| E-3 | 登录头空值覆盖 | 搜索 JS putLoginHeader 存的动态头含空 Referer，无条件覆盖源头真实 Referer | merge_login_header 空值不覆盖非空既有值 |
+| E-4 | `@js` 动态 header 生成的空 Referer | 「📚」源 header 本身是 @js 脚本，生成 Referer:""（脚本缺陷），QQ 详情/目录 API 一律拒（incorrect referer）——node 对照实验证实**必须有 Referer** | fetch_url 兜底：header 求值后 Referer 为空串 → 回填书源根（非空定向 Referer 不受影响） |
+| E-5 | 详情 tocUrl `{{$.resourceID}}`/`{{book.kind}}` 均空 | ① URL 型规则被 field 当字面量返回（{{}} 未展开）；② 详情阶段无 {{book.x}} 替换 | ① evaluated 含未展开 {{}} 时走 expand fallback；② analyze_book_info 的 kind 先求 + `replace_info_book_refs` |
+| E-6 | 探针/前序误判 | 正文响应 data 形态是 {content} 对象 | （探针已修） |
+
+**修复后「📚QQ浏览器」全链路**：搜索 20 本（bookUrl resourceId=1134522101 正确）→
+详情（name/intro/cover 齐全）→ **目录 1595 章**（第1章 绝顶资质）→ 正文：chapterUrl 的
+`{{baseUrl.match(/bookId=(\d+)/)[1]}}` 动态模板在目录条目循环未生效（回退 tocUrl）——
+**遗留结转**（目录条目内嵌 JS 正则求值），见第十三轮。
+
+验证：cargo test **743 lib + 15 e2e** 全绿；前端 86/86。

@@ -140,6 +140,26 @@ pub async fn fetch_url(ns: &str, url: &str, source: &BookSource) -> Result<crawl
         .as_deref()
         .map(crawler::parse_header)
         .unwrap_or_default();
+    // 兜底：header（含 @js 动态生成）中 Referer 为**空串**时回填书源根——
+    // 实测「📚QQ浏览器」源 header 为 @js 脚本动态生成 Referer:""（脚本缺陷），
+    // QQ 详情/目录 API 对无/空 Referer 一律返回 incorrect referer 错误文本，
+    // 整链解析为空。非空定向 Referer（防盗链场景）不受影响
+    if headers
+        .get("Referer")
+        .or_else(|| headers.get("referer"))
+        .is_some_and(|r| r.trim().is_empty())
+    {
+        let root = source
+            .book_source_url
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !root.is_empty() {
+            headers.insert("Referer".to_string(), root);
+        }
+    }
     let (url_part, suffix) = crate::service::search::split_url_suffix(url);
     let mut final_url = url_part;
     if let Some(js) = &suffix.js {
@@ -367,6 +387,16 @@ fn fallback_title(html: &str) -> String {
     String::new()
 }
 
+/// 详情页 tocUrl 的 `{{book.xxx}}` 实体引用替换（「📚QQ浏览器」`bookId={{book.kind}}`——
+/// 搜索条目 replace_book_refs 的详情版；详情上下文字段较少，按需扩展）
+fn replace_info_book_refs(rule: &str, name: &str, kind: &str) -> String {
+    if !rule.contains("{{book.") {
+        return rule.to_string();
+    }
+    rule.replace("{{book.name}}", name)
+        .replace("{{book.kind}}", kind)
+}
+
 pub fn analyze_book_info(
     ns: &str,
     html: &str,
@@ -389,18 +419,35 @@ pub fn analyze_book_info(
     vars.insert("baseUrl".to_string(), base_url.to_string());
     let html = crate::parser::rule::apply_init_with_vars(html, rule.init.as_deref(), &mut vars);
     let html = html.as_str();
+    // kind 先求（tocUrl 的 {{book.kind}} 实体引用需要——「📚QQ浏览器」实测：
+    // `bookId={{book.kind}}` 且 kind 规则映射 resourceID）
+    let kind_val: Option<String> = crate::service::search::opt_field_with_vars(
+        html,
+        rule.kind.as_deref(),
+        &mut vars,
+    )
+    .map(|k| crate::service::search::normalize_kind_list(&k));
     // tocUrl 规则（legacy BookInfo.tocUrl 为完整字段规则）：
     // ① 选择器形态（CSS/XPath/JSONPath/@js 链）→ field 全量求值；
-    // ② 求值为空时回退 v1 直接路径/URL 拼接 + {{}} 内嵌模板展开
+    // ② 求值为空（或 URL 型字面量含未展开 {{}}）时回退内嵌模板展开；
+    // ③ `{{book.xxx}}` 实体引用替换为已求值字段（搜索条目同款语义）
     let toc_url = rule
         .toc_url
         .as_deref()
         .map(|r| {
-            let evaluated = crate::service::search::field_with_vars(html, Some(r), "", &mut vars);
-            if !evaluated.is_empty() {
+            let r = replace_info_book_refs(
+                r,
+                book_name.unwrap_or_default(),
+                kind_val.as_deref().unwrap_or_default(),
+            );
+            let evaluated = crate::service::search::field_with_vars(html, Some(&r), "", &mut vars);
+            // URL 型规则（`https://...?x={{$.y}}`）被当字面量原样返回时 {{}} 未展开
+            // ——实测 QQ浏览器 tocUrl `bookId={{$.resourceID}}` 恒空参（目录 0 章）。
+            // 含未展开 {{}} 的结果走内嵌展开（init 后上下文相对求值）
+            if !evaluated.is_empty() && !evaluated.contains("{{") {
                 evaluated
             } else {
-                crate::service::search::expand_embedded_with_vars(r, html, &vars)
+                crate::service::search::expand_embedded_with_vars(&r, html, &vars)
             }
         })
         .filter(|r| !r.is_empty())
@@ -429,8 +476,7 @@ pub fn analyze_book_info(
         author: crate::service::search::format_book_author(
             &crate::service::search::field_with_vars(html, rule.author.as_deref(), "", &mut vars),
         ),
-        kind: crate::service::search::opt_field_with_vars(html, rule.kind.as_deref(), &mut vars)
-            .map(|k| crate::service::search::normalize_kind_list(&k)),
+        kind: kind_val,
         intro: crate::service::search::opt_field_with_vars(html, rule.intro.as_deref(), &mut vars),
         update_time: crate::service::search::opt_field_with_vars(
             html,
