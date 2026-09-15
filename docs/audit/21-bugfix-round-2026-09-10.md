@@ -265,3 +265,24 @@ jsError cannot convert null——逐层定位出**六个叠加缺陷**（每层�
 
 坑记录：诊断期间被 toc 缓存误导两轮（级联已通但响应吃缓存）——缓存键不含规则版本，
 同类调试需先 clearCache。
+
+
+---
+
+# 第十四轮（2026-09-15）：《圣墟》（🏷QQ浏览器）正文打通——URL 后缀对象 body 三连修
+
+用户问"不是应该所有书源写法都兼容吗"——目标确是 legacy 语义全集；legado 规则语法×JS×
+组合空间极大，冷门组合只有真实源踩到才暴露，每例固化回归测试使兼容面单调递增。
+《圣墟》与《我的师傅》走库里**两条不同 QQ 源**，章节 URL 形态不同，踩出三个新缺口：
+
+| # | 缺口 | 根因 | 修复 |
+|---|---|---|---|
+| G-1 | chapterUrl 为**跨行 JSON body 的 URL 模板**（`ads-read,{` 换行 `"method"...`） | cascade 按行盲切撕碎 JSON——首段 `ads-read,{` 被当选择器 | `merge_unbalanced_lines`：括号/引号未闭合时并入下一行（平衡感知），闭合后整体成段 |
+| G-2 | cascade 选择器段用普通 field 求值 | URL 模板被当 JsonPath 解析成空 → ctx 残留 item 原文 → 拼 `/api/book/%7B...` 乱码 URL | 选择器段改 `field_url_with_vars`（URL 语义：直判+{{}}展开+相对拼接）+ 结果含 `{{` 时再内嵌展开 |
+| G-3 | **UrlSuffix.body 严格 String** | 后缀 body 为 JSON 对象（🏷 形态）→ 整个后缀反序列化失败 → `url,{...}` 带尾巴当 URL 请求 → 响应非 JSON 解析空 | body 宽容反序列化（json_text：String 原样/对象→紧凑 JSON 串） |
+
+**实测**：《圣墟》目录 1696 章 → **正文 2252 字**（第1章"大漠孤烟直，长河落日圆"）；
+《我的师傅》（📚 源）无回归（2310 字）。两形态回归测试入库
+（`test_chapter_url_url_template_multiline_json_body` / `test_url_suffix_object_body`）。
+
+验证：cargo test **746 lib + 15 e2e** 全绿（8 套件）。

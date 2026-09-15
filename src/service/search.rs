@@ -149,7 +149,11 @@ pub struct UrlSuffix {
     pub body_js: Option<String>,
     /// 请求方法（POST/GET，默认 GET）
     pub method: Option<String>,
-    /// POST body（支持 {{key}}/{{page}} 模板替换）
+    /// POST body（支持 {{key}}/{{page}} 模板替换）。
+    /// 宽容反序列化（「🏷QQ浏览器」等源 body 为 JSON 对象而非字符串——严格 String
+    /// 会使整个后缀反序列化失败、url 带尾巴整体当 URL 请求）：String 原样，
+    /// 其余 JSON 值序列化为紧凑字符串
+    #[serde(default, deserialize_with = "crate::util::json_text::deserialize_option")]
     pub body: Option<String>,
     /// 附加请求头（与书源 header 合并）
     pub headers: Option<std::collections::HashMap<String, String>>,
@@ -2516,6 +2520,18 @@ mod tests {
         );
         assert_eq!(books[0].name, "书名A", "`+` 前缀保持原序");
         assert_eq!(books[1].name, "书名B");
+    }
+
+    /// UrlSuffix.body 宽容反序列化：JSON 对象 body（「🏷QQ浏览器」形态）——严格 String
+    /// 会使整个后缀解析失败、url 带尾巴当 URL 请求
+    #[test]
+    fn test_url_suffix_object_body() {
+        let url = "https://x.test/api/ads-read,{\"method\": \"POST\", \"body\": {\"Scene\": \"chapter\", \"b\": [1, 2]}}";
+        let (u, s) = split_url_suffix(url);
+        assert_eq!(u, "https://x.test/api/ads-read");
+        assert_eq!(s.method.as_deref(), Some("POST"));
+        assert!(s.body.as_deref().is_some_and(|b| b.contains("\"Scene\":\"chapter\"") && b.contains("[1,2]")),
+            "对象 body 应规范为紧凑 JSON 字符串: {:?}", s.body);
     }
 
     /// UrlSuffix.retry（legacy AnalyzeUrl UrlOption.retry，AnalyzeUrl.kt:564-573）：

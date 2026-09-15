@@ -932,6 +932,30 @@ fn js_chapter_items(rule: &str, body: &str) -> Vec<String> {
 /// 的 result 上下文，最终段输出 URL）。实测「📚QQ浏览器」chapterUrl 为
 /// `$.serialID` 换行 `@js:...BookID: book.kind, ChapterSeqNo: [result]...`。
 /// JS 段里的 `book.xxx` 实体引用按 vars 预替换为字面量（bookKind 由详情传入）
+/// 平衡感知行合并：括号（{}[]()）或引号未闭合时并入下一行——URL 型规则的
+/// `,{...}` JSON body 模板天然跨行（「🏷QQ浏览器」chapterUrl），盲按行切会撕碎 JSON
+fn merge_unbalanced_lines(rule: &str) -> String {
+    let mut out = String::with_capacity(rule.len());
+    let mut depth = 0i32;
+    let mut in_s = false;
+    let mut in_d = false;
+    for ch in rule.chars() {
+        match ch {
+            '\'' if !in_d => in_s = !in_s,
+            '"' if !in_s => in_d = !in_d,
+            '{' | '[' | '(' if !in_s && !in_d => depth += 1,
+            '}' | ']' | ')' if !in_s && !in_d => depth -= 1,
+            '\n' if !in_s && !in_d && depth > 0 => {
+                out.push(' ');
+                continue;
+            }
+            _ => {}
+        }
+        out.push(ch);
+    }
+    out
+}
+
 fn chapter_url_with_cascade(
     rule: &str,
     item: &str,
@@ -943,7 +967,8 @@ fn chapter_url_with_cascade(
         return crate::service::search::field_url_with_vars(item, Some(rule), "", base, vars);
     }
     let mut ctx = item.to_string();
-    let segs: Vec<&str> = rule.lines().collect();
+    let merged = merge_unbalanced_lines(rule);
+    let segs: Vec<&str> = merged.lines().collect();
     let mut idx = 0usize;
     while idx < segs.len() {
         let seg = segs[idx].trim();
@@ -977,8 +1002,16 @@ fn chapter_url_with_cascade(
                 }
             }
         } else {
-            // 选择器段：在当前上下文求值（结果回填 ctx 供后续段 result）
-            let got = crate::service::search::field_with_vars(&ctx, Some(seg), "", vars);
+            // 选择器/URL 段：在当前上下文求值（结果回填 ctx 供后续段 result）。
+            // URL 型段被 field 当字面量返回时 {{}} 未展开——补内嵌展开
+            //（`$.x` 相对 ctx、baseUrl 等在 vars）
+            // chapterUrl 是 URL 字段——用 URL 语义求值（直判+{{}}展开+相对拼接），
+            // 普通 field 会把 URL 模板当 JsonPath 解析成空（实测 🏷 源整条被解析为空
+            // 后 ctx 残留 item 原文，拼出 /api/book/%7B... 乱码 URL）
+            let mut got = crate::service::search::field_url_with_vars(&ctx, Some(seg), "", base, vars);
+            if got.contains("{{") {
+                got = crate::service::search::expand_embedded_with_vars(&got, &ctx, vars);
+            }
             if !got.is_empty() {
                 ctx = got;
             }
@@ -2872,6 +2905,30 @@ mod tests {
         let _ = fetch_url("default", &url, &src).await.unwrap();
         let recorded = times.lock().unwrap();
         assert_eq!(recorded.len(), 2);
+    }
+
+    /// URL 模板含跨行 JSON body（「🏷QQ浏览器」ads-read 逗号 JSON body 模板跨多行）——
+    /// 平衡行合并 + URL 语义求值 + {{baseUrl.match}}/{{$.serialID}} 内嵌展开）
+    #[test]
+    fn test_chapter_url_url_template_multiline_json_body() {
+        // 🏫QQ浏览器（无尾斜杠）单行模板规则（body 为对象、{{baseUrl.match}} 内嵌）
+        let rule = r#"https://novel.html5.qq.com/be-api/content/ads-read,{
+  "method": "POST",
+  "body": {
+    "Scene": "chapter",
+    "ContentAnchorBatch": [
+      {
+        "BookID": "{{baseUrl.match(/bookId=(\d+)/)[1]}}",
+        "ChapterSeqNo": [{{$.serialID}}]
+      }
+    ]
+  }
+}"#;
+        let item = r#"{"serialID":1,"serialName":"第1章 沙漠中的彼岸花"}"#;
+        let mut vars = crate::parser::rule::RuleVars::new();
+        vars.insert("baseUrl".to_string(), "https://bookshelf.html5.qq.com/qbread/api/book/all-chapter?bookId=1114608738".to_string());
+        let url = chapter_url_with_cascade(rule, item, "https://bookshelf.html5.qq.com/qbread/api/book/all-chapter?bookId=1114608738", &mut vars);
+        println!("tag chapter url => {}", url.chars().take(260).collect::<String>());
     }
 
     /// 多行 chapterUrl 级联（「📚QQ浏览器」`$.serialID` 换行 `@js:` 独立行 + 多行 JS——
