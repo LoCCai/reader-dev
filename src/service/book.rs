@@ -673,7 +673,21 @@ pub async fn analyze_toc(
     book_name: Option<&str>,
     book_url: &str,
 ) -> Result<Vec<BookChapter>> {
-    match analyze_toc_impl(ns, toc_url, source, max_pages, book_name, book_url).await {
+    analyze_toc_with_kind(ns, toc_url, source, max_pages, book_name, book_url, None).await
+}
+
+/// [`analyze_toc`] 带 book.kind 版——目录阶段 chapterUrl JS 的 `book.kind` 实体引用
+/// （「📚QQ浏览器」`BookID: book.kind`）需要详情求出的 kind
+pub async fn analyze_toc_with_kind(
+    ns: &str,
+    toc_url: &str,
+    source: &BookSource,
+    max_pages: usize,
+    book_name: Option<&str>,
+    book_url: &str,
+    book_kind: Option<&str>,
+) -> Result<Vec<BookChapter>> {
+    match analyze_toc_impl(ns, toc_url, source, max_pages, book_name, book_url, book_kind).await {
         Ok(v) => {
             crate::service::health::clear_source_invalid(ns, &source.book_source_url);
             Ok(v)
@@ -689,6 +703,7 @@ pub async fn analyze_toc(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn analyze_toc_impl(
     ns: &str,
     toc_url: &str,
@@ -696,6 +711,7 @@ async fn analyze_toc_impl(
     max_pages: usize,
     book_name: Option<&str>,
     book_url: &str,
+    book_kind: Option<&str>,
 ) -> Result<Vec<BookChapter>> {
     let mut all: Vec<BookChapter> = Vec::new();
     let mut current_url = toc_url.to_string();
@@ -705,6 +721,23 @@ async fn analyze_toc_impl(
     let mut vars =
         crate::parser::rule::load_book_vars_merged(ns, &source.book_source_url, book_url, toc_url);
     vars.book_name = book_name.map(str::to_string);
+    // 目录阶段 book.kind 实体引用（chapterUrl JS `BookID: book.kind`）——详情传入；
+    // 缺省时从 tocUrl 的 bookId=\d+ 提取（QQ 型源通用形态）
+    let kind_fallback = book_kind
+        .map(str::to_string)
+        .or_else(|| {
+            static BOOK_ID_RE: std::sync::OnceLock<crate::util::regex::Regex> =
+                std::sync::OnceLock::new();
+            let re = BOOK_ID_RE.get_or_init(|| {
+                crate::util::regex::Regex::new(r"bookId=(\d+)").expect("bookId 正则")
+            });
+            re.captures_iter(toc_url)
+                .next()
+                .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
+        });
+    if let Some(k) = kind_fallback {
+        vars.insert("bookKind".to_string(), k);
+    }
 
     for _page in 0..max_pages {
         let resp = fetch_url(ns, &current_url, source).await?;
@@ -895,6 +928,65 @@ fn js_chapter_items(rule: &str, body: &str) -> Vec<String> {
     }
 }
 
+/// 多行 chapterUrl 规则（legado splitSource 级联：段1 换行 段2——前段结果作为后段
+/// 的 result 上下文，最终段输出 URL）。实测「📚QQ浏览器」chapterUrl 为
+/// `$.serialID` 换行 `@js:...BookID: book.kind, ChapterSeqNo: [result]...`。
+/// JS 段里的 `book.xxx` 实体引用按 vars 预替换为字面量（bookKind 由详情传入）
+fn chapter_url_with_cascade(
+    rule: &str,
+    item: &str,
+    base: &str,
+    vars: &mut crate::parser::rule::RuleVars,
+) -> String {
+    println!("[cascade] rule_head={:?} has_nl={}", &rule[..rule.len().min(30)], rule.contains('\n'));
+    if !rule.contains('\n') {
+        return crate::service::search::field_url_with_vars(item, Some(rule), "", base, vars);
+    }
+    let mut ctx = item.to_string();
+    let segs: Vec<&str> = rule.lines().collect();
+    let mut idx = 0usize;
+    while idx < segs.len() {
+        let seg = segs[idx].trim();
+        idx += 1;
+        if seg.is_empty() {
+            continue;
+        }
+        if seg.starts_with("@js:") || seg.starts_with("js:") {
+            // 同行（@js:代码）或独立行（@js: 后所有行为代码——QQ浏览器多行 JS 形态）
+            let js_raw = if seg.len() > 4 {
+                seg[4..].to_string()
+            } else {
+                let rest: Vec<&str> = segs[idx..].to_vec();
+                idx = segs.len();
+                rest.join("\n")
+            };
+            // book.* 标识符 → vars 字面量（bookName/bookKind 已注入 vars）
+            let bk = vars.get("bookKind").cloned().unwrap_or_default();
+            let bn = vars.get("bookName").cloned().unwrap_or_default();
+            let bu = vars.get("bookUrl").cloned().unwrap_or_default();
+            let js = js_raw
+                .replace("book.kind", &format!("{bk:?}"))
+                .replace("book.name", &format!("{bn:?}"))
+                .replace("book.bookUrl", &format!("{bu:?}"));
+            vars.insert("result".to_string(), ctx.clone());
+            match crate::parser::js::eval_js_with_bridge(js.trim(), vars, &crate::parser::js::JsBridge::default()) {
+                Ok(out) => ctx = out,
+                Err(e) => {
+                    tracing::warn!("chapterUrl 多行级联 JS 段失败: {e}");
+                    return String::new();
+                }
+            }
+        } else {
+            // 选择器段：在当前上下文求值（结果回填 ctx 供后续段 result）
+            let got = crate::service::search::field_with_vars(&ctx, Some(seg), "", vars);
+            if !got.is_empty() {
+                ctx = got;
+            }
+        }
+    }
+    ctx
+}
+
 /// 章节上下文列表 → 章节（字段规则应用 + 相对 URL 转绝对）
 fn chapters_from_items(
     items: &[String],
@@ -914,11 +1006,12 @@ fn chapters_from_items(
                 vars,
             );
             let url = match &rule.chapter_url {
-                Some(r) => {
-                    crate::service::search::field_url_with_vars(item, Some(r), "", base, vars)
-                }
+                Some(r) => chapter_url_with_cascade(r, item, base, vars),
                 None => String::new(),
             };
+            if std::env::var("DBG_TOC").is_ok() && i < 2 {
+                println!("[toc-item {i}] item={:?} title={:?} url={:?}", &item[..item.len().min(120)], &title[..title.len().min(20)], &url[..url.len().min(160)]);
+            }
             if title.is_empty() && url.is_empty() {
                 return None;
             }
@@ -2779,6 +2872,31 @@ mod tests {
         let _ = fetch_url("default", &url, &src).await.unwrap();
         let recorded = times.lock().unwrap();
         assert_eq!(recorded.len(), 2);
+    }
+
+    /// 多行 chapterUrl 级联（「📚QQ浏览器」`$.serialID` 换行 `@js:` 独立行 + 多行 JS——
+    /// BookID: book.kind 实体引用 + result 前段结果）
+    #[test]
+    fn test_chapter_url_multiline_cascade() {
+        let rule = "$.serialID
+@js:
+let data = JSON.stringify({
+  ContentAnchorBatch: [{
+    BookID: book.kind,
+    ChapterSeqNo: [
+      result
+    ]
+  }],
+  Scene: \"chapter\"
+})
+let option = {\"method\":\"POST\",\"body\":data}
+\"https://novel.html5.qq.com/be-api/content/ads-read,\"+JSON.stringify(option)";
+        let item = r#"{"serialID":1,"serialName":"第1章 绝顶资质","isFree":true}"#;
+        let mut vars = crate::parser::rule::RuleVars::new();
+        vars.insert("bookKind".to_string(), "1134522101".to_string());
+        vars.insert("bookName".to_string(), "测试书".to_string());
+        let out = chapter_url_with_cascade(rule, item, "https://novel.html5.qq.com/qbread/api/book/all-chapter?bookId=1134522101", &mut vars);
+        println!("cascade out => {}", out.chars().take(220).collect::<String>());
     }
 
     /// bookUrl 相对书源规范化（legacy AnalyzeUrl baseUrl 语义——实测 156zwcc 搜索结果

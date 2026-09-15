@@ -242,3 +242,26 @@ jsError cannot convert null——逐层定位出**六个叠加缺陷**（每层�
 **遗留结转**（目录条目内嵌 JS 正则求值），见第十三轮。
 
 验证：cargo test **743 lib + 15 e2e** 全绿；前端 86/86。
+
+
+---
+
+# 第十三轮（2026-09-15）：QQ浏览器正文打通 + 试读四报障收口
+
+用户正式部署四报障（试读弹「书籍未加入书架」/阅读无内容/缓存面板 0 章/点章节「未找到
+这本书」）——后三个同根：**chapterUrl 多行级联缺失**。实测「📚QQ浏览器」ruleToc.chapterUrl
+为 `$.serialID` 换行 `@js:` 独立行 + 多行 JS（`BookID: book.kind` 实体引用 + `result`
+前段结果 + 手工拼 POST body URL）。
+
+| # | 修复 | 说明 |
+|---|---|---|
+| F-1 | `chapter_url_with_cascade`（chapters_from_items 专用） | legado splitSource 级联：按行分段、前段结果注入 result、`@js:` 独立行**吞噬后续所有行为代码**（首版只取同行空串致静默空）、`book.kind/name/bookUrl` 标识符按 vars 预替换字面量 |
+| F-2 | `analyze_toc_with_kind` + bookKind 注入链 | 目录阶段 `book.kind` 实体引用需要详情求出的 kind——handler 传参 + **tocUrl `bookId=\d+` 提取兜底**（QQ 型源通用形态） |
+| F-3 | 目录缓存污染清理 | 首次坏结果（chapter.url=tocUrl）被 toc 缓存——验证需 clearCache；缓存键含章节 URL 故修复后新缓存自愈 |
+
+**修复后全链路实测**：目录 1610 章（ch0Url = ads-read POST 模板 BookID 正确）→
+**正文 2310 字**（第1章「飞羽界，阙天门。徐凡……」）——阅读/缓存（章节列表非空）/点章节
+三个报障全部解除；试读浏览器实测**无弹窗**（问题 1 为正文断链下游效应，随修复自解）。
+
+坑记录：诊断期间被 toc 缓存误导两轮（级联已通但响应吃缓存）——缓存键不含规则版本，
+同类调试需先 clearCache。
