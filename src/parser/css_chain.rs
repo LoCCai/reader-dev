@@ -1314,12 +1314,24 @@ fn text_without_scripts(el: &ElementRef) -> String {
     s
 }
 
-/// 元素 outerHTML，但移除内部 script/style（legado @html 语义）
+/// 元素 innerHTML，但移除内部 script/style（legado @html 语义 = jsoup Element.html()）
 fn html_without_scripts(el: &ElementRef) -> String {
-    let mut frag = Html::parse_fragment(&el.html());
+    // scraper ElementRef::html() 是 outerHTML——inner = outer 剥首尾标签
+    // （子节点全保留：文本+元素；实测久久小说 intro `class.intro_info.0@html` 带
+    // <div> 外壳即露标签；首版逐元素子节点序列化会丢混合文本节点）
+    let outer = el.html();
+    let source = {
+        let open_end = outer.find('>').map(|i| i + 1);
+        let close_start = outer.rfind("</");
+        match (open_end, close_start) {
+            (Some(a), Some(b)) if b > a => outer[a..b].to_string(),
+            _ => outer.clone(),
+        }
+    };
+    let mut frag = Html::parse_fragment(&source);
     let sel = match Selector::parse("script, style") {
         Ok(s) => s,
-        Err(_) => return el.html(),
+        Err(_) => return source,
     };
     let ids: Vec<_> = frag.select(&sel).map(|e| e.id()).collect();
     for id in ids {
@@ -1866,11 +1878,12 @@ mod tests {
         let html = r#"<html><body><article id="nr"><p>有人跳河了</p><p>围观群众</p></article></body></html>"#;
         let r = css_chain("#nr@html", html);
         assert_eq!(r.len(), 1);
+        // innerHtml 语义（jsoup html()）：不带选中元素自身标签，子内容完整
         assert!(
-            r[0].starts_with("<article") && !r[0].starts_with("<html>"),
-            "应返回元素自身 html（不带 parse_fragment 壳）: {}",
-            &r[0][..r[0].len().min(50)]
+            !r[0].starts_with("<article") && !r[0].starts_with("<html>"),
+            "应返回 innerHtml（不带自身标签与 parse_fragment 壳）: {}",
+            &r[0][..r[0].len().min(60)]
         );
-        assert!(r[0].contains("有人跳河了"));
+        assert!(r[0].contains("<p>有人跳河了</p>") && r[0].contains("围观群众"));
     }
 }

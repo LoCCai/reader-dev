@@ -3,9 +3,14 @@ import { useUserStore } from '@/stores/user'
 import { openSSEPost } from './sse'
 import type { BookChapter, BookContent, BookInfo, ReturnData, SearchBook } from '@/types'
 
-/** GET /reader3/getBookInfo：书籍详情（参数 url + bookSource=book.origin） */
-export function getBookInfo(url: string, bookSource: string, opts?: { silent?: boolean }): Promise<ReturnData<BookInfo>> {
-  return get<BookInfo>('/getBookInfo', { url, bookSource }, opts)
+/** GET /reader3/getBookInfo：书籍详情（url + bookSource=origin；cover/name 为回退值——
+ *  源详情规则未配置对应字段时后端沿用（legacy BookInfo 合并语义）） */
+export function getBookInfo(
+  url: string,
+  bookSource: string,
+  opts?: { silent?: boolean; cover?: string; name?: string },
+): Promise<ReturnData<BookInfo>> {
+  return get<BookInfo>('/getBookInfo', { url, bookSource, cover: opts?.cover, name: opts?.name }, opts)
 }
 
 /**

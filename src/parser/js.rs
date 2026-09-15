@@ -7652,12 +7652,10 @@ mod tests {
         .unwrap();
         let arr2 = json2.as_array().expect("应返回数组");
         assert_eq!(arr2.len(), 2);
+        // @html = jsoup html() = innerHtml（不带选中元素自身标签）
         assert!(
-            arr2[0]
-                .as_str()
-                .unwrap()
-                .contains("<div class=\"book\"><h2>书名A</h2></div>"),
-            "元素应返回 outerHTML: {}",
+            arr2[0].as_str().unwrap().contains("<h2>书名A</h2>"),
+            "元素应返回 innerHTML: {}",
             arr2[0]
         );
         assert!(arr2[1].as_str().unwrap().contains("书名B"));

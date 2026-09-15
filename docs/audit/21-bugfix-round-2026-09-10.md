@@ -286,3 +286,20 @@ jsError cannot convert null——逐层定位出**六个叠加缺陷**（每层�
 （`test_chapter_url_url_template_multiline_json_body` / `test_url_suffix_object_body`）。
 
 验证：cargo test **746 lib + 15 e2e** 全绿（8 套件）。
+
+
+---
+
+# 第十五轮（2026-09-16）：久久小说（m.9191net.com）四报障——@html inner/作者清洗/封面回退/mixed-content
+
+| # | 报障 | 根因 | 修复 |
+|---|---|---|---|
+| H-1 | 详细信息带 HTML 标签 | `@html` 提取器返回 outerHTML（含选中元素自身标签）——legado/jsoup `html()` 是 **innerHTML** | `html_without_scripts` 改 inner（outer 剥首尾标签，子节点全保留）；两个旧断言随语义更新 |
+| H-2 | 作者带一串「分类：…状态：…」尾巴 | 源 `##` 多行清洗正则按旧模板书写失配（要求 RAR/ZIP 段而页面已无） | 双兜底：① replaceRegex 行边界兼容（pattern 含字面换行而文本无换行 → `\s+` 宽松重试）② format_book_author 元数据行剔除 + 仍多行取首非空行（作者天然单行） |
+| H-3 | 书籍页封面空 | 源 ruleBookInfo 无 coverUrl 规则，详情不回退 | getBookInfo 新增 `cover` 参数（搜索/探索跳转携带），cover 求值空时沿用（legacy BookInfo 合并）；前端 4 处调用透传 |
+| H-4 | https 部署下 http 封面全挂 | 浏览器 mixed-content 拦截（久久/大量 http 源） | proxyImageUrl：https 页面 + http 图片自动经 /assets/proxy（无需用户开关） |
+| —— | 章节目录只有 1 项「TXT下载」 | **站点为打包下载站**（详情页仅一个下载按钮，正文规则输出下载链接）——源/站点形态，legado 同样 | 非缺陷（向用户说明） |
+
+**实测**：author=金陵雪、intro 纯文本、封面回填、QQ 两书（我的师傅/圣墟）无回归。
+验证：cargo test **748 lib + 15 e2e** 全绿；前端 86/86 + build 通过。
+诊断坑：进程内详情缓存（book_info_cache）会掩盖 handler 层修复——验证需重启实例。

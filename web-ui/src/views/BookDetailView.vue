@@ -30,6 +30,8 @@ const bookUrl = computed(() => String(route.params.url ?? ''))
 /** 非书架书的书源信息：入口（搜索结果等）通过 query 传入 */
 const queryOrigin = computed(() => String(route.query.origin ?? ''))
 const queryOriginName = computed(() => String(route.query.originName ?? ''))
+// 路由携带的封面（搜索/探索跳转传入——详情缺字段时后端回退沿用）
+const queryCover = computed(() => String(route.query.cover ?? ''))
 
 const shelfBook = ref<Book | null>(null)
 const info = ref<BookInfo | null>(null)
@@ -129,7 +131,7 @@ async function load() {
     if (found?.origin) {
       // ② 书架书：详情接口 bookSource=book.origin，实时详情优先，失败用书架数据兜底
       try {
-        const infoRes = await getBookInfo(bookUrl.value, found.origin)
+        const infoRes = await getBookInfo(bookUrl.value, found.origin, { cover: queryCover.value })
         if (infoRes.isSuccess) info.value = infoRes.data
       } catch {
         // 实时详情失败：用书架数据兜底展示
@@ -137,7 +139,7 @@ async function load() {
     } else if (isLocalBookUrl(bookUrl.value)) {
       // ③ 本地书：后端 local 分支直查书架返回（无需 bookSource；不在书架则报错）
       try {
-        const infoRes = await getBookInfo(bookUrl.value, '')
+        const infoRes = await getBookInfo(bookUrl.value, '', { cover: queryCover.value })
         if (infoRes.isSuccess) info.value = infoRes.data
       } catch (err) {
         loadFailed.value = true
@@ -146,7 +148,7 @@ async function load() {
     } else if (queryOrigin.value) {
       // ④ 非书架书：直接调详情接口（后端已支持非书架书，bookSource=入口传入的 origin）
       try {
-        const infoRes = await getBookInfo(bookUrl.value, queryOrigin.value)
+        const infoRes = await getBookInfo(bookUrl.value, queryOrigin.value, { cover: queryCover.value })
         if (infoRes.isSuccess) info.value = infoRes.data
       } catch (err) {
         loadFailed.value = true
@@ -663,7 +665,7 @@ async function switchSource(r: SearchBook) {
     tocLoaded.value = false
     tocChapters.value = []
     try {
-      const infoRes = await getBookInfo(bookUrl.value, r.origin)
+      const infoRes = await getBookInfo(bookUrl.value, r.origin, { cover: queryCover.value })
       if (infoRes.isSuccess) info.value = infoRes.data
     } catch {
       // 详情刷新失败：书架数据兜底展示

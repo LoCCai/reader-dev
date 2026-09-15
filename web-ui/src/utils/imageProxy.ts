@@ -24,6 +24,11 @@ export function setImageProxyEnabled(on: boolean): void {
 
 export function proxyImageUrl(url: string | null | undefined): string | null | undefined {
   if (!url || !/^https?:\/\//i.test(url)) return url
-  if (!imageProxyEnabled()) return url
+  // https 页面下的 http 图片会被浏览器 mixed-content 拦截（实测久久小说等
+  // http 书源封面在 https 部署全挂）——自动经后端代理，无需用户开关
+  const forced = typeof window !== 'undefined'
+    && window.location.protocol === 'https:'
+    && /^http:\/\//i.test(url)
+  if (!forced && !imageProxyEnabled()) return url
   return `/assets/proxy?url=${encodeURIComponent(url)}`
 }

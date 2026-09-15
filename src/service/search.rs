@@ -236,8 +236,30 @@ pub(crate) fn format_book_author(author: &str) -> String {
                 .build()
                 .expect("authorRegex 编译失败")
         });
+    // 元数据行兜底剔除：多行 author（详情页 p 原文整段提取——源清洗正则常按旧模板
+    // 书写失配）时，剔除「分类：/状态：/格式：/大小：/更新：」等元数据行，首行保留
+    static META_LINE_RE: std::sync::LazyLock<crate::util::regex::Regex> =
+        std::sync::LazyLock::new(|| {
+            crate::util::regex::RegexBuilder::new(
+                r"(?m)^\s*((分类|状态|格式|大小|更新|时间|来源|字数|点击)[:：].*|(下载|RAR|ZIP|苹果端|安卓|电子书).*)$",
+            )
+            .build()
+            .expect("author meta line 编译失败")
+        });
+    let cleaned = if author.contains('\n') {
+        // 元数据行剔除后仍多行 → 取首非空行（作者天然单行；多行即详情页整段杂烩）
+        let after = META_LINE_RE.replace_all(author, "");
+        after
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        author.to_string()
+    };
     AUTHOR_RE
-        .replace_all(author, "")
+        .replace_all(&cleaned, "")
         .trim_matches(|c: char| c <= ' ')
         .to_string()
 }

@@ -2190,22 +2190,35 @@ fn apply_post(results: Vec<String>, rule: &Rule) -> Vec<String> {
 /// - replaceFirst（###）：仅替换首个匹配；无匹配 → 空串；正则编译失败 → 替换串本身
 /// - 普通：全部替换；正则编译失败 → 字面串替换
 fn replace_regex_str(result: &str, re_str: &str, replacement: &str, first: bool) -> String {
-    if first {
-        match crate::util::regex::Regex::new(re_str) {
-            Ok(re) => {
-                if re.is_match(result) {
-                    re.replace_first(result, replacement).into_owned()
-                } else {
-                    String::new()
-                }
+    // 行边界兼容：pattern 含字面换行但文本无换行（text 提取已空白规范化——jsoup
+    // text() 同语义）时，pattern 的换行按 \s+ 重试（源正则按多行原文书写——实测
+    // 久久小说 author 清洗正则整段失效即此因）
+    let exec = |pattern: &str| -> Option<String> {
+        let re = crate::util::regex::Regex::new(pattern).ok()?;
+        Some(if first {
+            if re.is_match(result) {
+                re.replace_first(result, replacement).into_owned()
+            } else {
+                String::new()
             }
-            Err(_) => replacement.to_string(),
+        } else {
+            re.replace_all(result, replacement).into_owned()
+        })
+    };
+    if let Some(out) = exec(re_str) {
+        // 无匹配（结果原样）且 pattern 含字面换行而文本无换行 → \s+ 宽松重试
+        if out == *result && re_str.contains('\n') && !result.contains('\n') {
+            let relaxed = re_str.replace('\n', "\\s+");
+            if let Some(out2) = exec(&relaxed) {
+                return out2;
+            }
         }
+        return out;
+    }
+    if first {
+        replacement.to_string()
     } else {
-        match crate::util::regex::Regex::new(re_str) {
-            Ok(re) => re.replace_all(result, replacement).into_owned(),
-            Err(_) => result.replace(re_str, replacement),
-        }
+        result.replace(re_str, replacement)
     }
 }
 

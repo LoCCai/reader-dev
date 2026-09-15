@@ -3408,6 +3408,19 @@ async fn get_book_info(
     .await
     {
         Ok(mut info) => {
+            // 封面回退：源 ruleBookInfo 无 coverUrl 规则/求值空时沿用调用方传入
+            // （搜索结果的 coverUrl——legacy BookInfo 合并语义；实测久久小说详情
+            // 无 cover 规则，书籍页封面全空即此因）
+            if info
+                .cover_url
+                .as_deref()
+                .map_or(true, |c| c.trim().is_empty())
+            {
+                let cover_param = param_of(&params, body_json.as_ref(), "cover");
+                if !cover_param.trim().is_empty() {
+                    info.cover_url = Some(cover_param);
+                }
+            }
             // legacy canReName 语义：书源规则未声明 canReName 时保留书架已有
             // 书名/作者（书架书详情刷新/换源不覆盖用户自定义名称）
             if let Some(shelf) = shelf_match {
