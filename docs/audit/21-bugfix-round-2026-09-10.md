@@ -316,3 +316,45 @@ jsError cannot convert null——逐层定位出**六个叠加缺陷**（每层�
 | 瑶路书探索失败（camoufox 报错） | **部署侧**：站点全程 Cloudflare 403（直连实测），源写 webView:true 正确；服务器未装 camoufox（需 python3 + 依赖或 READER_CAMOUFOX_URL） | 错误文案扁平化（双层"抓取失败"嵌套 → 单层全链）；根治需服务器部署 camoufox（见 docs/SECURITY.md 已有说明） |
 
 验证：cargo test **748 lib + 15 e2e** 全绿（新增 test_field_put_saved_to_book_vars）。
+
+
+---
+
+# 第十七轮（2026-09-16）：QQ resourceId=3 追根——推荐聚合卡治理
+
+用户再报「这本书还是不行」（resourceId=3 详情页 + 截图：封面显示「此图片未经允许 不可引用」）。
+
+## 根因链（实测还原）
+
+1. **resourceId=3 的来源**：QQ 搜索接口 `so.html5.qq.com` 的 `$.data.state[*]` 混有
+   **推荐聚合卡**（groupID=`tabpage_hub_novel_search_recomm_N`，卡内 items 列多本推荐书）。
+   源 kind 规则 `$.groupID##.*_##` 剥前缀后取到**尾号数字**（N=2/3/…按天变化）→
+   bookUrl 模板 `?resourceId={{book.kind}}` 拼出 `resourceId=3`。QQ API 对该 ID
+   服务端无数据（resourceName=""）→ 死链详情页。
+2. **截图里的防盗链封面**：同一聚合卡的 coverUrl（`$..cover_url` 递归命中卡内广告图，
+   来自 QQ 严防盗链 CDN）被前端携带到详情页 → 显示「此图片未经允许 不可引用」。
+   真实书封面（qbnovel.qq.com/static/…）实测无 Referer 也 200，无防盗链问题。
+3. **真实书全链路验证通**：《模拟修仙十年，我天下无敌》（kind=1143352450）
+   搜索 21 条第 1 → 详情（混沌冬瓜精）→ 目录 186 章 → 正文「天武大陆，风溪国…」。
+
+## 修复
+
+| # | 问题 | 修复 |
+|---|---|---|
+| J-1 | 聚合卡 name 为 `$..title` 递归多命中拼接的**多行名**（5 本书名叠一行列） | format_book_name 多行 → 取首非空行（与 format_book_author 同款；书名天然单行） |
+| J-2 | 换源匹配双向包含 `ql.contains(&bl)` 对空名恒真 | search_book_source 过滤前先排除空名条目（防御其它路径产出空名） |
+| —— | 空名条目（NovelGuid/桩条目） | 第十三轮起 analyze_book_list_impl 已丢弃（name 空 return None），本轮复核确认 |
+
+注：聚合卡条目本身保留（源设计如此，legado 同样产出该卡）；其 kind=尾号死链为
+QQ 服务端数据形态，引擎无法凭空补数据——治理目标是呈现一致（单行名）+ 匹配不误吸。
+
+## 探针事故记录（本组两次假阳性，均已修正）
+
+- `String(j.data)` 对 getBookContent 的 `{content}` 对象形态输出 "[object Object]"——
+  误判正文 bug，实为 legacy 契约对象（data.content 才是正文）。
+- Git Bash curl `--data-urlencode "key=中文"` 命令行编码劣化 → 引擎收到 mojibake key →
+  QQ 返回劣化响应（5 条含 recomm_3 卡）→ 一度误判「引擎搜索劣化」。纯 ASCII
+  percent-encode 复测 21 条正常。**中文参数探针一律用显式 percent-encode。**
+
+验证：cargo test **749 lib + e2e** 全绿（新增 test_qq_state_list_junk_entries +
+format_book_name 多行断言）；8100 实例实测 21 条/0 多行名/真实书第 1。

@@ -221,6 +221,17 @@ pub(crate) fn format_book_name(name: &str) -> String {
                 .build()
                 .expect("nameRegex 编译失败")
         });
+    // 多行 name → 取首非空行（书名天然单行；多行即规则递归过匹配的聚合条目——
+    // 实测 QQ浏览器搜索 `$.data.state[*]` 混入推荐聚合卡，`$..title` 递归命中
+    // 卡内 5 本书的标题拼成 5 行名，整卡以多行名混进结果列表）
+    let name = if name.contains('\n') {
+        name.lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or_default()
+    } else {
+        name
+    };
     NAME_RE
         .replace_all(name, "")
         .trim_matches(|c: char| c <= ' ')
@@ -1615,6 +1626,12 @@ mod tests {
         assert_eq!(format_book_name("某书 乌贼 著"), "某书");
         assert_eq!(format_book_name("  正常书名  "), "正常书名");
         assert_eq!(format_book_name(""), "");
+        // 多行 name → 首非空行（QQ浏览器搜索推荐聚合卡：`$..title` 递归命中卡内
+        // 多书标题拼接成多行——第十七轮实测 resourceId=3 死链即源于该卡可点击）
+        assert_eq!(format_book_name("我竟然是修仙大佬\n我家老祖天天想跑路\n每天一个修仙小愿望"), "我竟然是修仙大佬");
+        assert_eq!(format_book_name("\n\n  \n首行前后有空白\n第二行"), "首行前后有空白");
+        // 单行含 \r\n 也算多行（CRLF 拼接形态）
+        assert_eq!(format_book_name("标题A\r\n标题B"), "标题A");
         // authorRegex：「作者：」前缀 / 「著」后缀
         assert_eq!(format_book_author("作者：乌贼"), "乌贼");
         assert_eq!(format_book_author("作 者 : 乌贼"), "乌贼");
@@ -1855,6 +1872,56 @@ mod tests {
         assert_eq!(books[0].author, "作者");
         assert_eq!(books[0].toc_url, "https://a.com/toc");
         assert_eq!(books[0].book_url, "https://a.com/book/1");
+    }
+
+    /// QQ浏览器搜索实测形态（第十七轮）：`$.data.state[*]` 混真实书条目 + 推荐聚合卡 +
+    /// 空桩——空名条目丢弃、聚合卡多行名取首行、真实书 kind 剥前缀进 bookUrl 模板
+    #[test]
+    fn test_qq_state_list_junk_entries() {
+        let mut src = BookSource {
+            book_source_url: "https://novel.html5.qq.com".into(),
+            ..Default::default()
+        };
+        src.rule_search = Some(serde_json::json!({
+            "bookList": "$.data.state[*]",
+            "name": "$..title",
+            "author": "$..author",
+            "kind": "$.groupID##.*_##",
+            "bookUrl": "https://novel.html5.qq.com/qbread/api/novel/bookInfo?resourceId={{book.kind}}"
+        }));
+        let rule: SearchRule =
+            serde_json::from_value(src.rule_search.clone().unwrap()).unwrap();
+        let body = r#"{"data":{"state":[
+            {"groupID":"90000001_1143352450","items":[{"title":"模拟修仙十年，我天下无敌","author":"混沌冬瓜精"}]},
+            {"groupID":"tabpage_hub_novel_search_recomm_3","items":[
+                {"title":"我竟然是修仙大佬","author":"甲"},
+                {"title":"我家老祖天天想跑路","author":"乙"},
+                {"title":"每天一个修仙小愿望","author":"丙"}]},
+            {"groupID":"NovelGuid","items":[]},
+            {"id":99,"moduleName":"stub"}
+        ]}}"#;
+        let books = analyze_book_list(
+            "default",
+            body,
+            "https://so.html5.qq.com/search?q=x",
+            &src,
+            &rule,
+            "$.data.state[*]",
+            "模拟修仙十年",
+            &JsBridge::default(),
+        );
+        // 4 条 state：真实书 + 聚合卡保留，NovelGuid/空桩（name 空）丢弃
+        assert_eq!(books.len(), 2, "空名条目应被丢弃: {:?}", books.iter().map(|b| b.name.clone()).collect::<Vec<_>>());
+        assert_eq!(books[0].name, "模拟修仙十年，我天下无敌");
+        assert_eq!(books[0].author, "混沌冬瓜精");
+        assert_eq!(
+            books[0].book_url,
+            "https://novel.html5.qq.com/qbread/api/novel/bookInfo?resourceId=1143352450",
+            "groupID 剥 90000001_ 前缀 → {{book.kind}} 模板"
+        );
+        // 聚合卡：多行名取首行（此前 5 行拼接名 + kind=尾号死链）
+        assert_eq!(books[1].name, "我竟然是修仙大佬", "多行名取首非空行");
+        assert_eq!(books[1].kind.as_deref(), Some("3"));
     }
 
     /// legado BookList：响应 URL 匹配 bookUrlPattern → 直接按详情页解析单本

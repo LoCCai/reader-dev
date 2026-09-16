@@ -2797,6 +2797,11 @@ async fn search_book_source(
     let matched: Vec<_> = all
         .into_iter()
         .filter(|b| {
+            // 空名条目排除：双向包含里 `ql.contains("")` 恒真——空名必须先挡（防其它
+            // 路径产出空名条目时换源列表混入死链）
+            if b.name.trim().is_empty() {
+                return false;
+            }
             if exact {
                 crate::service::search::exact_match(b, key)
             } else {

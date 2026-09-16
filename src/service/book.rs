@@ -2907,6 +2907,28 @@ mod tests {
         assert_eq!(recorded.len(), 2);
     }
 
+    /// 久久小说 author：多行 ## 清洗正则 + 元数据行兜底（首非空行）
+    #[test]
+    fn test_author_multiline_regex_and_meta_lines() {
+        // 久久小说 author 规则：tag.p@text##多行删除正则（含真实换行）
+        let rule = "tag.p@text##分类：.*
+状态：.*
+格式：.*
+大小：.*
+更新：.*
+RAR/ZIP.*|苹果端用户下载方式：.*";
+        let html = r#"<div><p>金陵雪
+分类：都市小说
+状态：全集
+格式：txt
+大小：1.2M
+更新：2025-01-01
+RAR/ZIP下载</p></div>"#;
+        let out = crate::service::search::field_with_vars(html, Some(rule), "", &mut crate::parser::rule::RuleVars::new());
+        // 多行清洗正则生效 → 元数据行全删，仅剩作者（后续 format_book_author 再 trim）
+        assert_eq!(out.trim(), "金陵雪", "author 多行清洗 + 元数据行兜底");
+    }
+
     /// URL 模板含跨行 JSON body（「🏷QQ浏览器」ads-read 逗号 JSON body 模板跨多行）——
     /// 平衡行合并 + URL 语义求值 + {{baseUrl.match}}/{{$.serialID}} 内嵌展开）
     #[test]
