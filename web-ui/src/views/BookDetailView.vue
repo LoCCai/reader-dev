@@ -32,6 +32,10 @@ const queryOrigin = computed(() => String(route.query.origin ?? ''))
 const queryOriginName = computed(() => String(route.query.originName ?? ''))
 // 路由携带的封面（搜索/探索跳转传入——详情缺字段时后端回退沿用）
 const queryCover = computed(() => String(route.query.cover ?? ''))
+// 路由携带的书名/作者（legado 语义：书名来自搜索/探索条目，书源 ruleBookInfo
+// 常只补 lastChapter——如疯读小说；详情接口解析为空时以此回退，不再显示「未知」）
+const queryName = computed(() => String(route.query.name ?? ''))
+const queryAuthor = computed(() => String(route.query.author ?? ''))
 
 const shelfBook = ref<Book | null>(null)
 const info = ref<BookInfo | null>(null)
@@ -76,10 +80,10 @@ async function loadShelfCacheInfo() {
 
 /** 展示数据：实时详情优先，书架数据兜底；自定义封面（GAP 19）最优先；自定义简介（GAP 145）优先于书源解析 intro */
 const display = computed(() => ({
-  name: info.value?.name || shelfBook.value?.name || '未知书名',
-  author: info.value?.author || shelfBook.value?.author || '',
+  name: info.value?.name || shelfBook.value?.name || queryName.value || '未知书名',
+  author: info.value?.author || shelfBook.value?.author || queryAuthor.value || '',
   cover:
-    proxyImageUrl(shelfBook.value?.customCoverUrl || info.value?.coverUrl || shelfBook.value?.coverUrl) || '',
+    proxyImageUrl(shelfBook.value?.customCoverUrl || info.value?.coverUrl || queryCover.value || shelfBook.value?.coverUrl) || '',
   intro: shelfBook.value?.customIntro || info.value?.intro || shelfBook.value?.intro || '',
   latestChapterTitle:
     info.value?.latestChapterTitle || shelfBook.value?.latestChapterTitle || '',
@@ -131,7 +135,7 @@ async function load() {
     if (found?.origin) {
       // ② 书架书：详情接口 bookSource=book.origin，实时详情优先，失败用书架数据兜底
       try {
-        const infoRes = await getBookInfo(bookUrl.value, found.origin, { cover: queryCover.value })
+        const infoRes = await getBookInfo(bookUrl.value, found.origin, { cover: queryCover.value, name: queryName.value })
         if (infoRes.isSuccess) info.value = infoRes.data
       } catch {
         // 实时详情失败：用书架数据兜底展示
@@ -148,7 +152,7 @@ async function load() {
     } else if (queryOrigin.value) {
       // ④ 非书架书：直接调详情接口（后端已支持非书架书，bookSource=入口传入的 origin）
       try {
-        const infoRes = await getBookInfo(bookUrl.value, queryOrigin.value, { cover: queryCover.value })
+        const infoRes = await getBookInfo(bookUrl.value, queryOrigin.value, { cover: queryCover.value, name: queryName.value })
         if (infoRes.isSuccess) info.value = infoRes.data
       } catch (err) {
         loadFailed.value = true

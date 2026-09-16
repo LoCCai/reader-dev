@@ -297,9 +297,12 @@ fn parse_explore_entries_impl(
                     url: url.clone(),
                     r#type: entry_type(&title, &url),
                 });
-                i += 1;
-                continue;
             }
+            // 空 url = 分组标题行（"❀男生频道❀::"）——纯展示装饰，跳过；
+            // 此前落穿到「普通 URL 行」把整行（含 ::）当可点条目，点击即报
+            // 「目标 URL 非法: relative URL without a base」（JSON 数组分支本就过滤）
+            i += 1;
+            continue;
         }
         // 普通 URL 行：title 从尾部提取
         let title = url_title(line);
@@ -651,6 +654,21 @@ mod tests {
         let parsed = parse_explore_entries(js);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].title, "分类A");
+    }
+
+    /// `title::url` 格式的空 url 分组标题行（"❀男生频道❀::"）——纯装饰，应跳过；
+    /// 此前落穿到「普通 URL 行」把整行（含 ::）当可点条目，点击即报
+    /// 「目标 URL 非法: relative URL without a base」（第十九轮实测）
+    #[test]
+    fn test_parse_group_header_line_skipped() {
+        let urls = "❀ 男 生 频 道 ❀::\n都市小说::https://a.com/city\n❀ 女 生 频 道 ❀::\n玄幻小说::https://a.com/fantasy";
+        let parsed = parse_explore_entries(urls);
+        assert_eq!(parsed.len(), 2, "分组标题行应被跳过: {parsed:?}");
+        assert_eq!(parsed[0].title, "都市小说");
+        assert_eq!(parsed[0].url, "https://a.com/city");
+        assert_eq!(parsed[1].title, "玄幻小说");
+        // 纯分组头（全部分组）→ 空列表
+        assert!(parse_explore_entries("标题A::\n标题B::").is_empty());
     }
 
     /// exploreUrl JS 返回数组字面量（非 JSON.stringify 字符串）——此前 ToString

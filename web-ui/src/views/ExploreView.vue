@@ -182,7 +182,7 @@
           </div>
         </div>
 
-        <div class="cats">
+        <div class="cats" @wheel.prevent="onCatsWheel">
           <button
             v-for="c in categories"
             :key="c.url"
@@ -229,10 +229,10 @@
                 <span class="book-author">{{ applyHan(b.author || '未知作者', hanMode) }}</span>
               </button>
             </div>
-            <!-- GAP #51：分页（page 参数 + {books, hasMore} 契约；未就绪则标注并隐藏加载更多） -->
+            <!-- GAP #51：分页（page 参数；legacy 数组契约下以前端启发式翻页——
+                 页返回空 / 去重后零新增 = 没有更多；{books,hasMore} 对象契约兼容） -->
             <div class="more-row">
-              <p v-if="pagingBackendReady === false" class="paging-note">后端分页接口待实现：当前仅展示第一页</p>
-              <template v-else-if="!noMore">
+              <template v-if="!noMore">
                 <button class="more-btn" type="button" :disabled="loadingMore" @click="loadBooks(page + 1)">
                   {{ loadingMore ? '加载中…' : '加载更多' }}
                 </button>
@@ -241,7 +241,7 @@
               <span v-else class="no-more">没有更多了</span>
             </div>
             <!-- 滚动哨兵：进入视口 → 自动加载下一页 -->
-            <div v-if="pagingBackendReady === true && !noMore && !loadingBooks" ref="sentinelEl" class="sentinel" aria-hidden="true"></div>
+            <div v-if="!noMore && !loadingBooks" ref="sentinelEl" class="sentinel" aria-hidden="true"></div>
           </template>
         </template>
       </template>
@@ -499,9 +499,7 @@ async function openFav(f: { url: string; title: string; sourceUrl: string; sourc
   selectSource(s)
 }
 
-/* ============ 分页（GAP #51：后端契约 {books, hasMore}） ============ */
-/** 后端分页契约就绪状态：null=未知 / true={books,hasMore} / false=仍返回旧数组 */
-const pagingBackendReady = ref<boolean | null>(null)
+/* ============ 分页（legacy 数组契约前端启发式 + {books,hasMore} 对象契约兼容） ============ */
 
 /** 滚动哨兵：进入视口自动加载下一页（根观察，rootMargin 提前 160px 预载） */
 const sentinelEl = ref<HTMLElement | null>(null)
@@ -510,7 +508,6 @@ let sentinelObserver: IntersectionObserver | null = null
 function tryLoadMore() {
   if (!source.value || !activeUrl.value) return
   if (loadingBooks.value || loadingMore.value || noMore.value) return
-  if (pagingBackendReady.value !== true) return
   void loadBooks(page.value + 1)
 }
 
@@ -624,6 +621,8 @@ function switchCategory(url: string) {
 }
 
 function openCategory(c: ExploreCategory) {
+  // 空分类防御：分组标题/占位（后端已过滤，双保险——点击不发请求）
+  if (!c.url) return
   if (c.type === 'link') {
     window.open(c.url, '_blank', 'noopener')
     return
@@ -631,7 +630,9 @@ function openCategory(c: ExploreCategory) {
   switchCategory(c.url)
 }
 
-/** GAP #51 契约：{books, hasMore}（后端并行实现中；未就绪时仍返回旧数组） */
+/** GAP #51 契约：{books, hasMore}（新契约）；legacy 数组契约 = 前端启发式翻页
+ *  （页非空即可继续；去重后零新增 = 没有更多——{{page}} 缺失的源翻页返回同内容，
+ *  靠零新增截止防止无限加载） */
 interface ExploreBookPage {
   books: SearchBook[]
   hasMore: boolean
@@ -648,26 +649,27 @@ async function loadBooks(p: number) {
     let list: SearchBook[] = []
     let hasMore = false
     if (data && typeof data === 'object' && !Array.isArray(data) && Array.isArray((data as ExploreBookPage).books)) {
-      // 新契约：后端分页就绪
       const pageData = data as ExploreBookPage
       list = pageData.books
       hasMore = !!pageData.hasMore
-      pagingBackendReady.value = true
     } else if (Array.isArray(data)) {
-      // 旧契约：后端分页未就绪——仅展示第一页，标注待实现
       list = data as SearchBook[]
-      hasMore = false
-      pagingBackendReady.value = false
+      hasMore = list.length > 0
     }
-    if (p === 1) books.value = list
-    else {
+    let added = list.length
+    if (p === 1) {
+      books.value = list
+    } else {
       const seen = new Set(books.value.map((b) => b.bookUrl))
-      books.value.push(...list.filter((b) => !seen.has(b.bookUrl)))
+      const fresh = list.filter((b) => !seen.has(b.bookUrl))
+      added = fresh.length
+      books.value.push(...fresh)
     }
     page.value = p
-    noMore.value = !hasMore
+    noMore.value = !hasMore || (p > 1 && added === 0)
   } catch {
     if (p === 1) booksError.value = '探索失败'
+    else noMore.value = true
   } finally {
     loadingBooks.value = false
     loadingMore.value = false
@@ -682,16 +684,20 @@ async function loadBooks(p: number) {
 }
 
 function goBook(b: SearchBook) {
-  router.push({
-    path: `/book/${encodeURIComponent(b.bookUrl)}`,
-    query: b.origin ? { origin: b.origin } : undefined,
-  })
+  // 携带 name/author/cover：legado 语义——书名等来自探索条目（书源 ruleBookInfo
+  // 常只补 lastChapter，如疯读小说），详情页缺字段时以此回退，不再显示「未知」
+  const query: Record<string, string> = {}
+  if (b.origin) query.origin = b.origin
+  if (b.name) query.name = b.name
+  if (b.author) query.author = b.author
+  if (b.coverUrl) query.cover = b.coverUrl
+  router.push({ path: `/book/${encodeURIComponent(b.bookUrl)}`, query })
 }
 
+/** PC 端分类横滚：滚轮纵向滚动转横向（模板 @wheel 绑定——元素渲染即生效） */
 function onCatsWheel(e: WheelEvent) {
   const el = e.currentTarget as HTMLElement
   if (el.scrollWidth > el.clientWidth) {
-    e.preventDefault()
     el.scrollLeft += e.deltaY
   }
 }
@@ -701,13 +707,10 @@ onMounted(() => {
   searchHistory.value = loadSearchHistory()
   // 简繁模式可能在其他页面改动 → 挂载时同步全站状态
   syncHanMode()
-  const catsEl = document.querySelector('.cats')
-  catsEl?.addEventListener('wheel', onCatsWheel as EventListener, { passive: false })
 })
 onBeforeUnmount(() => {
   sentinelObserver?.disconnect()
   sentinelObserver = null
-  document.querySelector('.cats')?.removeEventListener('wheel', onCatsWheel as EventListener)
 })
 </script>
 

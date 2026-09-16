@@ -399,3 +399,23 @@ legado（OkHttp）同样过不去。浏览器兜底依赖 camoufox 部署，属�
 临时探针揭示 bookList 规则是 `$.data.state[*]`（QQ 源！）——**探针发的是
 `bookSourceUrl=` 而 handler 读 `bookSource=`**，空参 + K-4 漏洞 = 拿错源。
 与第十三轮 searchBookMulti 参数名事故同型：**探针参数名先抄 handler 源码再发**。
+
+
+---
+
+# 第十九轮（2026-09-16）：疯读小说四报障——分组头/PC横滚/分页契约/详情「未知」
+
+| # | 报障 | 根因 | 修复 |
+|---|---|---|---|
+| L-1 | 点击「❀男生频道❀」报 `目标 URL 非法: relative URL without a base` | exploreUrl `title::` **空 url 分组标题行**不满足 `!url.is_empty()` → 落穿到「普通 URL 行」把整行（含 `::`）当可点条目（JSON 数组分支本就过滤空条目） | `::` 分支空 url → continue 跳过（分组标题纯装饰）；前端 openCategory 空分类防御（双保险） |
+| L-2 | PC 端分类标签超出屏幕看不到、没法切换（手机可滑动） | `.cats` 横滚容器的 wheel 处理器在 onMounted 时用 `querySelector` 绑定——**元素在 v-else 分支尚未渲染，绑定永远失败** | 改模板 `@wheel.prevent` 绑定（元素渲染即生效），移除生命周期 querySelector hack |
+| L-3 | 「后端分页接口待实现：当前仅展示第一页」 | 前端期待 `{books,hasMore}` 对象契约，后端按 legacy 返回纯数组（不能改——legado 客户端兼容） | 前端数组契约原生化：页非空可续页 + **去重后零新增 = 没有更多**（防 {{page}} 缺失的源无限加载）；删除误导文案 |
+| L-4 | 探索点开详情「未知」 | legado 语义：书名来自搜索/探索**条目**（疯读 ruleBookInfo 只有 lastChapter），探索页 goBook 跳详情没带 name/author/cover（第十五轮只做了搜索页） | goBook 携带 name/author/cover；BookDetailView 读取 query name/author 接入展示回退链 + 透传接口（后端 name/cover 回退已有） |
+
+**实测**：分类 53 个（63−10 分组头，0 空 url）；第 1/2 页不同书目（{{page}} 生效）；
+详情 name 回退正确；目录 530 章；正文 2259 字。
+验证：cargo test **752 lib + e2e** 全绿（新增 test_parse_group_header_line_skipped）；
+前端 vue-tsc + build + node --test 100/100。
+
+调试留档：详情 name 乱码两小时——bash 探针命令行编码劣化 + **进程内详情缓存**把
+乱码结果钉住（重启实例后干净请求即正确）。与第十五轮同坑：缓存键不含参数形态。
