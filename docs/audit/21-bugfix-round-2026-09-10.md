@@ -358,3 +358,44 @@ QQ 服务端数据形态，引擎无法凭空补数据——治理目标是呈�
 
 验证：cargo test **749 lib + e2e** 全绿（新增 test_qq_state_list_junk_entries +
 format_book_name 多行断言）；8100 实例实测 21 条/0 多行名/真实书第 1。
+
+
+---
+
+# 第十八轮（2026-09-16）：fqbook.cc 探索失败——https 握手拦截的引擎级降级
+
+## 报障
+
+`探索失败：抓取失败（https://fqbook.cc/ranking.php?t=click）: Connection reset by peer (os error 104)`
+
+## 根因（三栈交叉验证）
+
+fqbook.cc 对**非浏览器 TLS 客户端在握手阶段一律重置连接**——schannel curl / rustls
+（引擎）/ node OpenSSL 三栈全被 reset；**明文 http 完全正常**（200，48KB 榜单页）。
+legado（OkHttp）同样过不去。浏览器兜底依赖 camoufox 部署，属重依赖路径。
+
+## 修复
+
+| # | 修复 | 说明 |
+|---|---|---|
+| K-1 | **https→http 同路径降级重试**（http_fetch 直连失败分支，先于浏览器兜底） | 仅「传输/握手层失败」触发（reset/handshake/EOF/超时）；降级失败不吞原错误；成功照常 capture Set-Cookie |
+| K-2 | 错误判定用 `{e:#}` **全链格式** | reqwest 顶层 Display 仅 "error sending request for url (...)"，传输层细节在 cause 链——`to_string()` 使分类器永远 miss（should_browser_rescue_error 同修） |
+| K-3 | OS 错误串**本地化覆盖**（中文 Windows） | "远程主机强迫关闭…(os error 10054)"——补 10054/10053/10060 数字码与中文文案 |
+| K-4 | **find_book_source 空参直拒** | `LIKE '%%'` 命中任意源（fetch_optional 取物理顺序第一行）——调用方漏传 bookSource 时拿到毫不相干的源、用错规则（本轮调试中实测：探索拿 QQ 源 ruleSearch 解析 fqbook 页面） |
+
+证书错误不降级（第十六轮「证书错误不重试」语义——https 证书坏的站强行明文裸奔
+风险不对称）；DNS/业务层错误与 scheme 无关，不降级。
+
+## 验证
+
+- 实例实测：点击榜 50 本（郝叔和他的女人…）、分类玄幻 {{page}} 翻页 30 本——
+  https 撞墙 URL 全自动走降级
+- cargo test **751 lib + e2e** 全绿（新增 test_https_downgrade_candidate /
+  test_find_book_source_empty_param_rejected）
+
+## 调试弯路留档（又一次探针参数名事故）
+
+实例探索 n=1 追查两小时：curl/node 复刻全是桌面页、进程内 explore_url 也 50 本。
+临时探针揭示 bookList 规则是 `$.data.state[*]`（QQ 源！）——**探针发的是
+`bookSourceUrl=` 而 handler 读 `bookSource=`**，空参 + K-4 漏洞 = 拿错源。
+与第十三轮 searchBookMulti 参数名事故同型：**探针参数名先抄 handler 源码再发**。

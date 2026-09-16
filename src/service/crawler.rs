@@ -1248,6 +1248,34 @@ async fn http_fetch(
                     "http_fetch 直连失败 {url}: {e:?} source={:?}",
                     e.source().map(|s| s.to_string())
                 );
+                // m-fix：https 握手层失败 → http 同路径降级重试一次（实测 fqbook.cc
+                // 等「明文站」：对非浏览器 TLS 指纹一律握手重置——schannel/rustls/
+                // OpenSSL 三栈全被 reset，明文 http 正常服务）。降级失败不吞原错误。
+                // 证书错误不降级（第十六轮「证书错误不重试」语义——https 证书坏的站
+                // 强行明文裸奔风险不对称）。
+                if url.starts_with("https://") && https_downgrade_candidate(&e) {
+                    let http_url = format!("http://{}", &url[8..]);
+                    tracing::warn!("https 握手失败，尝试 http 降级 {http_url}");
+                    match fetch(
+                        &http_url,
+                        &req_headers,
+                        timeout_secs,
+                        method,
+                        body.as_deref(),
+                        charset,
+                        proxy,
+                    )
+                    .await
+                    {
+                        Ok(r) => {
+                            capture_set_cookies(ns, &http_url, &r).await;
+                            return Ok(r);
+                        }
+                        Err(down_err) => {
+                            tracing::debug!("http 降级也失败（{http_url}）: {down_err:#}");
+                        }
+                    }
+                }
                 // 默认浏览器兜底（READER_BROWSER_FALLBACK_DISABLE=1 关闭）：网络层失败
                 // （超时/连接中断/TLS）时内置 obscura 浏览器重试——很多站点的反爬只对
                 // 直连 reqwest 指纹生效，浏览器 stealth 指纹可正常访问
@@ -1502,9 +1530,11 @@ fn browser_needed(url: &str) -> bool {
 }
 
 /// 直连失败是否值得浏览器兜底：仅网络层错误（超时/连接中断/TLS/DNS 解析），
-/// HTTP 业务错误（404 等）不启动浏览器
+/// HTTP 业务错误（404 等）不启动浏览器。
+/// 注意用 `{e:#}` 全链格式：reqwest 顶层 Display 仅 "error sending request for
+/// url (...)"，传输层细节（Connection reset / Connect / TLS…）在 cause 链里。
 fn should_browser_rescue_error(e: &anyhow::Error) -> bool {
-    let lower = e.to_string().to_ascii_lowercase();
+    let lower = format!("{e:#}").to_ascii_lowercase();
     [
         "operation timed out",
         "timed out",
@@ -1516,6 +1546,44 @@ fn should_browser_rescue_error(e: &anyhow::Error) -> bool {
         "tls",
         "dns",
         "ssl",
+    ]
+    .iter()
+    .any(|m| lower.contains(m))
+}
+
+/// https→http 降级重试的错误判定：仅「传输/握手层失败」（连接被重置/握手中断/超时
+/// 等）值得降级——这类失败说明 https 通道对该客户端不可用；证书错误明确排除
+/// （第十六轮「证书错误不重试」语义，且明文裸奔风险不对称）；DNS/业务层错误与
+/// scheme 无关，降级无意义，交由浏览器兜底/原错误。
+/// 注意 OS 错误串随系统语言本地化（中文 Windows：远程主机强迫关闭了一个现有的
+/// 连接 / os error 10054）——数字错误码与中文文案都要覆盖。
+/// 注意用 `{e:#}` 全链格式：reqwest 顶层 Display 仅 "error sending request for
+/// url (...)"，不含传输层细节（同 should_browser_rescue_error）。
+fn https_downgrade_candidate(e: &anyhow::Error) -> bool {
+    let lower = format!("{e:#}").to_ascii_lowercase();
+    if lower.contains("certificate") || lower.contains("dns error") {
+        return false;
+    }
+    [
+        "connection reset",
+        "connection closed",
+        "connection aborted",
+        "unexpected eof",
+        "handshake",
+        "received fatal alert",
+        "protocol error",
+        "connection refused",
+        "timed out",
+        "timeout",
+        "os error 104",
+        // Windows 本地化形态（WSAECONNRESET 10054 / WSAECONNABORTED 10053 /
+        // WSAETIMEDOUT 10060 + 中文系统错误文案）
+        "10054",
+        "10053",
+        "10060",
+        "强迫关闭",
+        "远程主机",
+        "连接尝试失败",
     ]
     .iter()
     .any(|m| lower.contains(m))
@@ -2017,6 +2085,39 @@ fn merge_login_header(headers: &mut HashMap<String, String>, login_header: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// m-fix：https→http 降级错误判定——传输/握手层失败可降级；证书/DNS 排除
+    /// （实测 fqbook.cc：schannel/rustls/OpenSSL 三栈 https 握手一律 reset，
+    /// 明文 http 正常——reqwest 错误串 "client error (Connect): Connection
+    /// reset by peer (os error 104)"）
+    #[test]
+    fn test_https_downgrade_candidate() {
+        let yes = |s: &str| https_downgrade_candidate(&anyhow::anyhow!("{s}"));
+        // 传输/握手层 → 可降级
+        assert!(yes(
+            "error sending request for url (https://fqbook.cc/ranking.php?t=click): client error (Connect): Connection reset by peer (os error 104)"
+        ));
+        // Windows 中文系统错误本地化形态（os error 10054 = WSAECONNRESET）
+        assert!(yes(
+            "error sending request for url (https://fqbook.cc/ranking.php?t=click): client error (Connect): 远程主机强迫关闭了一个现有的连接。 (os error 10054)"
+        ));
+        // 顶层 Display 无传输关键词（reqwest 形态：细节在 cause 链）——{e:#} 全链才命中
+        let chained = anyhow::anyhow!("Connection reset by peer (os error 104)")
+            .context("error sending request for url (https://fqbook.cc/ranking.php?t=click)");
+        assert!(https_downgrade_candidate(&chained), "cause 链中的 reset 应命中");
+        assert!(yes("client error (Connect): received fatal alert: HandshakeFailure"));
+        assert!(yes("connection closed before message completed"));
+        assert!(yes("operation timed out"));
+        assert!(yes("Client error (Connect): unexpected EOF"));
+        // 证书错误 → 不降级（第十六轮「证书错误不重试」语义）
+        assert!(!yes(
+            "invalid peer certificate: UnknownIssuer"
+        ));
+        assert!(!yes("certificate verify failed"));
+        // DNS / 业务层 → 不降级（与 scheme 无关）
+        assert!(!yes("error sending request: dns error: failed to lookup"));
+        assert!(!yes("HTTP status client error (404 Not Found)"));
+    }
 
     /// E6：cookie 域键 = legacy getSubDomain（host[:port] 去最左标签）
     #[test]

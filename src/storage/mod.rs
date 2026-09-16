@@ -1022,6 +1022,11 @@ impl Storage {
         ns: &str,
         book_source_url: &str,
     ) -> Result<Option<crate::model::BookSource>> {
+        // 空参直拒：LIKE '%%' 会命中任意源（fetch_optional 取到物理顺序第一行——
+        // 调用方漏传 bookSource 时会拿到毫不相干的书源，探索/详情用错规则全乱）
+        if book_source_url.trim().is_empty() {
+            return Ok(None);
+        }
         let like = format!("{book_source_url}%");
         let r = sqlx::query_as::<_, crate::model::BookSource>(
             "SELECT * FROM book_sources WHERE user_namespace = ?1 AND hidden = 0 \
@@ -6086,6 +6091,38 @@ mod tests {
 
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 空参 find_book_source 直拒：LIKE '%%' 会命中任意源（fetch_optional 取物理顺序
+    /// 第一行）——调用方漏传 bookSource 时会拿到毫不相干的书源、用错规则解析
+    /// （实测：探索传 bookSourceUrl= 而非 bookSource= 时解析用了另一源的 ruleSearch）
+    #[tokio::test]
+    async fn test_find_book_source_empty_param_rejected() {
+        let storage = test_storage("fbs_empty").await;
+        storage
+            .save_book_source("default", &source("https://a.example.com/", "源A", None))
+            .await
+            .unwrap();
+        storage
+            .save_book_source("default", &source("https://b.example.com/", "源B", None))
+            .await
+            .unwrap();
+        // 空串 / 纯空白 → None（而非任意源）
+        assert!(storage.find_book_source("default", "").await.unwrap().is_none());
+        assert!(
+            storage
+                .find_book_source("default", "   ")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // 正常查：精确命中
+        let got = storage
+            .find_book_source("default", "https://a.example.com/")
+            .await
+            .unwrap()
+            .expect("精确匹配应命中");
+        assert_eq!(got.book_source_name, "源A");
     }
 
     /// 书源使用统计：bump 原子自增 use_count/use_ts；命名空间/URL 隔离；
