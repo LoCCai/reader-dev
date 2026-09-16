@@ -303,3 +303,16 @@ jsError cannot convert null——逐层定位出**六个叠加缺陷**（每层�
 **实测**：author=金陵雪、intro 纯文本、封面回填、QQ 两书（我的师傅/圣墟）无回归。
 验证：cargo test **748 lib + 15 e2e** 全绿；前端 86/86 + build 通过。
 诊断坑：进程内详情缓存（book_info_cache）会掩盖 handler 层修复——验证需重启实例。
+
+
+---
+
+# 第十六轮（2026-09-16）：三源三报障——宜搜 @put 贯通修复 + 两项定性
+
+| 报障 | 定性 | 处置 |
+|---|---|---|
+| QQ浏览器 resourceId=3 详情空 | **数据源侧**：QQ API 对 resourceId=3 返回 resourceName=""（无效/下架 ID，服务端无数据——node 直连 API 对照确认） | 非引擎 bug。该 URL 的产生入口（换源/推荐）待用户提供路径再查 |
+| 宜搜详情 tocUrl `gid=&nid=` 空参 | **引擎 bug ×2**：① 搜索字段路径（field_impl）无 `@put:{k:v}` 处理（只有 rule.rs apply_single 有）——name 规则 `name@put:{nid:nid}` 的变量从未存入；② 即使存了也只在条目局部 vars，循环即丢——未按条目 book_url 落书级变量表 | ① field_impl 开头 split_put + apply_put_vars（rule.rs 开放 pub(crate)）；② analyze_book_list_impl 条目尾部 save_book_vars（键=条目 book_url，详情 @get 同键命中）。实测 tocUrl `gid=100023412&nid=23412` 正确注入 |
+| 瑶路书探索失败（camoufox 报错） | **部署侧**：站点全程 Cloudflare 403（直连实测），源写 webView:true 正确；服务器未装 camoufox（需 python3 + 依赖或 READER_CAMOUFOX_URL） | 错误文案扁平化（双层"抓取失败"嵌套 → 单层全链）；根治需服务器部署 camoufox（见 docs/SECURITY.md 已有说明） |
+
+验证：cargo test **748 lib + 15 e2e** 全绿（新增 test_field_put_saved_to_book_vars）。

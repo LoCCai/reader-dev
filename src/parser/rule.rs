@@ -343,7 +343,7 @@ pub fn save_book_vars(ns: &str, source: &str, book_url: &str, vars: &RuleVars) {
 /// 从规则串中提取并移除 `@put:{...}` 段（legado splitPutRule）：
 /// 大小写不敏感；花括号按引号/嵌套平衡匹配（比 legado 的 `[^}]+?` 更容错）。
 /// 返回 (清理后的规则, 提取的键值对)。值保留原样，由调用方按当前上下文求值。
-fn split_put(rule: &str) -> (String, Vec<(String, String)>) {
+pub(crate) fn split_put(rule: &str) -> (String, Vec<(String, String)>) {
     let mut out = String::new();
     let mut puts = Vec::new();
     let mut i = 0;
@@ -846,7 +846,7 @@ fn apply_single(
 
 /// @put 值求值（legado putRule → getString(value)）：对当前上下文按规则取首个结果；
 /// JSON 上下文允许裸字段名（如 `@put:{bid:bookId}`——legado isJSON 下按 JSONPath 处理）
-fn apply_put_vars(puts: &[(String, String)], html: &str, vars: &mut RuleVars, depth: usize) {
+pub(crate) fn apply_put_vars(puts: &[(String, String)], html: &str, vars: &mut RuleVars, depth: usize) {
     for (k, v) in puts {
         let val = if v.trim().is_empty() {
             String::new()

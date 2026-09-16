@@ -445,7 +445,7 @@ pub async fn explore_url(
                     )
                     .await
                 }
-                .map_err(|e| anyhow::anyhow!("抓取失败（{}）: {}", final_url, e))
+                .map_err(|e| anyhow::anyhow!("抓取失败（{final_url}）: {e:#}"))
             }
         }
     } else if method.eq_ignore_ascii_case("POST") {
@@ -472,7 +472,7 @@ pub async fn explore_url(
         )
         .await
     }
-    .map_err(|e| anyhow::anyhow!("抓取失败（{}）: {}", final_url, e))?;
+    .map_err(|e| anyhow::anyhow!("抓取失败（{final_url}）: {e:#}"))?;
     // legado WebBook.exploreBook：发现页抓取后执行 loginCheckJs
     let body =
         crate::service::book::apply_login_check_js(ns, source, &resp.body, &resp.url, None).await;

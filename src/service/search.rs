@@ -1039,6 +1039,16 @@ fn analyze_book_list_impl(
             // 搜索阶段 tocUrl 留空（进入详情时获取）
             let _ = idx;
             book.toc_url = String::new();
+            // 字段 @put 的变量按条目 book_url 落书级表（详情/目录 @get 读取——
+            // 实测宜搜 name@put:{nid:nid} 此前只存条目局部，循环即丢）
+            if !vars.is_empty() {
+                crate::parser::rule::save_book_vars(
+                    ns,
+                    &source.book_source_url,
+                    &book.book_url,
+                    &vars,
+                );
+            }
             Some(book)
         })
         .collect()
@@ -1384,6 +1394,16 @@ fn field_impl(
     let Some(rule) = rule else {
         return default.to_string();
     };
+    // legado SourceRule splitPutRule：字段规则尾部的 `@put:{k:v}` 先分离求值存入
+    // 变量（实测宜搜 name 规则 `name@put:{nid:nid}`——详情 tocUrl `@get:{nid}` 依赖，
+    // 此前 field 路径无 @put 处理 → 变量恒空 → tocUrl gid=&nid= 空参）
+    let (rule_cleaned, puts) = crate::parser::rule::split_put(rule);
+    if !puts.is_empty() {
+        if let Some(v) = vars.as_deref_mut() {
+            crate::parser::rule::apply_put_vars(&puts, context, v, 0);
+        }
+    }
+    let rule: &str = if puts.is_empty() { rule } else { &rule_cleaned };
     // legado 内嵌规则：{{$.xxx}} 从上下文提取替换（v1 支持 JSONPath 内嵌）
     let rule = expand_embedded_impl(rule, context, vars.as_deref_mut());
     // @js: 后缀链（legado）：`提取规则@js:code` → 先提取，结果注入 result 执行 JS
@@ -2579,6 +2599,45 @@ mod tests {
         let (_, s) = split_url_suffix(r#"https://a.com/s,{"retry":"abc","bodyJs":"result"}"#);
         assert_eq!(s.retry, None);
         assert_eq!(s.body_js.as_deref(), Some("result"));
+    }
+
+    /// 字段级 @put 跨请求贯通（宜搜 name `name@put:{nid:nid}` → 详情 tocUrl `@get:{nid}`）
+    #[test]
+    fn test_field_put_saved_to_book_vars() {
+        let src = BookSource {
+            book_source_url: "http://api.ieasou.com".into(),
+            rule_search: Some(serde_json::json!({
+                "bookList": "$.books[*]",
+                "name": "name@put:{nid:nid}",
+                "author": "author",
+                "bookUrl": "http://api.ieasou.com/api/bookapp/bookSummary.m?nid={{$.nid}}&gid={{$.gid}}"
+            })),
+            ..Default::default()
+        };
+        let body = r#"{"books":[{"name":"测试书","author":"某人","nid":"23412","gid":"100023412"}]}"#;
+        let books = analyze_book_list(
+            "default",
+            body,
+            "http://api.ieasou.com/search",
+            &src,
+            &serde_json::from_value(src.rule_search.clone().unwrap()).unwrap(),
+            "$.books[*]",
+            "测试",
+            &JsBridge::default(),
+        );
+        assert_eq!(books.len(), 1);
+        // 搜索后书级变量表应有 nid（按条目 book_url 键）
+        let loaded = crate::parser::rule::load_book_vars(
+            "default",
+            "http://api.ieasou.com",
+            &books[0].book_url,
+        );
+        assert_eq!(
+            loaded.get("nid").map(String::as_str),
+            Some("23412"),
+            "@put 的 nid 应落书级变量表（详情 @get 读取）: {:?}",
+            loaded
+        );
     }
 
     /// `{{book.kind}}` 实体字段引用（QQ浏览器 bookUrl `resourceId={{book.kind}}`——
