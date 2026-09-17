@@ -193,6 +193,28 @@ watch(epubRawActive, (on) => {
 })
 if (epubRawActive.value) void ensureEpubDoc()
 
+/* B6：EPUB 原版渲染主题联动——把宿主阅读主题的前景/背景注入 iframe（默认关，
+ * 保留原书排版观感；开启后深色阅读主题下原版渲染不再白底刺眼） */
+const EPUB_THEME_KEY = 'reader_epub_theme_follow'
+const epubThemeFollow = ref(localStorage.getItem(EPUB_THEME_KEY) === '1')
+watch(epubThemeFollow, (v) => {
+  try {
+    localStorage.setItem(EPUB_THEME_KEY, v ? '1' : '0')
+  } catch {
+    /* ignore */
+  }
+})
+/** 主题 → 具体前景/背景色（与 main.css data-reader-theme 变量对齐；system 跟随解析） */
+const epubThemeColors = computed<{ bg: string; text: string }>(() => {
+  if (theme.value === 'custom') {
+    return { bg: customTheme.value.bg, text: customTheme.value.text }
+  }
+  const real = theme.value === 'system' ? systemTheme() : theme.value
+  if (real === 'dark') return { bg: '#17171a', text: '#ececf1' }
+  if (real === 'warm') return { bg: '#f7f0e6', text: '#3d382c' }
+  return { bg: '#fafafa', text: '#18181b' }
+})
+
 /** EPUB 原版内链跳转：按 zip 路径匹配 spine → 切章 */
 function onEpubNav(zipPath: string): void {
   const doc = epubDoc.value
@@ -588,10 +610,10 @@ function resetTypography() {
 const pageMode = ref<PageMode>('scroll')
 watch(pageMode, (m) => saveSetting('reader_page_mode', m))
 /** 点击区域翻页开关（legacy 点击方式：左上上一页/右下下一页/中间菜单；默认开） */
-/** P0-2 全屏点击方案（Pro clickMethods 对齐） */
-type ClickMode = 'auto' | 'nextOnly' | 'none' | 'fixed'
+/** P0-2 全屏点击方案（Pro clickMethods 对齐）+ B1 自定义分区（legado 点击区域配置） */
+type ClickMode = 'auto' | 'nextOnly' | 'none' | 'fixed' | 'custom'
 const CLICK_MODE_KEY = 'reader_click_mode'
-const VALID_CLICK_MODES: ClickMode[] = ['auto', 'nextOnly', 'none', 'fixed']
+const VALID_CLICK_MODES: ClickMode[] = ['auto', 'nextOnly', 'none', 'fixed', 'custom']
 function loadClickMode(): ClickMode {
   const v = localStorage.getItem(CLICK_MODE_KEY)
   return VALID_CLICK_MODES.includes(v as ClickMode) ? (v as ClickMode) : 'auto'
@@ -603,6 +625,71 @@ watch(readerClickMode, (v) => {
   } catch {
     /* ignore */
   }
+})
+
+/* B1：自定义点击分区——3×3 九宫格，每格动作 上一页/下一页/菜单/无（点击循环切换）。
+ * 默认布局复刻 auto 方案：左上上一页、右下下一页、正中菜单、其余无 */
+type ZoneAction = 'prev' | 'next' | 'menu' | 'none'
+const ZONE_ACTIONS: ZoneAction[] = ['prev', 'next', 'menu', 'none']
+const ZONE_ACTION_LABEL: Record<ZoneAction, string> = {
+  prev: '上一页',
+  next: '下一页',
+  menu: '菜单',
+  none: '无',
+}
+const CLICK_ZONES_KEY = 'reader_click_zones'
+function loadClickZones(): ZoneAction[] {
+  const fallback: ZoneAction[] = ['prev', 'none', 'none', 'none', 'menu', 'none', 'none', 'none', 'next']
+  try {
+    const raw = JSON.parse(localStorage.getItem(CLICK_ZONES_KEY) ?? 'null') as unknown
+    if (Array.isArray(raw) && raw.length === 9
+      && raw.every((v) => ZONE_ACTIONS.includes(v as ZoneAction))) {
+      return raw as ZoneAction[]
+    }
+  } catch {
+    /* ignore */
+  }
+  return fallback
+}
+const clickZones = ref<ZoneAction[]>(loadClickZones())
+watch(clickZones, (v) => {
+  try {
+    localStorage.setItem(CLICK_ZONES_KEY, JSON.stringify(v))
+  } catch {
+    /* ignore */
+  }
+}, { deep: true })
+/** 编辑器：点击格子循环切换动作 */
+function cycleZone(i: number) {
+  const cur = ZONE_ACTIONS.indexOf(clickZones.value[i])
+  clickZones.value[i] = ZONE_ACTIONS[(cur + 1) % ZONE_ACTIONS.length]
+}
+function resetZones() {
+  clickZones.value = ['prev', 'none', 'none', 'none', 'menu', 'none', 'none', 'none', 'next']
+}
+
+/* ---------------- B2：页眉页脚提示栏（legado TipConfig——书名/章节名/进度/时钟） ---------------- */
+
+const tipHeaderEnabled = ref(localStorage.getItem('reader_tip_header') === '1')
+watch(tipHeaderEnabled, (v) => {
+  try { localStorage.setItem('reader_tip_header', v ? '1' : '0') } catch { /* ignore */ }
+})
+const tipFooterEnabled = ref(localStorage.getItem('reader_tip_footer') === '1')
+watch(tipFooterEnabled, (v) => {
+  try { localStorage.setItem('reader_tip_footer', v ? '1' : '0') } catch { /* ignore */ }
+})
+const tipClock = ref('')
+let tipClockTimer = 0
+function fmtTipClock() {
+  const d = new Date()
+  tipClock.value = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+onMounted(() => {
+  fmtTipClock()
+  tipClockTimer = window.setInterval(fmtTipClock, 30_000)
+})
+onBeforeUnmount(() => {
+  if (tipClockTimer) window.clearInterval(tipClockTimer)
 })
 
 /* ---------------- legacy quickKey：自定义快捷键（localStorage JSON：e.code → action） ---------------- */
@@ -1928,6 +2015,11 @@ async function startTts() {
   try {
     await audio.play()
     startTtsParaTracking()
+    // B5：定时停止——起播成功后布防（非 0 时）
+    if (ttsStopMinutes.value > 0) {
+      clearTtsStopTimer()
+      armTtsStopTimer()
+    }
   } catch {
     // 自动播放被拦截（异步 fetch 后手势已失效）：保持待播，面板点「播放」即可恢复
     if (ttsState.value === 'playing') ttsState.value = 'paused'
@@ -1940,6 +2032,7 @@ function stopTts() {
   ttsSelectionMode = false
   ttsState.value = 'idle'
   stopTtsParaTracking()
+  clearTtsStopTimer()
   const audio = ttsAudioRef.value
   if (audio) {
     audio.pause()
@@ -1951,6 +2044,47 @@ function stopTts() {
     ttsObjectUrl = ''
   }
 }
+
+/* ---------------- B5：朗读定时停止（legado TTS 定时——到点自动停播并提示） ---------------- */
+
+const TTS_STOP_MIN_KEY = 'reader_tts_stop_minutes'
+const ttsStopMinutes = ref(Number(localStorage.getItem(TTS_STOP_MIN_KEY) ?? '0') || 0)
+watch(ttsStopMinutes, (v) => {
+  try {
+    localStorage.setItem(TTS_STOP_MIN_KEY, String(v))
+  } catch {
+    /* ignore */
+  }
+  // 播放中调整：非 0 重启计时，0 取消
+  if (ttsState.value === 'playing') {
+    clearTtsStopTimer()
+    if (v > 0) armTtsStopTimer()
+  }
+})
+let ttsStopTimer = 0
+let ttsStopDeadline = 0
+const ttsStopRemain = ref('')
+function armTtsStopTimer() {
+  ttsStopDeadline = Date.now() + ttsStopMinutes.value * 60_000
+  ttsStopTimer = window.setInterval(() => {
+    const remain = Math.max(0, ttsStopDeadline - Date.now())
+    const m = Math.ceil(remain / 60_000)
+    ttsStopRemain.value = `${m} 分钟`
+    if (remain <= 0) {
+      clearTtsStopTimer()
+      stopTts()
+      ElMessage.info('朗读定时结束，已停止')
+    }
+  }, 5_000)
+}
+function clearTtsStopTimer() {
+  if (ttsStopTimer) {
+    window.clearInterval(ttsStopTimer)
+    ttsStopTimer = 0
+  }
+  ttsStopRemain.value = ''
+}
+const ttsStopRemainLabel = computed(() => ttsStopRemain.value || `${ttsStopMinutes.value} 分钟`)
 
 function pauseTts() {
   const audio = ttsAudioRef.value
@@ -2209,7 +2343,19 @@ watch(autoSpeed, () => {
   }
 })
 
-/* ---------------- 9. 划词操作（复制 / 搜索） ---------------- */
+/* ---------------- 9. 划词操作（复制 / 搜索 / 查词） ---------------- */
+
+/* B3：划词查词（legado TextActionMenu 查词——词典站快捷入口，新页打开规避 iframe 限制） */
+const dictOpen = ref(false)
+const dictWord = ref('')
+function lookupSelection() {
+  const text = (selText.value || '').trim().slice(0, 60)
+  if (!text) return
+  dictWord.value = text
+  dictOpen.value = true
+  clearSelection()
+  hideSelBar()
+}
 
 const selText = ref('')
 const selOpen = ref(false)
@@ -2317,6 +2463,17 @@ function onReaderAreaClick(e: MouseEvent) {
   // nextOnly 模式：全屏点击=下一页（中间长按仍菜单由 CSS pointer-events 控制，此处简化为全屏翻页）
   if (readerClickMode.value === 'nextOnly') {
     tapPage(1)
+    return
+  }
+
+  // B1 custom 模式：3×3 分区各自动作（legado 点击区域配置对齐）
+  if (readerClickMode.value === 'custom') {
+    const col = Math.min(2, Math.floor(x * 3))
+    const row = Math.min(2, Math.floor(y * 3))
+    const action = clickZones.value[row * 3 + col] ?? 'none'
+    if (action === 'prev') tapPage(-1)
+    else if (action === 'next') tapPage(1)
+    else if (action === 'menu') chromeHidden.value = !chromeHidden.value
     return
   }
 
@@ -2447,9 +2604,21 @@ function extractImageUrls(text: string): string[] {
   return urls
 }
 
-/** 当前章渲染后调用：静默拉取下一章正文并预热前 5 张图片（仅当含图片 URL）；文本书专用 */
+/** 当前章渲染后调用：预读下一章（B4）——正文走本机缓存管线（同款 getLocalChapter →
+ *  抓取 → saveLocalChapter，翻章即本地秒开 + 暖服务端缓存），并预热前 5 张图片；
+ *  文本书专用；reader_preload_next=0 关闭 */
+const PRELOAD_NEXT_KEY = 'reader_preload_next'
+const preloadNextEnabled = ref(localStorage.getItem(PRELOAD_NEXT_KEY) !== '0')
+watch(preloadNextEnabled, (v) => {
+  try {
+    localStorage.setItem(PRELOAD_NEXT_KEY, v ? '1' : '0')
+  } catch {
+    /* ignore */
+  }
+})
 function preloadNextChapterImages() {
   if (!isTextBook.value) return
+  if (!preloadNextEnabled.value) return
   if (!shelfBook.value?.origin) return
   const fi = flatIndex.value
   if (fi < 0 || fi >= realChapters.value.length - 1) return
@@ -2458,9 +2627,23 @@ function preloadNextChapterImages() {
   preloadedChapters.add(next.url)
   void getBookContent(next.url, shelfBook.value.origin, {
     timeout: chapterTimeout.value * 1000,
+    bookUrl: bookUrl.value,
   })
-    .then((res) => {
-      for (const u of extractImageUrls(res.data?.content ?? '').slice(0, 5)) {
+    .then(async (res) => {
+      const content = res.data?.content ?? ''
+      if (content) {
+        // 预读正文落本机缓存（翻章免抓取免等待）
+        await saveLocalChapter({
+          bookUrl: bookUrl.value,
+          chapterUrl: next.url,
+          title: next.title,
+          index: fi + 1,
+          content,
+        }).catch(() => {
+          /* 静默 */
+        })
+      }
+      for (const u of extractImageUrls(content).slice(0, 5)) {
         const img = new Image()
         img.src = u
       }
@@ -2853,11 +3036,13 @@ async function loadContent(chapterUrl: string) {
       chapterHtml.value = res.data?.content ?? ''
     } else {
       // 本机缓存优先；未命中再走服务器缓存/书源（getBookContent 命中服务器缓存，未命中自动抓取并写回）
+      // B4：携带 bookUrl——服务端按书键写正文缓存（legacy 语义；epubContent 模式不带，防 HTML 污染纯文本缓存）
       const local = await getLocalChapter(bookUrl.value, chapterUrl)
       text = local?.content ?? ''
       if (!text) {
         const res = await getBookContent(chapterUrl, shelfBook.value.origin, {
           timeout: chapterTimeout.value * 1000,
+          bookUrl: bookUrl.value,
         })
         text = res.data?.content ?? ''
         if (typeof res.data?.chapterWordCount === 'number') {
@@ -4007,6 +4192,24 @@ onBeforeUnmount(() => {
       <i class="reading-progress-fill" :style="{ width: `${progressPct}%` }"></i>
     </button>
 
+    <!-- B2：页眉页脚提示栏（书名/章节名 · 章节进度/时钟；pointer-events 穿透不挡点击翻页） -->
+    <div
+      v-if="tipHeaderEnabled && !loading && !loadError && !notFound && isTextBook"
+      class="tip-bar tip-header"
+      aria-hidden="true"
+    >
+      <span class="tip-left" :title="displayBookName">{{ displayBookName }}</span>
+      <span class="tip-right" :title="currentChapter?.title">{{ currentChapter?.title ?? '' }}</span>
+    </div>
+    <div
+      v-if="tipFooterEnabled && !loading && !loadError && !notFound && isTextBook && chapters.length > 0"
+      class="tip-bar tip-footer"
+      aria-hidden="true"
+    >
+      <span class="tip-left">{{ chapterIndex + 1 }} / {{ chapters.length }} 章</span>
+      <span class="tip-right">{{ tipClock }}</span>
+    </div>
+
     <!-- 顶部极简栏 -->
     <header class="topbar">
       <button class="icon-btn" type="button" :title="t('reader.back')" @click="goBack">
@@ -4208,11 +4411,14 @@ onBeforeUnmount(() => {
             <button class="retry-btn" type="button" @click="retry">{{ t('common.retry') }}</button>
           </div>
 
-          <!-- P0-1 EPUB 原版排版（iframe，保留原书 CSS/内链） -->
+          <!-- P0-1 EPUB 原版排版（iframe，保留原书 CSS/内链；B6：主题联动可选注入） -->
           <div v-else-if="epubRawActive && epubDoc" class="epub-wrap">
             <EpubIframe
               :doc="epubDoc"
               :index="chapterIndex"
+              :theme-override="epubThemeFollow"
+              :bg-color="epubThemeColors.bg"
+              :text-color="epubThemeColors.text"
               @navigate="onEpubNav"
               @progress="(r) => (scrollFrac = r)"
             />
@@ -4934,10 +5140,100 @@ onBeforeUnmount(() => {
                 aria-label="全屏点击方案"
               >
                 <option value="auto">自动（左上上页/右下下页/中间菜单）</option>
+                <option value="custom">自定义分区（3×3 编辑）</option>
                 <option value="nextOnly">全屏下一页</option>
                 <option value="none">不翻页</option>
                 <option value="fixed">固定左上页/右下页</option>
               </select>
+            </div>
+          </div>
+
+          <!-- B1：自定义点击分区编辑器（点击格子循环：上一页→下一页→菜单→无） -->
+          <div v-if="bookCfgTab === 'global' && readerClickMode === 'custom'" class="set-row">
+            <span class="set-label">分区编辑</span>
+            <div class="set-controls">
+              <div class="zone-grid">
+                <button
+                  v-for="(z, i) in clickZones"
+                  :key="i"
+                  class="zone-cell"
+                  :class="`zone-${z}`"
+                  type="button"
+                  :title="`点击切换动作（当前：${ZONE_ACTION_LABEL[z]}）`"
+                  @click="cycleZone(i)"
+                >
+                  {{ ZONE_ACTION_LABEL[z] }}
+                </button>
+              </div>
+              <button class="mini-btn" type="button" @click="resetZones">恢复默认</button>
+            </div>
+          </div>
+
+          <div v-if="bookCfgTab === 'global'" class="set-row">
+            <span class="set-label">页眉提示</span>
+            <div class="set-controls">
+              <button
+                class="switch"
+                :class="{ on: tipHeaderEnabled }"
+                type="button"
+                role="switch"
+                :aria-checked="tipHeaderEnabled"
+                title="阅读页顶部常驻细条（书名 · 章节名）"
+                @click="tipHeaderEnabled = !tipHeaderEnabled"
+              >
+                <span class="switch-knob"></span>
+              </button>
+            </div>
+          </div>
+
+          <div v-if="bookCfgTab === 'global'" class="set-row">
+            <span class="set-label">页脚提示</span>
+            <div class="set-controls">
+              <button
+                class="switch"
+                :class="{ on: tipFooterEnabled }"
+                type="button"
+                role="switch"
+                :aria-checked="tipFooterEnabled"
+                title="阅读页底部常驻细条（章节进度 · 时钟）"
+                @click="tipFooterEnabled = !tipFooterEnabled"
+              >
+                <span class="switch-knob"></span>
+              </button>
+            </div>
+          </div>
+
+          <div v-if="bookCfgTab === 'global'" class="set-row">
+            <span class="set-label">预读下一章</span>
+            <div class="set-controls">
+              <button
+                class="switch"
+                :class="{ on: preloadNextEnabled }"
+                type="button"
+                role="switch"
+                :aria-checked="preloadNextEnabled"
+                title="后台预取下一章正文（本机+服务器双缓存，翻章秒开）"
+                @click="preloadNextEnabled = !preloadNextEnabled"
+              >
+                <span class="switch-knob"></span>
+              </button>
+            </div>
+          </div>
+
+          <div v-if="bookCfgTab === 'global' && isEpubBook" class="set-row">
+            <span class="set-label">EPUB主题联动</span>
+            <div class="set-controls">
+              <button
+                class="switch"
+                :class="{ on: epubThemeFollow }"
+                type="button"
+                role="switch"
+                :aria-checked="epubThemeFollow"
+                title="原版渲染注入阅读主题前景/背景色（深色主题下不再白底刺眼；关闭保留原书样式）"
+                @click="epubThemeFollow = !epubThemeFollow"
+              >
+                <span class="switch-knob"></span>
+              </button>
             </div>
           </div>
 
@@ -5442,6 +5738,21 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
+          <!-- B5：朗读定时停止（legado TTS 定时——到点自动停播） -->
+          <div class="set-row">
+            <span class="set-label">定时停止</span>
+            <select v-model.number="ttsStopMinutes" class="tts-select" title="朗读到时自动停止">
+              <option :value="0">关闭</option>
+              <option :value="15">15 分钟</option>
+              <option :value="30">30 分钟</option>
+              <option :value="60">60 分钟</option>
+              <option :value="90">90 分钟</option>
+            </select>
+            <span v-if="ttsStopMinutes > 0 && ttsPlaying" class="set-value">
+              剩 {{ ttsStopRemainLabel }}
+            </span>
+          </div>
+
           <div v-if="ttsEngine === 'http'" class="set-row">
             <span class="set-label">音源</span>
             <select v-model="ttsHttpName" class="tts-select" :title="ttsHttpName">
@@ -5709,16 +6020,38 @@ onBeforeUnmount(() => {
       </div>
     </transition>
 
-    <!-- 划词工具条（复制 / 搜索 / 朗读） -->
+    <!-- 划词工具条（复制 / 搜索 / 查词 / 朗读 / 书签 / 过滤） -->
     <transition name="pop">
       <div v-if="selOpen" class="sel-bar" :style="{ left: `${selX}px`, top: `${selY}px` }">
         <button type="button" class="sel-btn" @click="copySelection">复制</button>
         <button type="button" class="sel-btn" @click="searchSelection">搜索</button>
+        <button type="button" class="sel-btn" title="查词 / 翻译（词典站新页打开）" @click="lookupSelection">查词</button>
         <button type="button" class="sel-btn" title="朗读选中文本" @click="speakSelection">朗读</button>
         <button type="button" class="sel-btn" title="把选中文本添加为书签" @click="addBookmarkFromSelection">书签</button>
         <button type="button" class="sel-btn" title="把选中文本添加为过滤规则（替换为空）" @click="addFilterFromSelection">过滤</button>
       </div>
     </transition>
+
+    <!-- B3：查词弹层（选中文本 + 词典站快捷入口——新页打开，规避 iframe X-Frame 限制） -->
+    <div v-if="dictOpen" class="pop-mask" @click="dictOpen = false">
+      <div class="dict-pop" @click.stop>
+        <header class="dict-head">
+          <span class="dict-title">查词</span>
+          <button class="drawer-close" type="button" title="关闭" @click="dictOpen = false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+              <path d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+        </header>
+        <p class="dict-word" :title="dictWord">{{ dictWord }}</p>
+        <div class="dict-links">
+          <a :href="`https://dict.youdao.com/search?q=${encodeURIComponent(dictWord)}`" target="_blank" rel="noopener">有道词典</a>
+          <a :href="`https://www.zdic.net/hans/${encodeURIComponent(dictWord)}`" target="_blank" rel="noopener">汉典</a>
+          <a :href="`https://fanyi.baidu.com/#auto/zh/${encodeURIComponent(dictWord)}`" target="_blank" rel="noopener">百度翻译</a>
+          <a :href="`https://www.bing.com/dict/search?q=${encodeURIComponent(dictWord)}`" target="_blank" rel="noopener">必应词典</a>
+        </div>
+      </div>
+    </div>
 
     <!-- 章节侧栏 -->
     <transition name="drawer">
@@ -7318,6 +7651,133 @@ onBeforeUnmount(() => {
 }
 .set-select:focus-visible {
   border-color: var(--accent-1);
+}
+
+/* B1：自定义点击分区编辑器（3×3 九宫格） */
+.zone-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 64px);
+  gap: 4px;
+}.zone-cell {
+  padding: 8px 2px;
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--text-3);
+  background: var(--bg-soft, rgba(127, 127, 127, 0.08));
+  border: 1px solid var(--border-2, rgba(127, 127, 127, 0.25));
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+.zone-cell:hover {
+  border-color: var(--accent-1);
+}
+.zone-prev,
+.zone-next {
+  color: var(--accent-1);
+  border-color: color-mix(in srgb, var(--accent-1) 45%, transparent);
+  background: color-mix(in srgb, var(--accent-1) 8%, transparent);
+}
+.zone-menu {
+  color: var(--text-1);
+  border-color: var(--border-strong);
+}
+.zone-none {
+  opacity: 0.55;
+}
+.mini-btn {
+  margin-left: 10px;
+  padding: 3px 10px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  background: none;
+  border: 1px solid var(--border-2, rgba(127, 127, 127, 0.3));
+  border-radius: 999px;
+  cursor: pointer;
+}
+.mini-btn:hover {
+  color: var(--accent-1);
+  border-color: var(--accent-1);
+}
+
+/* B2：页眉页脚提示栏（常驻细条，pointer-events 穿透——不挡点击翻页/选择） */
+.tip-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  z-index: 14;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 5px 18px;
+  font-size: 11px;
+  font-weight: 300;
+  letter-spacing: 0.5px;
+  color: var(--text-3);
+  opacity: 0.75;
+  pointer-events: none;
+  user-select: none;
+}
+.tip-header {
+  top: 0;
+}
+.tip-footer {
+  bottom: 0;
+}
+.tip-left,
+.tip-right {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 46vw;
+}
+
+/* B3：查词弹层 */
+.dict-pop {
+  width: min(420px, calc(100vw - 48px));
+  padding: 14px 16px 16px;
+  background: var(--panel-bg, #fff);
+  border: 1px solid var(--border-2, rgba(127, 127, 127, 0.25));
+  border-radius: 12px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.18);
+}
+.dict-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.dict-title {
+  font-size: 13px;
+  font-weight: 400;
+  letter-spacing: 2px;
+  color: var(--text-3);
+}
+.dict-word {
+  margin: 0 0 12px;
+  font-size: 17px;
+  font-weight: 500;
+  color: var(--text-1);
+  word-break: break-all;
+}
+.dict-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.dict-links a {
+  padding: 5px 14px;
+  font-size: 12.5px;
+  color: var(--accent-1);
+  text-decoration: none;
+  border: 1px solid color-mix(in srgb, var(--accent-1) 40%, transparent);
+  border-radius: 999px;
+  transition: background-color 0.15s ease;
+}
+.dict-links a:hover {
+  background: color-mix(in srgb, var(--accent-1) 10%, transparent);
 }
 
 .switch .switch-knob {

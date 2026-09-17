@@ -101,12 +101,17 @@ export function searchBookSourceSSE(
 export function getBookContent(
   chapterUrl: string,
   bookSource: string,
-  opts?: { timeout?: number },
+  opts?: { timeout?: number; bookUrl?: string },
   epubContent?: number,
 ): Promise<ReturnData<BookContent>> {
   return get<BookContent>(
     '/getBookContent',
-    { chapterUrl, bookSource, ...(epubContent === 1 ? { epubContent } : {}) },
+    {
+      chapterUrl,
+      bookSource,
+      ...(opts?.bookUrl ? { bookUrl: opts.bookUrl } : {}),
+      ...(epubContent === 1 ? { epubContent } : {}),
+    },
     opts,
   )
 }

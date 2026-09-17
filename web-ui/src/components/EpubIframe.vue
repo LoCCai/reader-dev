@@ -13,6 +13,10 @@ const props = defineProps<{
   doc: EpubDoc | null
   /** spine 下标 */
   index: number
+  /** B6：主题联动覆盖——注入宿主阅读主题的前景/背景色（!important 覆盖原书样式） */
+  themeOverride?: boolean
+  bgColor?: string
+  textColor?: string
 }>()
 
 const emit = defineEmits<{
@@ -92,6 +96,17 @@ function buildSrcdoc(doc: EpubDoc, itemPath: string): string {
   } else {
     html = `<!doctype html><html><head>${shell}</head><body>${html}</body></html>`
   }
+  // B6：主题联动——</head> 前追加 !important 覆盖（晚于原书内联 CSS，优先级最高）
+  if (props.themeOverride && props.bgColor && props.textColor) {
+    const themeCss = `<style>
+      html,body{background:${props.bgColor}!important;color:${props.textColor}!important}
+      a,a:link,a:visited{color:${props.textColor}!important}
+      img,svg,video{background:transparent!important}
+    </style>`
+    html = /<\/head>/i.test(html)
+      ? html.replace(/<\/head>/i, `${themeCss}</head>`)
+      : html.replace(/<head([^>]*)>/i, `<head$1>${themeCss}`)
+  }
   return html
 }
 
@@ -138,7 +153,10 @@ function onDocClick(e: MouseEvent): void {
 }
 
 onMounted(() => void renderCurrent())
-watch(() => [props.doc, props.index] as const, () => void renderCurrent())
+watch(
+  () => [props.doc, props.index, props.themeOverride, props.bgColor, props.textColor] as const,
+  () => void renderCurrent(),
+)
 onBeforeUnmount(() => {
   /* blob URL 由持有方 destroyEpubDoc 统一回收 */
 })

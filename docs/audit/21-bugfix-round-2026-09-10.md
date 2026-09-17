@@ -444,3 +444,20 @@ file/parse、file/restore 已有等价 UI（importPreview/restoreFromZip）；up
 total 2 ✓；exportToTxt 13086 字节（url 别名生效）✓；exportToEpub application/epub+zip ✓；
 logout 非 secure 返回「不支持的操作」（legacy 语义，前端静默）✓。
 验证：cargo test **752 lib** + 前端 vue-tsc/build + **node --test 100/100** 全绿。
+
+
+---
+
+# 第二十一轮（2026-09-17）：legado 对照优化·批次 B——阅读器体验
+
+| # | 项 | 实现 |
+|---|---|---|
+| B-1 | **点击区域自定义**（legado ClickActionConfigDialog） | 点击方案新增 custom：3×3 九宫格每格循环切换 上一页/下一页/菜单/无；localStorage `reader_click_zones`；默认布局复刻 auto |
+| B-2 | **页眉页脚提示栏**（legado TipConfig） | 页眉=书名·章节名、页脚=章节进度·时钟（30s 刷新）；pointer-events 穿透不挡翻页；设置面板双开关（默认关，opt-in） |
+| B-3 | **划词查词**（legado TextActionMenu 查词） | 划词工具条加「查词」→ 弹层展示选中文本 + 有道/汉典/百度/必应词典新页入口（规避 iframe X-Frame 限制） |
+| B-4 | **下一章预读 + 服务端缓存修复** | 预读升级：正文走本机缓存管线（抓取→saveLocalChapter，翻章秒开）+ 预热前 5 图；**连带修复：getBookContent 从未传 bookUrl——服务端单章阅读缓存从未写入**（只有整本缓存流程写），现在正文阅读/预读均携带（epubContent=1 不带，防 HTML 污染纯文本缓存）；开关 `reader_preload_next` 默认开 |
+| B-5 | **朗读定时停止**（legado TTS 定时） | TTS 面板新增 15/30/60/90 分钟定时（播放中显示剩余）；引擎管理复核确认已完整（服务端优先+localStorage 降级） |
+| B-6 | **EPUB 原版渲染主题联动** | EpubIframe 新增 themeOverride/bgColor/textColor props——</head> 前追加 !important 覆盖（原书 CSS 之后注入，优先级最高）；ReaderView 按主题解析色值（custom/深/暖/浅/system 跟随）；开关 `reader_epub_theme_follow` 默认关（保留原书观感） |
+
+移动端专属项（音量键/传感器/电量）不移植。验证：前端 vue-tsc + build +
+node --test 100/100 全绿（本批纯前端 + api 参数扩展，后端无改动，752 基线不变）。
