@@ -492,3 +492,17 @@ GAP 199（「最近添加」排序需 books 表加时间戳列）仍留 backlog�
 
 CBZ 说明：CBZ 本地书走 zip 图片列表 → bookType=2 漫画管线（现有逐页模式 + 本轮竖滑模式均可用）。
 验证：前端 vue-tsc + build + node --test 100/100 全绿（本批纯前端）。
+
+
+---
+
+# 第二十四轮（2026-09-17）：批次收尾——C4 拖拽排序补齐 + EPUB 链路冒烟
+
+| # | 项 | 说明 |
+|---|---|---|
+| 补-1 | 替换规则拖拽排序（C4 计划内未竟半项） | 规则表行拖拽（手柄 ⋮⋮ + 落点虚线提示），落点即重排 order 并全量 saveReplaceRules 保存（服务端+本地镜像） |
+| 补-2 | EPUB 链路冒烟（REMAINING-WORK C3 的自动化部分） | 构造最小 EPUB3（mimetype/container/opf/spine/2 章+css）→ uploadLocalBook（解析出书名「EPUB 冒烟测试书」/作者/toc）→ getBookToc 2 章 → getBookContent epubContent=1 返回完整 HTML（<p> 结构+正文）——三段全通；原版渲染（epubLoader zip 解析）已有单测覆盖。视觉/内链体验仍属人工验收 |
+
+四批计划至此全部落地（复核确认已实现的 6 项不计入新代码）。遗留 backlog：GAP 199
+（books 表时间戳列）、flv/dash 媒体格式、Wi-Fi 传书/MP3 等 D 类不移植项维持原议。
+验证：前端 vue-tsc + build + node --test 100/100；后端 753 基线未动。

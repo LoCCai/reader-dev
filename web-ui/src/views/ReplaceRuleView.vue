@@ -143,6 +143,42 @@ async function confirmSave() {
 /* ================= 启用开关 ================= */
 const toggling = ref<Set<string>>(new Set())
 
+/* ================= C4：拖拽排序（拖到目标行落点——立即重排 order 并全量保存） ================= */
+const dragRuleId = ref<string | null>(null)
+const sortBusy = ref(false)
+
+function onRuleDragStart(r: ReplaceRule, e: DragEvent) {
+  dragRuleId.value = r.id
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.dropEffect = 'move'
+  }
+}
+function onRuleDragOver(_r: ReplaceRule, e: DragEvent) {
+  if (!dragRuleId.value) return
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+}
+async function onRuleDrop(r: ReplaceRule, e: DragEvent) {
+  e.preventDefault()
+  const from = dragRuleId.value
+  dragRuleId.value = null
+  if (!from || from === r.id || sortBusy.value) return
+  const fi = rules.value.findIndex((x) => x.id === from)
+  const ti = rules.value.findIndex((x) => x.id === r.id)
+  if (fi < 0 || ti < 0 || fi === ti) return
+  const next = [...rules.value]
+  const [moved] = next.splice(fi, 1)
+  next.splice(ti, 0, moved)
+  rules.value = next.map((x, i) => ({ ...x, order: i }))
+  sortBusy.value = true
+  try {
+    await saveReplaceRules(rules.value)
+  } finally {
+    sortBusy.value = false
+  }
+}
+
 async function toggleRule(r: ReplaceRule) {
   if (toggling.value.has(r.id)) return
   toggling.value.add(r.id)
@@ -623,8 +659,20 @@ onMounted(() => {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="r in rules" :key="r.id">
+              <tr
+                v-for="r in rules"
+                :key="r.id"
+                :class="{ 'drop-target': dragRuleId && dragRuleId !== r.id }"
+                @dragover="onRuleDragOver(r, $event)"
+                @drop="onRuleDrop(r, $event)"
+              >
                 <td class="td-check">
+                  <span
+                    class="drag-handle"
+                    draggable="true"
+                    title="拖拽调整规则顺序（替换按顺序生效）"
+                    @dragstart="onRuleDragStart(r, $event)"
+                  >⋮⋮</span>
                   <input
                     class="row-check"
                     type="checkbox"
@@ -1361,6 +1409,22 @@ onMounted(() => {
 .row-check {
   accent-color: var(--accent);
   cursor: pointer;
+}
+/* C4：拖拽排序手柄 + 可落点提示 */
+.drag-handle {
+  margin-right: 8px;
+  font-size: 13px;
+  letter-spacing: -2px;
+  color: var(--text-3);
+  cursor: grab;
+  user-select: none;
+}
+.drag-handle:active {
+  cursor: grabbing;
+}
+tr.drop-target {
+  outline: 2px dashed var(--accent, #4f46e5);
+  outline-offset: -2px;
 }
 .json-msg {
   margin: 2px 0 0;
