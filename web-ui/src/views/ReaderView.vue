@@ -229,7 +229,11 @@ const chapterHtml = ref('')
 const sanitizedChapterHtml = computed(() => sanitizeHtml(chapterHtml.value))
 /** HTML → 纯文本（听书朗读 / 复制本章在 HTML 模式下的内容来源；块级标签转换行） */
 function chapterPlainText(): string {
-  return chapterHtml.value
+  return chapterHtmlToPlain(chapterHtml.value)
+}
+/** D2：任意 HTML 文本 → 纯文本（chapterPlainText 的入参版——本机缓存 HTML 降级复用） */
+function chapterHtmlToPlain(html: string): string {
+  return html
     .replace(/<(style|script)[\s\S]*?<\/\1>/gi, ' ')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/(?:p|div|h[1-6]|li|tr|blockquote)>/gi, '\n')
@@ -592,6 +596,8 @@ const chromeHidden = ref(false)
 /** 正文编辑（legacy saveBookContent：编辑当前章并保存服务器 + 本机缓存） */
 const editOpen = ref(false)
 const editText = ref('')
+/** D2：本次编辑会话是否为 EPUB HTML 模式（编辑 HTML 源码——保存后直接更新 chapterHtml） */
+let editIsHtml = false
 const editSaving = ref(false)
 function resetTypography() {
   fontSize.value = 18
@@ -1143,11 +1149,15 @@ async function addBookmark() {
 
 function openEditChapter() {
   if (loading.value || loadError.value || !currentChapter.value) return
-  // EPUB HTML 模式：编辑器面向纯文本，保存会覆盖结构化正文——暂不支持
+  // D2：EPUB HTML 模式放开编辑——编辑净化后的 HTML 源码；保存后正文即所见即所得。
+  // 纯文本模式读到 HTML 内容时按标签剥离降级（loadContent 内兜底），模式互串安全
   if (epubHtmlActive.value) {
-    ElMessage.info('EPUB 排版模式下不支持编辑，请切换回纯文本')
+    editText.value = chapterHtml.value
+    editIsHtml = true
+    editOpen.value = true
     return
   }
+  editIsHtml = false
   editText.value = paragraphs.value.join('\n')
   editOpen.value = true
 }
@@ -1180,8 +1190,14 @@ async function saveEditChapter() {
       index: flatIndex.value,
       content: newContent,
     })
-    content.value = newContent
-    resetSegments()
+    if (editIsHtml) {
+      // D2：HTML 模式编辑——直接更新 chapterHtml（渲染即所见即所得）；
+      // 纯文本切换读取本机缓存命中 HTML 时按 chapterPlainText 剥离降级
+      chapterHtml.value = newContent
+    } else {
+      content.value = newContent
+      resetSegments()
+    }
     editOpen.value = false
     void loadCacheMarkers()
     ElMessage.success('正文已保存')
@@ -3039,6 +3055,12 @@ async function loadContent(chapterUrl: string) {
       // B4：携带 bookUrl——服务端按书键写正文缓存（legacy 语义；epubContent 模式不带，防 HTML 污染纯文本缓存）
       const local = await getLocalChapter(bookUrl.value, chapterUrl)
       text = local?.content ?? ''
+      // D2：EPUB 书在 HTML 模式编辑保存过 → 本机缓存是 HTML——纯文本模式读取时
+      // 按 chapterPlainText 剥离标签降级（防模式互串出满屏标签）
+      if (isEpubBook.value && text && text.includes('<')) {
+        const plain = chapterHtmlToPlain(text)
+        if (plain) text = plain
+      }
       if (!text) {
         const res = await getBookContent(chapterUrl, shelfBook.value.origin, {
           timeout: chapterTimeout.value * 1000,
@@ -3728,14 +3750,35 @@ function onVideoTimeUpdate() {
   if (Number.isFinite(el.duration)) videoDuration.value = el.duration
 }
 
-/* ---- 漫画书：横向滑动 + 点击左右边缘翻页 + 懒加载占位 ---- */
+/* ---- 漫画书：横向滑动 + 点击左右边缘翻页 + 懒加载占位；D1 条漫竖滑模式 ---- */
 const comicScrollRef = ref<HTMLElement | null>(null)
 const comicImages = ref<string[]>([])
 const comicPage = ref(0)
+/** D1：条漫竖滑（webtoon）——图整宽纵排连续滚动；localStorage 记忆 */
+const COMIC_VERTICAL_KEY = 'reader_comic_vertical'
+const comicVertical = ref(localStorage.getItem(COMIC_VERTICAL_KEY) === '1')
+watch(comicVertical, (v) => {
+  try {
+    localStorage.setItem(COMIC_VERTICAL_KEY, v ? '1' : '0')
+  } catch {
+    /* ignore */
+  }
+})
 
 function onComicScroll() {
   const el = comicScrollRef.value
   if (!el) return
+  if (comicVertical.value) {
+    // 竖滑：当前页 = 最后一个顶部越过视口 40% 线的图
+    const line = 40
+    let page = 0
+    const pages = el.querySelectorAll<HTMLElement>('.comic-page')
+    pages.forEach((p, i) => {
+      if (p.getBoundingClientRect().top <= window.innerHeight * (line / 100)) page = i
+    })
+    comicPage.value = Math.min(comicImages.value.length - 1, Math.max(0, page))
+    return
+  }
   const page = Math.round(el.scrollLeft / Math.max(1, el.clientWidth))
   comicPage.value = Math.min(comicImages.value.length - 1, Math.max(0, page))
 }
@@ -4567,13 +4610,18 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <!-- 漫画书：横向滑动 + 点击左右边缘翻页 + 懒加载占位 -->
+          <!-- 漫画书：横向滑动 + 点击左右边缘翻页 + 懒加载占位；D1 条漫竖滑模式 -->
           <div v-else-if="isComicBook" class="media-stage comic-stage">
             <div v-if="comicImages.length === 0" class="state">
               <p class="state-text">{{ t('reader.noComic') }}</p>
             </div>
             <template v-else>
-              <div ref="comicScrollRef" class="comic-scroll" @scroll="onComicScroll">
+              <div
+                ref="comicScrollRef"
+                class="comic-scroll"
+                :class="{ vertical: comicVertical }"
+                @scroll.passive="onComicScroll"
+              >
                 <div
                   v-for="(img, i) in comicImages"
                   :key="`${currentChapter?.url}-${i}`"
@@ -4587,12 +4635,20 @@ onBeforeUnmount(() => {
                     class="comic-img"
                     :alt="`第 ${i + 1} 页`"
                     loading="lazy"
-                    @click="comicClickPage($event, i)"
+                    @click="!comicVertical && comicClickPage($event, i)"
                   />
                 </div>
               </div>
               <div class="comic-foot">
-                <span class="comic-hint">{{ t('reader.comicTip') }}</span>
+                <button
+                  class="comic-mode-btn"
+                  type="button"
+                  :title="comicVertical ? '切换为横向翻页模式' : '切换为条漫竖滑模式（整宽连续滚动）'"
+                  @click="comicVertical = !comicVertical"
+                >
+                  {{ comicVertical ? '横向' : '竖滑' }}
+                </button>
+                <span class="comic-hint">{{ comicVertical ? '条漫竖滑：连续滚动阅读' : t('reader.comicTip') }}</span>
                 <span class="comic-page-indicator">{{ t('reader.comicPage', { c: comicPage + 1, t: comicImages.length }) }}</span>
               </div>
             </template>
@@ -6721,6 +6777,34 @@ onBeforeUnmount(() => {
   padding: 4px 2px 14px;
   scrollbar-width: thin;
   -webkit-overflow-scrolling: touch;
+}
+/* D1：条漫竖滑（webtoon）——整宽纵排连续滚动，无翻页吸附 */
+.comic-scroll.vertical {
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scroll-snap-type: none;
+  gap: 0;
+}
+.comic-scroll.vertical .comic-page {
+  flex: none;
+  width: 100%;
+  max-width: none;
+  border-radius: 0;
+}
+.comic-mode-btn {
+  padding: 2px 12px;
+  font-size: 11.5px;
+  color: var(--text-2);
+  background: none;
+  border: 1px solid var(--border-2, rgba(127, 127, 127, 0.3));
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.comic-mode-btn:hover {
+  color: var(--accent-1);
+  border-color: var(--accent-1);
 }
 .comic-page {
   position: relative;

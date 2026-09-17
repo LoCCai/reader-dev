@@ -478,3 +478,17 @@ node --test 100/100 全绿（本批纯前端 + api 参数扩展，后端无改�
 
 GAP 199（「最近添加」排序需 books 表加时间戳列）仍留 backlog（schema 变更收益比低）。
 验证：cargo test **753 lib**（+test_book_variables_api）+ 前端 vue-tsc/build + 100/100。
+
+
+---
+
+# 第二十三轮（2026-09-17）：legado 对照优化·批次 D——漫画/EPUB/RSS 多媒体
+
+| # | 项 | 实现 |
+|---|---|---|
+| D-1 | **漫画条漫竖滑模式**（webtoon，AGENTS.md 大项） | 漫画阅读加「竖滑/横向」切换（localStorage 记忆）：竖滑=整宽纵排连续滚动（无吸附、无边缘点击翻页），当前页按视口 40% 线计算；横向=原翻页模式不变 |
+| D-2 | **EPUB HTML 模式编辑放开** | 编辑器支持 HTML 源码编辑（保存→服务端+本机缓存→chapterHtml 即时生效）；纯文本模式读到 HTML 缓存时按 chapterHtmlToPlain 剥离标签降级（防模式互串出满屏标签）；TTS/划词复核已支持 HTML 模式 |
+| D-3 | RSS 音视频播放 | **复核确认已完整实现**（文章净化渲染 + enhanceRssMedia：原生 mp4/mp3 直播 + m3u8 动态挂 hls.js，切文销毁） |
+
+CBZ 说明：CBZ 本地书走 zip 图片列表 → bookType=2 漫画管线（现有逐页模式 + 本轮竖滑模式均可用）。
+验证：前端 vue-tsc + build + node --test 100/100 全绿（本批纯前端）。
