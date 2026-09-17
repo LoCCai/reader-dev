@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getBookshelf, saveBook } from '@/api/bookshelf'
-import { getBookInfo, getBookToc, getAvailableBookSource, setBookSource, searchBookSource, searchBookSourceSSE } from '@/api/books'
+import { getBookInfo, getBookToc, getAvailableBookSource, setBookSource, searchBookSource, searchBookSourceSSE, getBookVariables, saveBookVariables } from '@/api/books'
 import { getInvalidBookSources } from '@/api/sources'
 import { deleteBookCache, getShelfBookWithCacheInfo, searchBookContent } from '@/api/cache'
 import { exportBook, type ExportEncoding, type ExportFormat } from '@/api/export'
@@ -413,9 +413,29 @@ const tocPreview = computed(() => {
 })
 
 /** 目录预览渲染条目（GAP 91：卷标题行 isVolume 渲染分隔行；GAP 147：当前章高亮 durChapterIndex；简繁按全站模式转换）
- *  P2：前 50 章截断后不再追加任何行（含分卷标题——分卷标题无限追加修复，逻辑见 utils/tocPreview.ts） */
+ *  P2：前 50 章截断后不再追加任何行（含分卷标题——分卷标题无限追加修复，逻辑见 utils/tocPreview.ts）
+ *  C2：倒序开关（legado 目录倒序）；精简目录——按「去重后的基础标题」折叠同名连载章
+ *  （第12章 xxx（2）/（3）→ 只留首个；legado 精简目录语义） */
+const tocReverse = ref(false)
+const tocSimplified = ref(false)
 const tocEntries = computed<{ kind: 'volume' | 'chapter'; index: number; title: string }[]>(
-  () => buildTocEntries(tocChapters.value, TOC_PREVIEW_MAX, hanText),
+  () => {
+    let list = tocChapters.value
+    if (tocSimplified.value) {
+      const seenBase = new Set<string>()
+      list = list.filter((c) => {
+        if (c.isVolume) return true
+        // 精简：剥离常见连载尾巴后再判重——同名章只留首个
+        const base = c.title.replace(/[（(]\s*\d+\s*[）)]\s*$/, '').trim()
+        if (base && seenBase.has(base)) return false
+        if (base) seenBase.add(base)
+        return true
+      })
+    }
+    let entries = buildTocEntries(list, TOC_PREVIEW_MAX, hanText)
+    if (tocReverse.value) entries = [...entries].reverse()
+    return entries
+  },
 )
 
 /** GAP 147：书架进度章（durChapterIndex）——目录 tab 当前章高亮 */
@@ -529,6 +549,70 @@ const invalidSourceUrls = ref<Set<string>>(new Set())
 /** 书架书且有书源才可换源（本地书无 origin 不显示入口） */
 function canSwitchSource(): boolean {
   return !!shelfBook.value && !!shelfBook.value.origin
+}
+
+/* ================= C1：书籍变量管理（@put/@get 变量表查看/编辑） ================= */
+
+interface VarRow {
+  key: string
+  value: string
+}
+const varsOpen = ref(false)
+const varsLoading = ref(false)
+const varsBusy = ref(false)
+const varsRows = ref<VarRow[]>([])
+
+function openVariables() {
+  varsOpen.value = true
+  document.body.style.overflow = 'hidden'
+  void loadVariables()
+}
+function closeVariables() {
+  if (varsBusy.value) return
+  varsOpen.value = false
+  document.body.style.overflow = ''
+}
+
+async function loadVariables() {
+  const b = shelfBook.value
+  if (!b?.origin) return
+  varsLoading.value = true
+  try {
+    const res = await getBookVariables(b.bookUrl, b.origin, { silent: true })
+    const m = res.data?.variables ?? {}
+    varsRows.value = Object.entries(m).map(([key, value]) => ({ key, value }))
+  } catch {
+    varsRows.value = []
+  } finally {
+    varsLoading.value = false
+  }
+}
+
+function addVarRow() {
+  varsRows.value.push({ key: '', value: '' })
+}
+function removeVarRow(i: number) {
+  varsRows.value.splice(i, 1)
+}
+
+async function saveVariables() {
+  const b = shelfBook.value
+  if (!b?.origin || varsBusy.value) return
+  const m: Record<string, string> = {}
+  for (const r of varsRows.value) {
+    const k = r.key.trim()
+    if (k) m[k] = r.value
+  }
+  varsBusy.value = true
+  try {
+    await saveBookVariables(b.bookUrl, b.origin, m)
+    ElMessage.success(`已保存 ${Object.keys(m).length} 个变量`)
+    closeVariables()
+  } catch {
+    // 请求层已提示
+  } finally {
+    varsBusy.value = false
+  }
 }
 
 function openSource() {
@@ -1150,6 +1234,8 @@ watch(bookUrl, () => {
         <template v-else>
           <p class="toc-hint">
             共 {{ tocChapters.filter((c) => !c.isVolume).length }} 章 · 预览前 {{ Math.min(TOC_PREVIEW_MAX, tocPreview.length) }} 章，点击进入阅读器并跳转
+            <button class="toc-tool" :class="{ on: tocReverse }" type="button" title="倒序显示目录" @click="tocReverse = !tocReverse">倒序</button>
+            <button class="toc-tool" :class="{ on: tocSimplified }" type="button" title="精简目录：折叠同名连载章（第12章 xxx（2）/（3）只留首个）" @click="tocSimplified = !tocSimplified">精简</button>
           </p>
           <ul class="toc-list">
             <li v-for="c in tocEntries" :key="`${c.kind}-${c.index}-${c.title}`" class="toc-row">
@@ -1287,6 +1373,8 @@ watch(bookUrl, () => {
             <button v-if="shelfBook" class="search-btn" type="button" @click="openEdit">编辑</button>
             <!-- 换源（书架书且带书源：搜索同书其他书源并切换） -->
             <button v-if="canSwitchSource()" class="search-btn" type="button" @click="openSource">换源</button>
+            <!-- C1：书籍变量（legado 界面变量管理——@put/@get 调试刚需） -->
+            <button v-if="canSwitchSource()" class="search-btn" type="button" @click="openVariables">变量</button>
             <!-- 导出（GET /reader3/exportBook：txt/epub/html blob 下载） -->
             <button class="search-btn" type="button" @click="openExport">导出</button>
             <!-- 章节缓存（服务器 / 本机双向：单章、至末尾、全本、指定范围） -->
@@ -1370,6 +1458,43 @@ watch(bookUrl, () => {
                 </li>
               </ul>
             </form>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+    <!-- C1：书籍变量弹层（@put/@get 变量表查看/编辑） -->
+    <Teleport to="body">
+      <Transition name="dlg">
+        <div v-if="varsOpen" class="dlg-overlay" @click.self="closeVariables">
+          <div class="dlg dlg-vars" role="dialog" aria-modal="true" aria-label="书籍变量" tabindex="-1">
+            <header class="dlg-head">
+              <h2 class="dlg-title">书籍变量 · {{ display.name }}</h2>
+              <button class="dlg-close" type="button" aria-label="关闭" @click="closeVariables">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            </header>
+            <p class="vars-hint">书源 @put 写入的变量（详情/目录/正文阶段累积）；目录/正文规则的 @get:{名} 按名读取。</p>
+            <div v-if="varsLoading" class="vars-state">读取中…</div>
+            <template v-else>
+              <div v-if="varsRows.length === 0" class="vars-state">暂无变量——点「添加」手动创建</div>
+              <div class="vars-rows">
+                <div v-for="(r, i) in varsRows" :key="i" class="vars-row">
+                  <input v-model="r.key" class="vars-key" type="text" placeholder="变量名" maxlength="60" spellcheck="false" />
+                  <input v-model="r.value" class="vars-value" type="text" placeholder="值" maxlength="500" spellcheck="false" />
+                  <button class="vars-del" type="button" title="删除该变量" @click="removeVarRow(i)">✕</button>
+                </div>
+              </div>
+            </template>
+            <footer class="dlg-foot">
+              <button class="ghost-btn" type="button" :disabled="varsBusy" @click="addVarRow">添加</button>
+              <div class="foot-gap"></div>
+              <button class="ghost-btn" type="button" :disabled="varsBusy" @click="closeVariables">取消</button>
+              <button class="accent-btn" type="button" :disabled="varsBusy" @click="saveVariables">
+                {{ varsBusy ? '保存中…' : '保存' }}
+              </button>
+            </footer>
           </div>
         </div>
       </Transition>
@@ -1721,6 +1846,28 @@ watch(bookUrl, () => {
   font-weight: 300;
   letter-spacing: 1px;
   color: var(--text-3);
+}
+/* C2：目录工具按钮（倒序/精简） */
+.toc-tool {
+  margin-left: 8px;
+  padding: 2px 10px;
+  font-family: inherit;
+  font-size: 11.5px;
+  color: var(--text-3);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.toc-tool:hover {
+  color: var(--accent, #4f46e5);
+  border-color: var(--accent, #4f46e5);
+}
+.toc-tool.on {
+  color: var(--accent, #4f46e5);
+  border-color: var(--accent, #4f46e5);
+  background: var(--accent-soft, rgba(79, 70, 229, 0.08));
 }
 .toc-list {
   list-style: none;
@@ -2337,6 +2484,83 @@ watch(bookUrl, () => {
 .dlg-close:hover:not(:disabled) {
   color: var(--text-1);
   background: #f4f4f5;
+}
+
+/* C1：书籍变量弹层 */
+.dlg-vars {
+  width: min(560px, calc(100vw - 40px));
+}
+.vars-hint {
+  margin: -6px 0 12px;
+  font-size: 12px;
+  font-weight: 300;
+  color: var(--text-3);
+}
+.vars-state {
+  padding: 28px 0;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-3);
+}
+.vars-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.vars-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.vars-key {
+  flex: 0 0 38%;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--text-1);
+  background: var(--bg-soft, #f7f7f8);
+  border: 1px solid var(--border, #ececec);
+  border-radius: 6px;
+  outline: none;
+}
+.vars-value {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--text-1);
+  background: var(--bg-soft, #f7f7f8);
+  border: 1px solid var(--border, #ececec);
+  border-radius: 6px;
+  outline: none;
+}
+.vars-key:focus,
+.vars-value:focus {
+  border-color: var(--accent, #4f46e5);
+}
+.vars-del {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.vars-del:hover {
+  color: #e11d48;
+  background: rgba(225, 29, 72, 0.08);
+}
+.dlg-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+}
+.foot-gap {
+  flex: 1;
 }
 .dlg-close:disabled {
   cursor: not-allowed;

@@ -385,6 +385,22 @@ function pushLog(text: string, error = false) {
   debugLogs.value.push({ text, error })
 }
 
+/** C6：一键复制调试日志（失败步骤已含红色标记 ✗ 前缀，便于协作排查） */
+async function copyDebugLogs() {
+  const s = debugSource.value
+  const text = [
+    `书源：${s?.bookSourceName ?? ''}（${s?.bookSourceUrl ?? ''}）`,
+    `动作：${debugActionMeta(debugAction.value).label} · 输入：${debugInput.value.trim() || '—'}`,
+    ...debugLogs.value.map((l) => (l.error ? `✗ ${l.text}` : l.text)),
+  ].join('\n')
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success(`已复制 ${debugLogs.value.length} 行调试日志`)
+  } catch {
+    ElMessage.error('复制失败，请手动选择复制')
+  }
+}
+
 /** 运行调试：建立 SSE 连接，逐步追加日志；失败红色标记 */
 async function runDebug() {
   const s = debugSource.value
@@ -2663,6 +2679,16 @@ onBeforeUnmount(() => {
             </div>
             <p v-if="debugMsg" class="debug-msg" :class="{ error: debugMsgError }">{{ debugMsg }}</p>
             <div class="dlg-actions">
+              <!-- C6：一键复制调试日志（排查协作/提 issue） -->
+              <button
+                v-if="!debugRunning && debugLogs.length > 0"
+                class="ghost-btn"
+                type="button"
+                title="复制全部调试日志到剪贴板"
+                @click="copyDebugLogs"
+              >
+                复制日志
+              </button>
               <button v-if="debugRunning" class="ghost-btn" type="button" @click="stopDebug">停止</button>
               <template v-else>
                 <button class="ghost-btn" type="button" @click="closeDebug">关闭</button>

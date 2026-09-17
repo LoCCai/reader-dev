@@ -28,6 +28,8 @@ import {
 import { uploadLocalBook, importBookPreview } from '@/api/upload'
 import { searchBookContent } from '@/api/cache'
 import { exportBook, type ExportEncoding, type ExportFormat } from '@/api/export'
+import { getBookInfo } from '@/api/books'
+import { saveBook } from '@/api/bookshelf'
 import { downloadBlob } from '@/utils/download'
 import { canRescanBook } from '@/utils/localBook'
 import { moveGroupTo } from '@/utils/groupOrder'
@@ -976,6 +978,41 @@ async function bulkRefresh() {
     ElMessage.error('刷新失败，请稍后重试')
   } finally {
     manageBusy.value = false
+  }
+}
+
+/* ================= C5：批量补全封面（选中书中封面缺失的逐本拉详情回填） ================= */
+
+const coverFixBusy = ref(false)
+async function bulkFixCovers() {
+  if (coverFixBusy.value || manageBusy.value) return
+  const booksToFix = books.value.filter(
+    (b) => selected.value.has(b.bookUrl) && b.origin && !(b.coverUrl || '').trim() && !(b.customCoverUrl || '').trim(),
+  )
+  if (!booksToFix.length) {
+    ElMessage.info('选中的书都有封面（或为本地书），无需补全')
+    return
+  }
+  coverFixBusy.value = true
+  let ok = 0
+  try {
+    for (const b of booksToFix) {
+      try {
+        const res = await getBookInfo(b.bookUrl, b.origin, { silent: true })
+        const cover = res.data?.coverUrl ?? ''
+        if (cover.trim()) {
+          await saveBook({ bookUrl: b.bookUrl, coverUrl: cover } as Book)
+          b.coverUrl = cover
+          ok += 1
+        }
+      } catch {
+        /* 单本失败不中断 */
+      }
+    }
+    ElMessage.success(`封面补全完成：${ok}/${booksToFix.length} 本`)
+    if (ok > 0) await load()
+  } finally {
+    coverFixBusy.value = false
   }
 }
 
@@ -3032,6 +3069,16 @@ onMounted(() => {
             @click="bulkRefresh"
           >
             {{ manageBusy ? '刷新中…' : '刷新章节' }}
+          </button>
+          <!-- C5：批量补全封面（选中书中封面缺失的逐本拉详情回填） -->
+          <button
+            class="manage-act"
+            type="button"
+            :disabled="selected.size === 0 || manageBusy || coverFixBusy"
+            title="对选中且缺封面的书逐本拉取详情回填封面 URL"
+            @click="bulkFixCovers"
+          >
+            {{ coverFixBusy ? '补全中…' : '补全封面' }}
           </button>
         </div>
       </div>

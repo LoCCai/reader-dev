@@ -53,6 +53,32 @@ export function setBookSource(
   return post<Book>('/setBookSource', { bookUrl, newUrl, bookSourceUrl }, opts)
 }
 
+/**
+ * GET /reader3/getBookVariables：书籍变量读取（legado 界面变量管理对齐）——
+ * 详情/目录/正文阶段 @put 累积的 bookUrl 级变量表。
+ */
+export function getBookVariables(
+  bookUrl: string,
+  bookSource: string,
+  opts?: { silent?: boolean },
+): Promise<ReturnData<{ variables: Record<string, string> }>> {
+  return get<{ variables: Record<string, string> }>(
+    '/getBookVariables',
+    { bookUrl, bookSource },
+    opts,
+  )
+}
+
+/** POST /reader3/saveBookVariables：书籍变量整体覆盖（body {bookUrl, bookSource, variables}） */
+export function saveBookVariables(
+  bookUrl: string,
+  bookSource: string,
+  variables: Record<string, string>,
+  opts?: { silent?: boolean },
+): Promise<ReturnData<{ count: number }>> {
+  return post<{ count: number }>('/saveBookVariables', { bookUrl, bookSource, variables }, opts)
+}
+
 /** GET /reader3/getBookToc：章节目录（tocUrl=info.tocUrl + bookSource） */
 export function getBookToc(
   tocUrl: string,

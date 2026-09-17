@@ -43,11 +43,34 @@ function newId(): string {
 const editorOpen = ref(false)
 const editorBusy = ref(false)
 const editingId = ref<string | null>(null)
-const form = ref({ name: '', find: '', replace: '', enabled: true })
+/** C4：作用域/正则等扩展字段（后端 ReplaceRule 模型已有；编辑时读入、保存时透传） */
+interface RuleForm {
+  name: string
+  find: string
+  replace: string
+  enabled: boolean
+  isRegex: boolean
+  group: string
+  scope: string
+  scopeTitle: boolean
+  scopeContent: boolean
+}
+const emptyForm = (): RuleForm => ({
+  name: '',
+  find: '',
+  replace: '',
+  enabled: true,
+  isRegex: false,
+  group: '',
+  scope: '',
+  scopeTitle: false,
+  scopeContent: true,
+})
+const form = ref<RuleForm>(emptyForm())
 
 function openAdd() {
   editingId.value = null
-  form.value = { name: '', find: '', replace: '', enabled: true }
+  form.value = emptyForm()
   editorOpen.value = true
   document.body.style.overflow = 'hidden'
 }
@@ -59,6 +82,11 @@ function openEdit(r: ReplaceRule) {
     find: r.find ?? '',
     replace: r.replace ?? '',
     enabled: r.enabled,
+    isRegex: !!r.isRegex,
+    group: typeof r.group === 'string' ? r.group : '',
+    scope: typeof r.scope === 'string' ? r.scope : '',
+    scopeTitle: !!r.scopeTitle,
+    scopeContent: r.scopeContent !== false,
   }
   editorOpen.value = true
   document.body.style.overflow = 'hidden'
@@ -86,6 +114,11 @@ async function confirmSave() {
     replace: form.value.replace,
     enabled: form.value.enabled,
     order: editing ? (rules.value.find((r) => r.id === editing)?.order ?? 0) : rules.value.length,
+    isRegex: form.value.isRegex,
+    ...(form.value.group.trim() ? { group: form.value.group.trim() } : {}),
+    ...(form.value.scope.trim() ? { scope: form.value.scope.trim() } : {}),
+    scopeTitle: form.value.scopeTitle,
+    scopeContent: form.value.scopeContent,
   }
   try {
     // 当前为 localStorage 占位；后端就绪后走 POST /reader3/saveReplaceRule（见 api/replaceRules.ts）
@@ -726,7 +759,39 @@ onMounted(() => {
                   <span class="switch-knob"></span>
                 </button>
               </div>
-              <p class="field-tip">正文渲染时按顺序逐条 replaceAll（全文匹配，非正则）</p>
+              <!-- C4：作用域/正则扩展字段（legacy ReplaceRule 全字段对齐） -->
+              <div class="field">
+                <span class="field-label">正则匹配</span>
+                <button
+                  class="switch"
+                  :class="{ on: form.isRegex }"
+                  type="button"
+                  role="switch"
+                  :aria-checked="form.isRegex"
+                  title="查找内容按正则表达式处理（关闭 = 纯文本全文替换）"
+                  @click="form.isRegex = !form.isRegex"
+                >
+                  <span class="switch-knob"></span>
+                </button>
+              </div>
+              <label class="field">
+                <span class="field-label">分组</span>
+                <input v-model="form.group" class="field-input" type="text" placeholder="规则分组（可选，同组规则可整组启停）" maxlength="40" spellcheck="false" />
+              </label>
+              <label class="field">
+                <span class="field-label">作用域</span>
+                <input v-model="form.scope" class="field-input" type="text" placeholder="仅对这些书生效（bookUrl 正则，逗号分隔多项；留空 = 全部书籍）" spellcheck="false" />
+              </label>
+              <div class="field scope-flags">
+                <span class="field-label">生效位置</span>
+                <label class="check-line" title="替换时匹配书源目录章节标题">
+                  <input v-model="form.scopeTitle" type="checkbox" /> 替换标题
+                </label>
+                <label class="check-line" title="替换正文内容">
+                  <input v-model="form.scopeContent" type="checkbox" /> 替换正文
+                </label>
+              </div>
+              <p class="field-tip">{{ form.isRegex ? '查找内容按正则处理（注意转义）' : '正文渲染时按顺序逐条 replaceAll（全文匹配，非正则）' }}</p>
               <div class="dlg-actions">
                 <button class="ghost-btn" type="button" :disabled="editorBusy" @click="closeEditor">取消</button>
                 <button class="accent-btn" type="submit" :disabled="editorBusy || !form.find.trim()">
@@ -1601,6 +1666,23 @@ onMounted(() => {
   font-size: 11.5px;
   font-weight: 300;
   color: var(--text-3);
+}
+/* C4：生效位置复选行 */
+.scope-flags {
+  flex-direction: row;
+  align-items: center;
+  gap: 14px;
+}
+.check-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.check-line input {
+  accent-color: var(--accent, #4f46e5);
 }
 .dlg-actions {
   display: flex;

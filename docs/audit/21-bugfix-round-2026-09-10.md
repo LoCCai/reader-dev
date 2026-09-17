@@ -461,3 +461,20 @@ logout 非 secure 返回「不支持的操作」（legacy 语义，前端静默�
 
 移动端专属项（音量键/传感器/电量）不移植。验证：前端 vue-tsc + build +
 node --test 100/100 全绿（本批纯前端 + api 参数扩展，后端无改动，752 基线不变）。
+
+
+---
+
+# 第二十二轮（2026-09-17）：legado 对照优化·批次 C——书籍·书源管理增强
+
+| # | 项 | 实现 |
+|---|---|---|
+| C-1 | **书籍变量管理 UI**（legado 界面变量编辑） | 新增后端 `GET/POST /reader3/getBookVariables`/`saveBookVariables`（读=bookUrl 级 @put 累积表；写=整体覆盖，数值/布尔宽容转字符串）；详情页「变量」弹层（键值行编辑/增删/保存）。8100 实测写读回显 ✓ |
+| C-2 | 目录倒序 + 精简目录（详情页目录 tab） | tocEntries 加 reverse/精简开关——精简=剥离连载尾巴（`（2）/（3）`）后判重只留首个；工具按钮随 hint 行 |
+| C-3 | 搜索范围限定 | **复核确认已完整实现**（searchGroups chips + searchBookMulti(SSE) bookSourceGroup 透传） |
+| C-4 | 替换规则作用域 | 规则编辑器补全 legacy 全字段：isRegex（正则开关+提示联动）、分组、作用域 scope（按书 bookUrl 正则）、生效位置 scopeTitle/scopeContent 复选；保存透传（后端模型本就支持）；服务端化/批量导入复核已有 |
+| C-5 | 书架封面批量补全 | 多选批量栏「补全封面」：选中且缺封面（含 custom 为空）的书逐本 getBookInfo 回填 coverUrl → saveBook，统计 N/M |
+| C-6 | 调试面板改进 | 「复制日志」一键导出（源信息+动作+输入+全量日志，失败行 ✗ 前缀）；失败步骤红色高亮已有 |
+
+GAP 199（「最近添加」排序需 books 表加时间戳列）仍留 backlog（schema 变更收益比低）。
+验证：cargo test **753 lib**（+test_book_variables_api）+ 前端 vue-tsc/build + 100/100。

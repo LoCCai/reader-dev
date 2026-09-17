@@ -432,6 +432,11 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
         .route("/reader3/deleteBookmarks", post(delete_bookmarks))
         .route("/reader3/saveRssSources", post(save_rss_sources))
         .route("/reader3/saveBookmarks", post(save_bookmarks))
+        .route(
+            "/reader3/getBookVariables",
+            get(get_book_variables).post(get_book_variables),
+        )
+        .route("/reader3/saveBookVariables", post(save_book_variables))
         .route("/reader3/addBookGroupMulti", post(add_book_group_multi))
         .route(
             "/reader3/removeBookGroupMulti",
@@ -5239,6 +5244,78 @@ async fn save_bookmarks(
             Json(ReturnData::err("保存失败"))
         }
     }
+}
+
+/// GET/POST /reader3/getBookVariables：书籍变量读取（C1——legado 界面变量管理对齐）。
+/// 返回该书 bookUrl 级 @put/@get 变量表（详情/目录/正文阶段累积的合并结果），
+/// data = { variables: {k: v} }——字符串键值，上下文保留键不外露。
+async fn get_book_variables(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body
+        .as_ref()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+    let book_url = param_of(&params, body_json.as_ref(), "bookUrl");
+    let source_url = param_of(&params, body_json.as_ref(), "bookSource");
+    if book_url.is_empty() || source_url.is_empty() {
+        return Json(ReturnData::err("参数错误"));
+    }
+    let vars = crate::parser::rule::load_book_vars(&namespace, &source_url, &book_url);
+    let mut m = serde_json::Map::new();
+    for (k, v) in vars.iter() {
+        m.insert(k.clone(), json!(v));
+    }
+    Json(ReturnData::ok(json!({ "variables": serde_json::Value::Object(m) })))
+}
+
+/// POST /reader3/saveBookVariables：书籍变量整体覆盖保存（body {bookUrl, bookSource,
+/// variables:{k:v}}——键值均须字符串；超限条目按引擎上限静默截断）。
+async fn save_book_variables(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body
+        .as_ref()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+    let book_url = param_of(&params, body_json.as_ref(), "bookUrl");
+    let source_url = param_of(&params, body_json.as_ref(), "bookSource");
+    let variables = body_json
+        .as_ref()
+        .and_then(|b| b.get("variables"))
+        .and_then(|v| v.as_object())
+        .cloned();
+    if book_url.is_empty() || source_url.is_empty() {
+        return Json(ReturnData::err("参数错误"));
+    }
+    let Some(variables) = variables else {
+        return Json(ReturnData::err("参数错误"));
+    };
+    let mut vars = crate::parser::rule::RuleVars::new();
+    for (k, v) in &variables {
+        // 数值/布尔宽容转字符串（界面编辑常见形态）；嵌套对象序列化为紧凑 JSON
+        let s = match v {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Null => String::new(),
+            other => other.to_string(),
+        };
+        vars.insert(k.clone(), s);
+    }
+    let count = vars.len();
+    crate::parser::rule::save_book_vars(&namespace, &source_url, &book_url, &vars);
+    Json(ReturnData::ok(json!({ "count": count })))
 }
 
 /// 批量分组接口书目解析：兼容 master `bookUrls:[str]` 与 legacy `bookList:[Book]`
@@ -11792,6 +11869,47 @@ mod tests {
         )
         .await;
         assert_eq!(ret.0.error_msg, "正文不能为空");
+        cleanup(state, dir).await;
+    }
+
+    /// C1 getBookVariables/saveBookVariables：书籍变量管理（写→读回显；参数校验；
+    /// 数值/对象值宽容转字符串）
+    #[tokio::test]
+    async fn test_book_variables_api() {
+        let (state, dir) = test_state("bookvars").await;
+        let ret = save_book_variables(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Some(Bytes::from(
+                r#"{"bookUrl":"https://book.com/a","bookSource":"https://src.com","variables":{"nid":"23412","count":3,"flag":true}}"#,
+            )),
+        )
+        .await;
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+        let ret = get_book_variables(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Some(Bytes::from(
+                r#"{"bookUrl":"https://book.com/a","bookSource":"https://src.com"}"#,
+            )),
+        )
+        .await;
+        assert!(ret.0.is_success);
+        let vars = ret.0.data["variables"].as_object().unwrap();
+        assert_eq!(vars["nid"], json!("23412"));
+        assert_eq!(vars["count"], json!("3"), "数值宽容转字符串");
+        assert_eq!(vars["flag"], json!("true"));
+        // 缺参 → 参数错误
+        let ret = save_book_variables(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Some(Bytes::from(r#"{"bookUrl":"x"}"#)),
+        )
+        .await;
+        assert_eq!(ret.0.error_msg, "参数错误");
         cleanup(state, dir).await;
     }
 
