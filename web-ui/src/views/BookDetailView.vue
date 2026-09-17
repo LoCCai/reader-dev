@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getBookshelf, saveBook } from '@/api/bookshelf'
-import { getBookInfo, getBookToc, searchBookSource, searchBookSourceSSE } from '@/api/books'
+import { getBookInfo, getBookToc, getAvailableBookSource, setBookSource, searchBookSource, searchBookSourceSSE } from '@/api/books'
 import { getInvalidBookSources } from '@/api/sources'
 import { deleteBookCache, getShelfBookWithCacheInfo, searchBookContent } from '@/api/cache'
 import { exportBook, type ExportEncoding, type ExportFormat } from '@/api/export'
@@ -597,6 +597,17 @@ async function runSourceSearch() {
     } catch {
       invalidSourceUrls.value = new Set()
     }
+    // A1：换源候选即时预载（服务端按 书名+作者 精确搜索并持久化——refresh=0 走缓存
+    // 秒回）；SSE 流式搜索继续追加（appendSourceResults 按 origin 去重，天然合并）
+    try {
+      const cached = await getAvailableBookSource(b.bookUrl, { silent: true })
+      if ((cached.data ?? []).length > 0) {
+        appendSourceResults(cached.data ?? [])
+        sourceResults.value = sortSourceResults(sourceResults.value)
+      }
+    } catch {
+      /* 候选接口不可用（404）：跳过，SSE 兜底 */
+    }
     // GAP 81：优先 SSE 流式换源（逐书源增量推送；连接失败降级普通接口）
     let sseFailed = false
     try {
@@ -647,13 +658,45 @@ async function runSourceSearch() {
   }
 }
 
-/** 点击结果 → 切换书源：saveBook 更新 origin/originName/tocUrl（bookUrl 保持书架主键不变） */
+/** 点击结果 → 切换书源：优先 legacy 主接口 setBookSource（服务端换主键+预取目录），
+ *  失败降级 saveBook 补丁（仅切 origin/originName/tocUrl，bookUrl 主键不变） */
 async function switchSource(r: SearchBook) {
   const b = shelfBook.value
   if (!b || sourceSwitching.value) return
   if (!r.origin || r.origin === currentOrigin.value) return
   sourceSwitching.value = true
   try {
+    // A1：POST /setBookSource——服务端完成新源详情拉取、书架主键/origin/tocUrl
+    // 切换与目录预取缓存（legacy BookController 同名语义）
+    let viaMainApi = false
+    try {
+      const res = await setBookSource(b.bookUrl, r.bookUrl, r.origin, { silent: true })
+      viaMainApi = res.isSuccess
+    } catch {
+      viaMainApi = false
+    }
+    if (viaMainApi) {
+      // 主键已换成新源 bookUrl → 路由跳新地址（watch(bookUrl) 自动重载详情/目录）
+      ElMessage.success(`已切换到「${r.originName || r.origin}」`)
+      // 直关弹层（closeSource 的忙碌守卫会拦住切换中的关闭）
+      sourceSSEHandle?.abort()
+      sourceSSEHandle = null
+      sourceOpen.value = false
+      document.body.style.overflow = ''
+      // GAP 6：换源后阅读位置保留（重定位写回服务端进度，失败静默）
+      await relocateProgressAfterSwitch(r)
+      await router.replace({
+        path: `/book/${encodeURIComponent(r.bookUrl)}`,
+        query: {
+          origin: r.origin,
+          ...(r.originName ? { originName: r.originName } : {}),
+          ...(r.name ? { name: r.name } : {}),
+          ...(r.coverUrl ? { cover: r.coverUrl } : {}),
+        },
+      })
+      return
+    }
+    // 降级：saveBook 更新 origin/originName/tocUrl（bookUrl 保持书架主键不变）
     await saveBook({
       bookUrl: b.bookUrl,
       origin: r.origin,

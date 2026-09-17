@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   deleteBookSource,
   deleteBookSources,
+  disableInvalidBookSources,
   getBookSources,
   getInvalidBookSources,
   previewRemoteSource,
@@ -297,6 +298,32 @@ async function checkInvalid() {
   }
 }
 
+/** A2：失效书源一键禁用（POST /disableInvalidBookSources——后端 96 并发探测并禁用；
+ *  耗时同失效检测，超时放宽到 15 分钟；成功后刷新列表并同步失效标记） */
+const invalidDisabling = ref(false)
+async function disableInvalid() {
+  if (invalidDisabling.value || invalidChecking.value) return
+  invalidDisabling.value = true
+  invalidMsg.value = '探测失效书源中…（并发检测全部启用源，量大时可能数分钟）'
+  invalidMsgError.value = false
+  try {
+    const res = await disableInvalidBookSources()
+    const disabled = res.data?.disabled ?? []
+    invalidSources.value = new Set(disabled)
+    invalidMsg.value = disabled.length === 0
+      ? '探测完成：无失效书源需要禁用'
+      : `已禁用 ${disabled.length} 个失效书源`
+    await load()
+  } catch (err) {
+    invalidMsg.value = isNotImplemented(err)
+      ? '一键禁用接口后端暂未提供（POST /reader3/disableInvalidBookSources）'
+      : `一键禁用失败：${err instanceof Error ? err.message : '请稍后重试'}`
+    invalidMsgError.value = true
+  } finally {
+    invalidDisabling.value = false
+  }
+}
+
 /* ================= 书源调试（GET /reader3/bookSourceDebugSSE：SSE 逐步日志） ================= */
 
 const DEBUG_ACTIONS: { value: DebugAction; label: string; tip: string; needKey: boolean; needUrl: boolean }[] = [
@@ -482,6 +509,29 @@ async function toggleSource(s: BookSource) {
     s.enabled = prev // 失败回滚（错误提示由拦截器处理）
   } finally {
     toggling.value.delete(s.bookSourceUrl)
+  }
+}
+
+/** A2：复制书源（legado 源复制）——克隆全部字段，URL 加 #copy 后缀避主键冲突、
+ *  名称加「副本」，保存后刷新列表并提示（副本默认停用，改完再启用防搜索双源） */
+const duplicating = ref(new Set<string>())
+async function duplicateSource(s: BookSource) {
+  if (duplicating.value.has(s.bookSourceUrl)) return
+  duplicating.value.add(s.bookSourceUrl)
+  try {
+    const copy: BookSource = {
+      ...s,
+      bookSourceUrl: `${s.bookSourceUrl}#copy`,
+      bookSourceName: `${s.bookSourceName}·副本`,
+      enabled: false,
+    }
+    await saveBookSource(copy)
+    await load()
+    ElMessage.success(`已复制为「${copy.bookSourceName}」（默认停用）`)
+  } catch {
+    // 错误提示由拦截器处理
+  } finally {
+    duplicating.value.delete(s.bookSourceUrl)
   }
 }
 
@@ -1931,6 +1981,15 @@ onBeforeUnmount(() => {
           <button
             class="ghost-btn"
             type="button"
+            :disabled="invalidDisabling || invalidChecking"
+            title="探测并一键禁用全部失效书源（POST /reader3/disableInvalidBookSources）"
+            @click="disableInvalid"
+          >
+            {{ invalidDisabling ? '禁用中…' : '禁用失效' }}
+          </button>
+          <button
+            class="ghost-btn"
+            type="button"
             :disabled="exporting"
             :title="manageMode && selectedCount > 0 ? `导出勾选的 ${selectedCount} 个书源（bookSource.json）` : '下载当前账号全部书源（bookSource.json）'"
             @click="doExport"
@@ -2273,6 +2332,15 @@ onBeforeUnmount(() => {
           </button>
           <button class="test-btn" type="button" title="编辑书源（基本信息 + 规则字段）" @click="openEdit(s)">
             编辑
+          </button>
+          <button
+            class="test-btn"
+            type="button"
+            :disabled="duplicating.has(s.bookSourceUrl)"
+            title="复制书源（克隆全部字段，URL 加 #copy 后缀；副本默认停用）"
+            @click="duplicateSource(s)"
+          >
+            {{ duplicating.has(s.bookSourceUrl) ? '复制中…' : '复制' }}
           </button>
           <button
             class="switch"

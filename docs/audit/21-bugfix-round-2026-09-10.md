@@ -419,3 +419,28 @@ legado（OkHttp）同样过不去。浏览器兜底依赖 camoufox 部署，属�
 
 调试留档：详情 name 乱码两小时——bash 探针命令行编码劣化 + **进程内详情缓存**把
 乱码结果钉住（重启实例后干净请求即正确）。与第十五轮同坑：缓存键不含参数形态。
+
+
+---
+
+# 第二十轮（2026-09-17）：legado 对照优化·批次 A——后端就绪接口前端接线
+
+参照 warpdotsys/legado（阅读 Sigma fork）功能面盘点（后端 ~25 个已注册未接接口 + legado
+高频项 + AGENTS.md 既定大项），制定四批推进计划（A 接线 / B 阅读器 / C 管理 / D 多媒体）。
+本轮为批次 A（全部前端接线 + 1 处后端参数宽容）。
+
+| # | 接线项 | 说明 |
+|---|---|---|
+| A-1 | **换源主链路** | switchSource 优先 POST /setBookSource（服务端换 bookUrl 主键 + 预取新源目录缓存，legacy 同名语义），成功后路由跳新地址自动重载 + GAP6 进度重定位；失败降级原 saveBook 补丁。换源弹层先 GET /getAvailableBookSource（refresh=0 持久化候选秒回）再 SSE 流式合并（按 origin 去重） |
+| A-2 | 书源管理 | 「禁用失效」按钮（POST /disableInvalidBookSources，探测+禁用一体）；「复制」行按钮（克隆全字段，URL+#copy、名称+副本、默认停用） |
+| A-3 | RSS 批量导入 | importJson 优先 POST /saveRssSources（单事务），404 降级逐条 |
+| A-4 | 备份/会话 | 设置页备份卡新增：WebDAV 恢复（restoreFromWebdav，覆盖/仅缺失双按钮语义）、服务端即时打包下载（user/downloadBackupFile blob）、MongoDB 备份/恢复（uri/db 记忆 localStorage）；logout 先调后端注销 token 再清本地 |
+| A-5 | 导出/全文 | export.ts 补 exportToTxt/exportToEpub（Pro 兼容包装）；阅读器加「复制全文」（getAllContents——服务端已缓存章节拼接，未缓存章跳过）；后端 export_common_params 补 url 别名（与 exportBook/getBookInfo 参数宽容一致） |
+
+**已覆盖确认**（调研清单复核）：getRssContent= getRssArticle 别名路由（前端已用主名）；
+file/parse、file/restore 已有等价 UI（importPreview/restoreFromZip）；uploadFile 前端已接。
+
+**8100 实测**：getAvailableBookSource 候选返回/持久化 ✓；saveBook→缓存 2 章→getAllContents
+total 2 ✓；exportToTxt 13086 字节（url 别名生效）✓；exportToEpub application/epub+zip ✓；
+logout 非 secure 返回「不支持的操作」（legacy 语义，前端静默）✓。
+验证：cargo test **752 lib** + 前端 vue-tsc/build + **node --test 100/100** 全绿。

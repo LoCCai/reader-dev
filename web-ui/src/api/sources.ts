@@ -60,6 +60,21 @@ export function getInvalidBookSources(): Promise<ReturnData<Array<string | Inval
 }
 
 /**
+ * POST /reader3/disableInvalidBookSources：失效书源一键禁用（后端 96 并发探测全部
+ * 启用源并禁用失效者；返回 { count, disabled: string[] }）。检测耗时同 getInvalidBookSources
+ * （可达 10+ 分钟），timeout 放宽。
+ */
+export function disableInvalidBookSources(
+  opts?: { silent?: boolean },
+): Promise<ReturnData<{ count: number; disabled: string[] }>> {
+  return post<{ count: number; disabled: string[] }>(
+    '/disableInvalidBookSources',
+    undefined,
+    { silent: opts?.silent ?? true, timeout: 900000 },
+  )
+}
+
+/**
  * POST /reader3/setAsDefaultBookSources：设置默认书源（body { bookSources: string[] }）。
  * 后端并行实现中（可能 404）：调用方传 { silent: true } 自行降级提示。
  */

@@ -166,10 +166,16 @@ fn export_common_params(
     params: &HashMap<String, String>,
     body_json: Option<&serde_json::Value>,
 ) -> (String, String) {
-    (
-        param_of(params, body_json, "bookUrl"),
-        param_of(params, body_json, "charset"),
-    )
+    // bookUrl 为主（Pro 契约）；url 为别名（与 exportBook/getBookInfo 系参数宽容一致）
+    let book_url = {
+        let primary = param_of(params, body_json, "bookUrl");
+        if primary.is_empty() {
+            param_of(params, body_json, "url")
+        } else {
+            primary
+        }
+    };
+    (book_url, param_of(params, body_json, "charset"))
 }
 
 /// GET/POST /reader3/exportToTxt：服务端 TXT 导出下载。charset 参数默认 UTF-8

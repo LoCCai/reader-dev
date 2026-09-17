@@ -1,7 +1,7 @@
-import { get } from './request'
+import { get, post } from './request'
 import { useUserStore } from '@/stores/user'
 import { openSSEPost } from './sse'
-import type { BookChapter, BookContent, BookInfo, ReturnData, SearchBook } from '@/types'
+import type { Book, BookChapter, BookContent, BookInfo, ReturnData, SearchBook } from '@/types'
 
 /** GET /reader3/getBookInfo：书籍详情（url + bookSource=origin；cover/name 为回退值——
  *  源详情规则未配置对应字段时后端沿用（legacy BookInfo 合并语义）） */
@@ -24,6 +24,33 @@ export function searchBookSource(
   opts?: { silent?: boolean },
 ): Promise<ReturnData<SearchBook[]>> {
   return get<SearchBook[]>('/searchBookSource', { url, bookSource }, opts)
+}
+
+/**
+ * GET /reader3/getAvailableBookSource：本书换源候选（服务端按 书名+作者 精确搜索并
+ * 持久化到 book_source_candidates；refresh=0 走缓存秒回，refresh=1 重搜）。
+ * 换源弹层即时预载 + SSE 流式搜索合并去重。
+ */
+export function getAvailableBookSource(
+  url: string,
+  opts?: { silent?: boolean; refresh?: number },
+): Promise<ReturnData<SearchBook[]>> {
+  return get<SearchBook[]>('/getAvailableBookSource', { url, refresh: opts?.refresh ?? 0 }, opts)
+}
+
+/**
+ * POST /reader3/setBookSource：换源主接口（legacy BookController 同名语义）——
+ * bookUrl=书架书当前主键，newUrl=新源的书籍链接，bookSourceUrl=新源 URL。
+ * 服务端完成：拉新源详情 + 书架主键/origin/tocUrl 切换 + 新源目录预取缓存；
+ * 返回更新后的 Book。失败降级 saveBook 补丁路径（仅切 origin/tocUrl）。
+ */
+export function setBookSource(
+  bookUrl: string,
+  newUrl: string,
+  bookSourceUrl: string,
+  opts?: { silent?: boolean },
+): Promise<ReturnData<Book>> {
+  return post<Book>('/setBookSource', { bookUrl, newUrl, bookSourceUrl }, opts)
 }
 
 /** GET /reader3/getBookToc：章节目录（tocUrl=info.tocUrl + bookSource） */

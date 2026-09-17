@@ -1,4 +1,5 @@
 import { post } from './request'
+import request from './request'
 import { downloadFile } from './file'
 import type { ReturnData } from '@/types'
 
@@ -44,4 +45,56 @@ export function restoreFromZip(
   form.append('file', file, name)
   form.append('overwrite', overwrite ? 'true' : 'false')
   return post<RestoreReport>('/restoreFromZip', form, { timeout: 120_000 })
+}
+
+/**
+ * POST /reader3/restoreFromWebdav：从 WebDAV 备份恢复（A4 接线）。
+ * body { path, overwrite? }——path 为 WebDAV 根下相对路径（backupToWebdav 返回的
+ * 绝对路径截掉 .../webdav/ 前缀后的部分，形如 legado/backup-{ts}.zip）。
+ */
+export function restoreFromWebdav(
+  path: string,
+  overwrite = false,
+): Promise<ReturnData<RestoreReport>> {
+  return post<RestoreReport>('/restoreFromWebdav', { path, overwrite }, { timeout: 120_000 })
+}
+
+/** MongoDB 备份/恢复参数：uri 缺省走服务端环境变量 READER_MONGODB_URI；db 默认 reader3；
+ *  ns 缺省 = 全部命名空间（default + 全部注册用户） */
+export interface MongoBackupParams {
+  uri?: string
+  db?: string
+  ns?: string
+}
+
+/** POST /reader3/backupToMongodb：备份到 MongoDB（body { uri, db, ns }）→ 服务层报告 */
+export function backupToMongodb(
+  params: MongoBackupParams = {},
+  opts?: { silent?: boolean; timeout?: number },
+): Promise<ReturnData<Record<string, unknown>>> {
+  return post<Record<string, unknown>>('/backupToMongodb', params, {
+    silent: opts?.silent,
+    timeout: opts?.timeout ?? 120_000,
+  })
+}
+
+/** POST /reader3/restoreFromMongodb：从 MongoDB 恢复（ns 缺省 = 全部命名空间逐个恢复） */
+export function restoreFromMongodb(
+  params: MongoBackupParams = {},
+  opts?: { silent?: boolean; timeout?: number },
+): Promise<ReturnData<Record<string, unknown>>> {
+  return post<Record<string, unknown>>('/restoreFromMongodb', params, {
+    silent: opts?.silent,
+    timeout: opts?.timeout ?? 120_000,
+  })
+}
+
+/**
+ * GET /reader3/user/downloadBackupFile：服务端即时打包当前用户备份并返回 zip blob
+ * （secure 模式需开启 WebDAV 功能）。accessToken 由 request 实例自动携带。
+ */
+export function downloadBackupFileNow(): Promise<Blob> {
+  return request
+    .get('/user/downloadBackupFile', { responseType: 'blob', timeout: 120_000 })
+    .then((r) => r.data as Blob)
 }

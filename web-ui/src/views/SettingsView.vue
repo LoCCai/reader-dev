@@ -28,7 +28,8 @@ import {
 } from '@/utils/readerBg'
 import { clearCache, getCacheInfo } from '@/api/cache'
 import { clearTtsCache, ttsCacheStats } from '@/utils/ttsCache'
-import { backupToWebdav, downloadBackupZip } from '@/api/backup'
+import { backupToWebdav, downloadBackupZip, downloadBackupFileNow, restoreFromWebdav, backupToMongodb, restoreFromMongodb } from '@/api/backup'
+import { post } from '@/api/request'
 import { getSystemInfo } from '@/api/system'
 import { deleteTxtTocRule, getTxtTocRules, importDefaultTxtTocRules, saveTxtTocRule } from '@/api/txtTocRules'
 import { getBookshelf } from '@/api/bookshelf'
@@ -92,6 +93,12 @@ async function logout() {
     })
   } catch {
     return // 用户取消
+  }
+  // A4：先调后端注销 token（失败不阻断本地清理——token 过期后自然失效）
+  try {
+    await post('/logout', undefined, { silent: true })
+  } catch {
+    /* 非 secure 模式后端返回「不支持的操作」等——忽略 */
   }
   store.clear() // 清空 localStorage（reader_access_token / reader_username）
   ElMessage.success('已退出登录')
@@ -1301,6 +1308,121 @@ async function runExportData() {
     exportBusy.value = false
   }
 }
+
+/* ================= A4：WebDAV 恢复 / 即时打包下载 / MongoDB 备份恢复 ================= */
+
+/** 绝对备份路径 → WebDAV 根下相对路径（截掉 .../webdav/ 前缀；分隔符兼容 / 与 \） */
+function webdavRelative(abs: string): string {
+  const norm = abs.replace(/\\/g, '/')
+  const i = norm.lastIndexOf('/webdav/')
+  return i >= 0 ? norm.slice(i + '/webdav/'.length) : ''
+}
+
+const webdavRestoreBusy = ref(false)
+async function runRestoreFromWebdav() {
+  const rel = webdavRelative(backupPath.value)
+  if (!rel || webdavRestoreBusy.value) return
+  let overwrite = false
+  try {
+    await ElMessageBox.confirm(
+      `确定从 WebDAV 备份恢复吗？（${rel}）`,
+      '恢复备份',
+      {
+        confirmButtonText: '覆盖恢复',
+        cancelButtonText: '仅恢复缺失',
+        distinguishCancelAndClose: true,
+        type: 'warning',
+      },
+    )
+    overwrite = true
+  } catch (action) {
+    // cancel 按钮 → 仅恢复缺失；close（X/ESC）→ 中止
+    if (action !== 'cancel') return
+    overwrite = false
+  }
+  webdavRestoreBusy.value = true
+  try {
+    const res = await restoreFromWebdav(rel, overwrite)
+    const r = res.data
+    const n = Object.values(r?.restored ?? {}).reduce((a, b) => a + b, 0)
+    ElMessage.success(`恢复完成（写入 ${n} 项）`)
+  } catch {
+    // 请求层已提示
+  } finally {
+    webdavRestoreBusy.value = false
+  }
+}
+
+const backupNowBusy = ref(false)
+async function runDownloadBackupFile() {
+  if (backupNowBusy.value) return
+  backupNowBusy.value = true
+  try {
+    const blob = await downloadBackupFileNow()
+    await downloadBlob(blob, `backup-${Date.now()}.zip`)
+    ElMessage.success('已生成并下载备份')
+  } catch {
+    // 请求层已提示
+  } finally {
+    backupNowBusy.value = false
+  }
+}
+
+const MONGO_KEY = 'reader_mongo_backup'
+const mongoUri = ref('')
+const mongoDb = ref('')
+{
+  try {
+    const raw = JSON.parse(localStorage.getItem(MONGO_KEY) ?? '{}') as { uri?: string; db?: string }
+    mongoUri.value = raw.uri ?? ''
+    mongoDb.value = raw.db ?? ''
+  } catch {
+    /* ignore */
+  }
+}
+function persistMongo() {
+  try {
+    localStorage.setItem(MONGO_KEY, JSON.stringify({ uri: mongoUri.value.trim(), db: mongoDb.value.trim() }))
+  } catch {
+    /* ignore */
+  }
+}
+const mongoBusy = ref(false)
+async function runBackupToMongodb() {
+  if (mongoBusy.value) return
+  mongoBusy.value = true
+  try {
+    persistMongo()
+    await backupToMongodb({ uri: mongoUri.value.trim() || undefined, db: mongoDb.value.trim() || undefined })
+    ElMessage.success('MongoDB 备份完成')
+  } catch {
+    // 请求层已提示
+  } finally {
+    mongoBusy.value = false
+  }
+}
+async function runRestoreFromMongodb() {
+  if (mongoBusy.value) return
+  try {
+    await ElMessageBox.confirm(
+      '确定从 MongoDB 恢复吗？未指定命名空间时将作用于全部用户（覆盖已存在数据）',
+      'MongoDB 恢复',
+      { confirmButtonText: '恢复', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  mongoBusy.value = true
+  try {
+    persistMongo()
+    await restoreFromMongodb({ uri: mongoUri.value.trim() || undefined, db: mongoDb.value.trim() || undefined })
+    ElMessage.success('MongoDB 恢复完成')
+  } catch {
+    // 请求层已提示
+  } finally {
+    mongoBusy.value = false
+  }
+}
 </script>
 
 <template>
@@ -1765,7 +1887,44 @@ async function runExportData() {
             {{ backupDownloadBusy ? '下载中…' : '下载备份' }}
           </button>
         </div>
-        <p class="card-note">WebDAV 地址供外部客户端（如 RaiDrive、文件管理器）挂载访问；备份/导出需要后端已配置 WebDAV。备份路径参数已随请求发送，后端当前固定写入 webdav/legado 目录（路径参数待后端支持）。</p>
+        <div v-if="backupPath" class="row">
+          <span class="row-label">WebDAV 恢复</span>
+          <span class="row-value mono backup-path" :title="backupPath">{{ webdavRelative(backupPath) || '—' }}</span>
+          <button
+            class="row-action"
+            type="button"
+            :disabled="webdavRestoreBusy"
+            @click="runRestoreFromWebdav"
+          >
+            {{ webdavRestoreBusy ? '恢复中…' : '从该备份恢复' }}
+          </button>
+        </div>
+        <div class="row">
+          <span class="row-label">立即打包下载</span>
+          <span class="row-value">服务端即时生成当前用户备份 zip（不经 WebDAV）</span>
+          <button
+            class="row-action"
+            type="button"
+            :disabled="backupNowBusy"
+            @click="runDownloadBackupFile"
+          >
+            {{ backupNowBusy ? '打包中…' : '下载备份文件' }}
+          </button>
+        </div>
+        <div class="row">
+          <span class="row-label">MongoDB</span>
+          <span class="row-value">
+            <input v-model="mongoUri" class="path-input mongo-input" type="text" placeholder="mongodb://…（留空用服务端 READER_MONGODB_URI）" maxlength="300" spellcheck="false" />
+            <input v-model="mongoDb" class="path-input mongo-input" type="text" placeholder="库名（默认 reader3）" maxlength="60" spellcheck="false" />
+          </span>
+          <button class="row-action" type="button" :disabled="mongoBusy" @click="runBackupToMongodb">
+            {{ mongoBusy ? '处理中…' : '备份' }}
+          </button>
+          <button class="row-action" type="button" :disabled="mongoBusy" @click="runRestoreFromMongodb">
+            恢复
+          </button>
+        </div>
+        <p class="card-note">WebDAV 地址供外部客户端（如 RaiDrive、文件管理器）挂载访问；备份/导出需要后端已配置 WebDAV。备份路径参数已随请求发送，后端当前固定写入 webdav/legado 目录（路径参数待后端支持）。MongoDB 恢复缺省作用于全部命名空间（覆盖已存在数据，请谨慎操作）。</p>
       </section>
 
       <!-- 缓存（契约 GET /reader3/getCacheInfo + POST /reader3/clearCache） -->

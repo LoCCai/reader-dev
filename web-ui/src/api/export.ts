@@ -1,4 +1,5 @@
 import request from './request'
+import type { ReturnData } from '@/types'
 
 /**
  * 书籍导出 —— 后端契约（mobi/azw3 后端开发中，未就绪时返回错误 JSON 由调用方降级提示）
@@ -58,4 +59,46 @@ export function exportBook(
       blob: r.data as Blob,
       warning: parseExportWarning(r.headers as Record<string, unknown>),
     }))
+}
+
+/* ================= A5：Pro 兼容导出/全文接口（供第三方与全文复制） ================= */
+
+/**
+ * GET /reader3/exportToTxt：Pro 兼容 TXT 导出下载（params bookUrl + charset 可选；
+ * 无 X-Export-Warning 增量信息——Web UI 主路径仍走 exportBook，此包装供特殊场景）。
+ */
+export function exportToTxt(url: string, encoding: ExportEncoding = 'utf-8'): Promise<Blob> {
+  return request
+    .get('/exportToTxt', { params: { bookUrl: url, charset: encoding }, responseType: 'blob', timeout: 120_000, silent: true })
+    .then((r) => r.data as Blob)
+}
+
+/** GET /reader3/exportToEpub：Pro 兼容 EPUB 导出下载（params bookUrl） */
+export function exportToEpub(url: string): Promise<Blob> {
+  return request
+    .get('/exportToEpub', { params: { bookUrl: url }, responseType: 'blob', timeout: 120_000, silent: true })
+    .then((r) => r.data as Blob)
+}
+
+/** getAllContents 响应：全部章节（未缓存章 content 为占位符「暂无缓存内容。」） */
+export interface AllContents {
+  name: string
+  author: string
+  total: number
+  cachedCount: number
+  chapters: { chapterIndex: number; title: string; content: string }[]
+}
+
+/** GET /reader3/getAllContents：整书章节正文（服务端已缓存章节；Pro 语义） */
+export function getAllContents(
+  bookUrl: string,
+  opts?: { silent?: boolean; timeout?: number },
+): Promise<ReturnData<AllContents>> {
+  return request
+    .get('/getAllContents', {
+      params: { bookUrl },
+      silent: opts?.silent,
+      timeout: opts?.timeout ?? 60_000,
+    })
+    .then((r) => r.data as ReturnData<AllContents>)
 }

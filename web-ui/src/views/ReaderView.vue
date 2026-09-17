@@ -15,6 +15,7 @@ import { saveBook } from '@/api/bookshelf'
 import { getHttpTtsList } from '@/api/httpTts'
 import { get, post } from '@/api/request'
 import { getBookCacheChapters } from '@/api/cacheBook'
+import { getAllContents } from '@/api/export'
 import { loadReplaceRules, saveReplaceRules } from '@/api/replaceRules'
 import { getTtsVoices, synthesizeTts, type TtsVoice } from '@/api/tts'
 import EpubIframe from '@/components/EpubIframe.vue'
@@ -2399,6 +2400,36 @@ async function copyChapter() {
   ElMessage.success(`已复制本章（${text.length} 字）`)
 }
 
+/* ---------------- A5：复制全文（getAllContents——服务端已缓存章节拼整书；未缓存章跳过） ---------------- */
+
+const copyAllBusy = ref(false)
+async function copyWholeBook() {
+  if (copyAllBusy.value) return
+  if (!bookUrl.value) return
+  copyAllBusy.value = true
+  try {
+    const res = await getAllContents(bookUrl.value, { silent: true })
+    const d = res.data
+    const chapters = (d?.chapters ?? []).filter((c) => c.content && c.content !== '暂无缓存内容。')
+    if (!chapters.length) {
+      ElMessage.info('暂无已缓存章节（先缓存再复制全文）')
+      return
+    }
+    const parts = chapters.map((c) => `${c.title}\n${c.content}`)
+    const text = parts.join('\n\n')
+    try {
+      await navigator.clipboard.writeText(text)
+      ElMessage.success(`已复制全书 ${chapters.length} 章（${text.length} 字）`)
+    } catch {
+      ElMessage.error('复制失败（内容过大或浏览器限制），请改用导出 TXT')
+    }
+  } catch {
+    ElMessage.warning('获取全书内容失败')
+  } finally {
+    copyAllBusy.value = false
+  }
+}
+
 /* ---------------- 10. 章节图片预加载（下一章前 5 张） ---------------- */
 
 const preloadedChapters = new Set<string>()
@@ -4094,6 +4125,16 @@ onBeforeUnmount(() => {
           @click="copyChapter"
         >
           {{ t('reader.copyChapter') }}
+        </button>
+        <button
+          v-if="isTextBook"
+          class="font-btn"
+          type="button"
+          :disabled="copyAllBusy"
+          title="复制全书已缓存章节（getAllContents；未缓存章跳过——先在目录页缓存）"
+          @click="copyWholeBook"
+        >
+          {{ copyAllBusy ? '获取中…' : '复制全文' }}
         </button>
         <button
           v-if="isTextBook"

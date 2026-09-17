@@ -8,6 +8,7 @@ import {
   getRssSources,
   markRssArticleRead,
   saveRssSource,
+  saveRssSources,
 } from '@/api/rss'
 import { t } from '@/utils/i18n'
 import { sanitizeHtml } from '@/utils/sanitize'
@@ -473,18 +474,31 @@ async function importJson() {
   jsonBusy.value = true
   let ok = 0
   try {
-    for (const raw of list) {
-      const url = String(raw.sourceUrl ?? raw.rssSourceUrl ?? '')
-      if (!url) continue
-      await saveRssSource({
-        ...raw,
-        sourceUrl: url,
-        sourceName: String(raw.sourceName ?? raw.rssSourceName ?? url),
-        enabled: raw.enabled !== false,
-      })
-      ok += 1
+    const normalized = list.map((raw) => ({
+      ...raw,
+      sourceUrl: String(raw.sourceUrl ?? raw.rssSourceUrl ?? ''),
+      sourceName: String(raw.sourceName ?? raw.rssSourceName ?? raw.sourceUrl ?? ''),
+      enabled: raw.enabled !== false,
+    })) as RssSource[]
+    // A2：批量接口优先（单事务）；404/失败降级逐条 saveRssSource
+    let batchOk = false
+    try {
+      const res = await saveRssSources(normalized, { silent: true })
+      if (res.isSuccess) {
+        batchOk = true
+        ok = res.data?.count ?? normalized.length
+      }
+    } catch {
+      batchOk = false
     }
-    jsonMsg.value = `已导入 ${ok}/${list.length} 个订阅源`
+    if (!batchOk) {
+      for (const item of normalized) {
+        if (!item.sourceUrl) continue
+        await saveRssSource(item)
+        ok += 1
+      }
+    }
+    jsonMsg.value = `已导入 ${ok}/${list.length} 个订阅源${batchOk ? '（批量）' : ''}`
     if (ok) {
       await loadSources(urlOf(list[0]))
     }

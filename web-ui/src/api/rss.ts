@@ -11,6 +11,15 @@ export function saveRssSource(source: RssSource): Promise<ReturnData<null>> {
   return post<null>('/saveRssSource', source)
 }
 
+/** POST /reader3/saveRssSources：批量保存订阅源（body = 订阅源数组；非法条目后端静默
+ *  跳过）。404/失败时调用方降级逐条 saveRssSource。 */
+export function saveRssSources(
+  sources: RssSource[],
+  opts?: { silent?: boolean },
+): Promise<ReturnData<{ count: number }>> {
+  return post<{ count: number }>('/saveRssSources', sources, opts)
+}
+
 /** POST /reader3/deleteRssSource：删除订阅源（body { rssSourceUrl }） */
 export function deleteRssSource(rssSourceUrl: string): Promise<ReturnData<null>> {
   return post<null>('/deleteRssSource', { rssSourceUrl })
