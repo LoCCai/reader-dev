@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "mimosa-finding-history/v1",
+  "runId": "20260909T181743931Z-58020-8fe5419cb0a6",
+  "runStatus": "inconclusive",
+  "errors": [
+    "scan:src/parser/xpath.rs: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src/storage/mod.rs: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src/service/mongodb_backup.rs: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:src/service/tts.rs: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "supply-chain-check:.: stop_budget_exhausted: focused supply-chain check was not run before the gate budget"
+  ],
+  "target": ".",
+  "revision": "1372b11da76bca5561c00095133e2d5296738227",
+  "diffHash": "21fec23f8c1208ab8b87c584ff2daccd0059a3dcb265bdf49efdb531a8a8dc9d",
+  "rulesVersion": "unavailable",
+  "recordedAt": "2026-09-09T18:17:43.931Z",
+  "timing": {
+    "startedAt": "2026-09-09T18:17:41.519Z",
+    "completedAt": "2026-09-09T18:17:43.931Z",
+    "durationMs": 2412
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "modelCalls": 0,
+    "measurement": "known-zero"
+  },
+  "findings": {
+    "total": 0,
+    "bySeverity": {},
+    "byStatus": {}
+  },
+  "coverage": {
+    "status": "partial",
+    "reasonCounts": {
+      "scanner_failed": 4,
+      "stop_budget_exhausted": 1,
+      "project_check_failed": 5
+    }
+  },
+  "evidenceBoundary": "static_only",
+  "immutableReport": ".mimosa/reports/task-review-sess_f72b493e-1fbc-4e2a-9a70-d93fe7deb26a-20260909T181743931Z-58020-8fe5419cb0a6.json"
+}

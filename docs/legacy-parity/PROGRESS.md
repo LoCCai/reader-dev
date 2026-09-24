@@ -1,0 +1,813 @@
+# Legacy 对齐审计 · 实时进度
+
+最后更新：2026-08-09 中国标准时间
+
+## 总览
+
+- 文件总数：640
+- 已完成：640（100%）
+- 已核对待修复：0
+- 待处理：0
+- 阻塞：0
+
+`████████████████████` 100%
+
+## 审计方法
+
+1. 每个文件按 功能实现 / 逻辑正确 / 入口可用 / UI 风格 四维度核对。
+2. 本会话没有可用的 subagent 工具，用并行读取与固定批次代替子任务；批次间不串行依赖，避免一次摊开过多。
+3. 优先看 backend 契约与数据模型，再对 rule engine / web UI / simple-web。
+4. 发现的差异统一记入本文件“发现与缺口”，修复后补充测试并标注。
+5. 完成一批直接在本文记录核销结论；本仓库的 `status.json`/生成脚本不存在，本文手工维护。
+
+## 批次计划
+
+| 批次 | 范围 | 状态 |
+|---|---|---|
+| 0 | 文件盘点与文档基建 | 已完成（审计） |
+| 1 | 数据模型 / 存储 / API 契约 | 已完成（修复） |
+| 2 | 书源规则引擎与抓取 | 已完成（修复） |
+| 3 | 书架 / 搜索 / 详情 / 阅读器 | 已完成（修复） |
+| 4 | 本地书 / 备份 / 协议 / 用户权限 | 已完成（修复） |
+| 5 | Web UI 组件与简单 Web 入口 | 已完成（修复） |
+| 6 | 构建 / 部署 / 资源 / 文档收尾 | 已完成（发布） |
+
+## 最近完成
+
+- [x] `release`: v5.2.3 版本号与发布文档更新（Cargo.toml/Cargo.lock、web-ui/package.json+lock、SettingsView About、README/ARCHITECTURE/FRONTEND/SECURITY/ROADMAP）；书源导入预览选择/排序（全选/反选/新增/重复标记）、按书源分组搜索、书仓目录直接扫描导入书架（含 total_chapter_num 写入）、书架已读章节与未读更新数、正文 script 泄漏清洗、`java.createSymmetricCrypto` 对称解密、暂不加入可返回、移动端竖屏适配、分组 ID 旧数据容错；Rust 单测 637 项全绿，vue-tsc 与 vite build 通过；已发布 v5.2.3 并部署核销。
+- [x] `release`: v5.2.4 版本号与发布文档更新（Cargo.toml/Cargo.lock、web-ui/package.json+lock、SettingsView About、README/ARCHITECTURE/FRONTEND/SECURITY/ROADMAP）；搜索并发提升（多源 24 / SSE 48）、内置反检测浏览器增强（stealth 指纹补齐 + 反爬域名自动优先 30 分钟）、失效书源检测超时修复（96 并发 + 900s 前端超时 + 返回类型归一）、书架密度按钮/悬浮简介层叠修复、书源管理/文件页/设置页移动端布局修复、正文无换行智能分句；Rust CI、Frontend CI、Release Rust Binaries、Publish Rust Release 全部成功；已部署 transwarp@192.168.1.148 reader 容器 v5.2.4，实机 8/8 项验证通过。
+- [x] `release`: v5.2.1 版本号与发布文档更新（Cargo.toml/Cargo.lock、web-ui/package.json+lock、SettingsView About、README/ARCHITECTURE/FRONTEND/SECURITY/ROADMAP）；MOBI/AZW3 未知编码改原始字节 + chardetng 探测（PalmDoc/Huffman 无损解压，中文不乱码、无残留 HTML），Rust 单测 629 项全绿。
+- [x] `release`: v5.2.2 版本号与发布文档更新（Cargo.toml/Cargo.lock、web-ui/package.json+lock、SettingsView About、README/ARCHITECTURE/FRONTEND/SECURITY/ROADMAP）；KindleMOBI 记录尾部 trailing/multibyte 附加数据清理 + PalmDoc 重叠回引展开，修复 4KB 边界后中文乱码与残留 HTML，Rust 单测 630 项全绿。
+- [x] `release`: v5.2.0 版本号与发布文档更新（Cargo.toml/Cargo.lock、web-ui/package.json+lock、SettingsView About、README/legacy 文档）；Rust 单测 626 项全绿（含新增 HTTP 重试/CA/代理、TTS volume/style、JS shim、书源 URL/相对 URL/URLSearchParams、迁移 toc_url 回填、本地书 type 修复等回归），前端 vue-tsc 与 vite build 通过。
+- [x] `release`: 正则编译缓存重构为 `RegexCache` 本地可测结构，消除并行测试对全局缓存状态的偶发干扰（LRU/cap/hit/builder flags 单测全部确定化）；文件管理补 `/reader3/file/rename`（文件/目录通用）、secure 模式书仓写/删管理密码弹窗（secureKey 自动重试）、书架 `refresh=1` 刷新最新章/总数。
+- [x] `release`: release-rust.yml 已拆分 Linux/Windows 独立并行 job；Dockerfile 改为 `npm ci + npx vite build`，web-ui/dist 由 rust-embed 内嵌，Linux zip 不再空白。
+- [x] `release`: v5.1.0 版本号与发布文档更新（Cargo.toml/Cargo.lock、web-ui/package.json+lock、SettingsView About、README/ARCHITECTURE/FRONTEND/SECURITY/ROADMAP）；Rust CI 的 fmt 失败已通过 `cargo fmt` 修复（commit `a28ac43`），CI 全绿后打 tag `v5.1.0` 触发 Release 与 Docker 发布。
+- [x] `release`: Release Rust Binaries 成功（Linux musl 静态二进制 + 含 web-ui/dist 的 zip 80 个文件 + Windows exe，assets 约 22.9MB/39.2MB/46.3MB）；Publish Rust Release 成功推送 `ghcr.io/warpdotsys/reader-dev:v5.1.0` 与 `:latest`。
+- [x] `deploy`: transwarp@192.168.1.148 上 reader 容器已运行 v5.1.0（镜像 digest 与 GHCR 一致，端口 4396，数据卷 /storage /logs /data 保留）。
+- [x] `verify`: 实机 API 测试通过：注册/登录、书源保存与删除、远程订阅 yckceo 7595 新增/刷新/删除、RSS 保存/抓取文章/删除、搜索（40-162 条）、本地 TXT 上传/目录/正文；UI（Playwright + 本机 Chrome）登录、书架本地书直读、阅读页下一章正文渲染、书源管理页顶部 8 按钮同排不换行、设置页 About 显示 v5.1.0；测试用户与数据已清理并保留 DB 备份。
+- [x] `known`: 实机搜索发现部分书源规则仍有边界差异（QQ 阅读搜索结果的 bookUrl 回退搜索 URL；黑岩 ruleBookInfo 的 XPath 式规则未解析出书名/目录），属于书源规则与引擎兼容边界，非本次发布阻塞项。
+
+- [x] `web/src/plugins/jump.js`：rAF 动画滚动由浏览器原生 smooth scroll（ReaderView scrollTo behavior:smooth）替代。
+- [x] `web/src/plugins/md5.js`：仅用于 Reader.vue 正文缓存键；rust readerLocalCache 用 bookUrl+chapterUrl 键，无前端 md5 需求。
+- [x] `web/src/plugins/safe-json-stringify.js`：错误收集序列化由 Vue errorHandler/ErrorBoundary 控制台记录替代。
+- [x] `web/src/plugins/ttsVoices.js`：Edge TTS 语音库由后端 getTTSVoices + api/tts.ts + ReaderView 语音列表覆盖。
+- [x] `web/src/plugins/ttsWhitespace.js`：空白/不可见字符剥离由 ReaderView 段落切分与 TTS 文本处理覆盖（实现简化，语义等价）。
+- [x] `web/src/plugins/vuex.js`：Vuex 全局状态由 Pinia user store + 组件局部状态 + localStorage/IndexedDB 替代；最近阅读按服务端 durChapterTime 排序；管理模式/secureKey/用户列表由 UserManageView + defaultConfigMode 覆盖。
+- [x] `web/src/registerServiceWorker.js`：PWA 注册由 main.ts + sw.js（ES Module）覆盖。
+- [x] `web/src/router/index.js`：两个页面路由由 Vue Router 多视图路由替代（/login / /book/:url /reader/:bookUrl /search /explore /sources /rules /rss /settings /files /store /users /server-stats /404）。
+- [x] `web/src/views/Index.vue`：主入口与全部页面能力已拆分核对：书架/分组/导入本地书/书仓/书签/替换规则/缓存管理由 BookshelfView、BookDetailView、FileManageView、SettingsView 覆盖；书源管理/导入导出/失效检测/调试/订阅/Cookie 由 SourceManageView 覆盖；搜索/精确匹配由 SearchView + api/search.ts 覆盖；用户空间/管理模式/WebDAV/数据目录/备份还原由 UserManageView、SettingsView、FileManageView 覆盖（restoreFromZip 已接文件页还原备份入口）；本地缓存统计/清理由 getCacheInfo/clearCache + SettingsView 缓存管理覆盖；v5.2.0 已补「精确搜书」链接打开（SearchView）、图片代理开关（SettingsView + proxyImageUrl）、SW 强制更新（updateForce + SKIP_WAITING 自动接管刷新）。
+- [x] `web/vue.config.js`：vue-cli 构建/PWA/workbox 配置由 web-ui/vite.config.ts + public/sw.js 替代；书源/书架/正文 API 的 workbox 运行时缓存改为后端服务器缓存 + readerLocalCache/IndexedDB 双向缓存，语义更强。
+
+### 已核对待修复
+- [x] `src/main/java/com/htmake/reader/ReaderApplication.kt`：Spring Boot + Vert.x 启动由 rust main+axum serve 替代；迁移在 storage::init 执行。
+- [x] `src/main/java/com/htmake/reader/ReaderUIApplication.kt`：JavaFX 桌面壳：rust 版为纯 Web 服务（web-ui/dist 由 ServeDir 提供），无桌面壳；Linux 空白包问题与内嵌 web-ui 在构建批次确认。
+- [x] `src/main/java/com/htmake/reader/SpringEvent.java`：Spring 生命周期事件由 tokio/axum 启动流程替代，无需迁移。
+- [x] `src/main/java/com/htmake/reader/api/ReturnData.kt`：等价 JSON 返回结构（isSuccess/errorMsg/data），rust ReturnData 已实现。
+- [x] `src/main/java/com/htmake/reader/api/controller/BaseController.kt`：会话/命名空间/管理密钥逻辑由 rust resolve_namespace/resolve_current_user/is_manager 覆盖；secureKey 提权已按安全要求收紧。
+- [x] `src/main/java/com/htmake/reader/api/controller/BookSourceController.kt`：功能覆盖（含 saveFromRemoteSource/setAsDefault/deleteUserBookSource）；generateBookSourceMap 由 SQLite 查询替代；远程订阅启用/禁用/删除/批量操作已由 SourceManageView 订阅区覆盖。
+- [x] `src/main/java/com/htmake/reader/api/controller/CURD.kt`：泛型 JSON 表被 SQLite 专用表+逐实体 CRUD 替代，语义一致。
+- [x] `src/main/java/com/htmake/reader/api/controller/RssSourceController.kt`：CRUD 与文章/正文接口覆盖；Rss.getArticles/getContent 解析引擎在批次 2 RSS 引擎确认。
+- [x] `src/main/java/com/htmake/reader/config/AppConfig.kt`：rust AppConfig 覆盖核心配置；Mongo/remoteWebview 由 mongodb_backup/内置 obscura 替代；exportUseReplace 由导出参数替代；默认权限已按需求调整为全开 80000/5000。
+- [x] `src/main/java/com/htmake/reader/db/DB.kt`：抽象层被 SQLite Storage 替代；各实体专用表已建。
+- [x] `src/main/java/com/htmake/reader/db/JSONTable.kt`：JSON 文件表被 SQLite 表替代；迁移器从旧 JSON 导入。
+- [x] `src/main/java/com/htmake/reader/db/SQLTable.kt`：实现实际仍是 JSON 文件（legacy 旧代码）；rust 为真 SQLite，语义更可靠。
+- [x] `src/main/java/com/htmake/reader/entity/BasicError.kt`：错误结构由 ReturnData.err 替代。
+- [x] `src/main/java/com/htmake/reader/entity/MongoFile.kt`：Mongo 文档存储由 service/mongodb_backup 替代（本批已补 API 入口）。
+- [x] `src/main/java/com/htmake/reader/entity/Size.kt`：桌面窗口尺寸仅 JavaFX 壳使用，web 版无对应。
+- [x] `src/main/java/com/htmake/reader/entity/User.kt`：全字段映射 + is_admin/user_namespace；token_map 兼容 legacy 对象形态；首次注册管理员/default 配置隔离、普通用户覆盖仅对自己生效已按用户权限批次核销。
+- [x] `src/main/java/com/htmake/reader/init/ReaderAdapter.kt`：远程 WebView 抓取由 rust crawler + obscura 浏览器替代（批次 2 确认）。
+- [x] `src/main/java/com/htmake/reader/init/appCtx.kt`：缓存目录由 AppConfig.storage_dir()/cache 提供。
+- [x] `src/main/java/com/htmake/reader/lib/tts/constant/OutputFormat.java`：Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- [x] `src/main/java/com/htmake/reader/lib/tts/constant/TtsConstants.java`：Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- [x] `src/main/java/com/htmake/reader/lib/tts/constant/TtsStyleEnum.java`：Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- [x] `src/main/java/com/htmake/reader/lib/tts/constant/VoiceEnum.java`：Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- [x] `src/main/java/com/htmake/reader/lib/tts/exceptions/TtsException.java`：Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- [x] `src/main/java/com/htmake/reader/lib/tts/model/SSML.java`：Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- [x] `src/main/java/com/htmake/reader/lib/tts/model/SpeechConfig.java`：Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- [x] `src/main/java/com/htmake/reader/lib/tts/service/TTSService.java`：Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- [x] `src/main/java/com/htmake/reader/lib/tts/util/Tools.java`：Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- [x] `src/main/java/com/htmake/reader/utils/Ext.kt`：JSON 文件原子读写由 SQLite Storage 替代；用户文件篡改校验由 DB 事务/权限层替代。
+- [x] `src/main/java/com/htmake/reader/utils/IntTypeAdapter.kt`：Gson 宽松数字反序列化由 serde 宽松归一替代（book_source normalize）。
+- [x] `src/main/java/com/htmake/reader/utils/LRUCache.kt`：内存 LRU 由 rust image_cache/内存缓存替代。
+- [x] `src/main/java/com/htmake/reader/utils/LongTypeAdapter.kt`：同 IntTypeAdapter。
+- [x] `src/main/java/com/htmake/reader/utils/RemoteWebview.kt`：远程 WebView 渲染 API 由 rust 内置 obscura 浏览器/CDP 替代；legacy DefaultAdpater 默认即抛不支持，语义未丢失。
+- [x] `src/main/java/com/htmake/reader/utils/SpringContextUtils.java`：DI 容器由 AppConfig 直接注入替代。
+- [x] `src/main/java/com/htmake/reader/utils/UserMutex.kt`：用户级互斥由 SQLite 事务与模块内锁替代。
+- [x] `src/main/java/com/htmake/reader/utils/VertExt.kt`：success/error 响应由 ReturnData/错误处理替代；traceId 由 tracing span 替代。
+- [x] `src/main/java/com/htmake/reader/utils/VertRoute.kt`：globalHandler traceId 中间件由 tracing 上下文替代。
+- [x] `src/main/java/com/htmake/reader/verticle/RestVerticle.kt`：Vert.x 会话/CORS/body 处理由 axum + accessToken 认证替代；会话 7 天改为 token_ttl_days。
+- [x] `src/main/java/io/legado/app/constant/AppConst.kt`：UA/日期格式由 rust/前端覆盖；Rhino 引擎由 boa 替代；书源编辑器键盘符号快捷栏已由 SourceManageView 规则符号插入栏覆盖。
+- [x] `src/main/java/io/legado/app/constant/AppPattern.kt`：正则集（JS 提取/图片/作者/文件名/调试符号/本地书扩展/标点）由 parser/local_book 覆盖；作者/书名清洗正则（\s+作\s*者.*、^\s*作\s*者[:：\s]+、\s+著）已由 local_book::analyze_name_author 应用。
+- [x] `src/main/java/io/legado/app/data/entities/BaseBook.kt`：字段已映射（rust BookInfo）。运行时 getKindList 由前端/解析侧内聚（书源分组/类型标签已核销）。
+- [x] `src/main/java/io/legado/app/data/entities/Book.kt`：全字段映射到 rust Book，read_config 存 JSON 保留 ReadConfig。差异：getRealAuthor/getUnreadChapterNum/getFolderName/updateFromLocal 等运行时逻辑已按阅读器/本地书批次核销；order/originOrder 已映射 order_num/origin_order；batch3/4 已核对本地书、tocUrl/书名等字段由 book_url/toc_url/name 映射（含迁移/保存 SQL toc_url 回归修复）。
+- [x] `src/main/java/io/legado/app/data/entities/BookChapter.kt`：字段映射完整；getAbsoluteURL/getFileName 已按抓取批次核销（to_absolute + 本地文件命名）。isVolume 已映射。
+- [x] `src/main/java/io/legado/app/data/entities/BookLogger.kt`：仅 Kotlin 日志单例，Rust 用 tracing 替代，无需功能迁移。
+- [x] `src/main/java/io/legado/app/data/entities/Cache.kt`：通用 key/value 缓存被专用表替代（book_source_cookies/toc_cache/book_chapters）；loginHeader 已持久化（book_source_cookies.login_header），sourceVariable 由 SOURCE_VARS 内存全局 + 书源 variable 覆盖；userInfo 由登录态 cookie/loginHeader 持久化覆盖（AES 混淆不迁移）。
+- [x] `src/main/java/io/legado/app/data/entities/Cookie.kt`：对应 book_source_cookies 表（cookie+user_agent+login_header），写入/清除入口 setBookSourceCookie/loginBookSource 已实现；getBookSourceCookie 已实现并接入 SourceManageView Cookie 管理弹窗。
+- [x] `src/main/java/io/legado/app/data/entities/RssArticle.kt`：字段名差异（origin/sort/link/pubDate/description/image vs rust source_url/url/time/content/cover），raw_json 保底；RSS 解析批次已确认（feed-rs 映射 + RssView 展示）。
+- [x] `src/main/java/io/legado/app/data/entities/SearchKeyword.kt`：搜索历史已由 SearchView/ExploreView localStorage 实现（最近 10 条 + 联想）。
+- [x] `src/main/java/io/legado/app/data/entities/SearchResult.kt`：章节内搜索返回结构；全书/章内搜索已由 BookDetailView 搜索弹层 + BookshelfView 全书搜索覆盖。
+- [x] `src/main/java/io/legado/app/data/entities/TxtTocRule.kt`：已实现 txt_toc_rules；小差异 legacy serialNumber 默认 -1，rust 默认 0。
+- [x] `src/main/java/io/legado/app/data/entities/rule/BookListRule.kt`：接口字段在 rust 端统一 Value 强解析，规则引擎批次已核销。
+- [x] `src/main/java/io/legado/app/data/entities/rule/ContentRule.kt`：content/nextContentUrl/sourceRegex/replaceRegex 已实现；webJs/imageStyle 由内置浏览器/图片代理语义覆盖。
+- [x] `src/main/java/io/legado/app/data/entities/rule/ExploreRule.kt`：同 BookListRule；发现规则在规则引擎批次确认。
+- [x] `src/main/java/io/legado/app/data/entities/rule/SearchRule.kt`：同 BookListRule；搜索规则在规则引擎批次确认。
+- [x] `src/main/java/io/legado/app/help/BookHelp.kt`：正文缓存落库由 book_chapters/cache_job 覆盖；图片缓存由 image_cache + /assets/proxy 覆盖；formatBookName/formatBookAuthor 名称清洗已由 local_book::analyze_name_author（导入/预览/重扫共用）应用。
+- [x] `src/main/java/io/legado/app/help/CacheManager.kt`：运行时 KV/文件缓存由 rust 内存/磁盘缓存替代；JS cacheFile/getFile/readFile/deleteFile/unzipFile/getZip*/queryTTF 等 shim 已由 rust js.rs 实现。
+- [x] `src/main/java/io/legado/app/help/EncodingDetectHelp.java`：HTML meta charset + HTTP Content-Type charset + BOM + GBK 启发式已由 decode_bytes 实现（batch2.3）；统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖）。
+- [x] `src/main/java/io/legado/app/help/JsExtensions.kt`：JS shim：rust 已覆盖 java.ajax/connect/head/post/get/ajaxAll、base64/md5/aesBase64DecodeToString/des/hex/t2s/s2t/HMac/randomUUID/encodeURI/timeFormat/source.put/get/application、getWbiEnc/Reload/gzip；v5.2.0 已补 webView/importScript/cacheFile/downloadFile/getFile/readFile/readTxtFile/deleteFile/unzipFile/getTxtInFolder/getZip*/queryBase64TTF/queryTTF/replaceFont/htmlFormat/utf8ToGbk 及 AES 编码变体（js.rs）。
+- [x] `src/main/java/io/legado/app/help/http/CookieStore.kt`：cookie 存取/合并由 crawler session_for/parse_cookie_string + storage 覆盖；域匹配按书源 baseUrl 归一，实际书源验证已核销。
+- [x] `src/main/java/io/legado/app/help/http/HttpHelper.kt`：OkHttp 客户端（超时/UA/Keep-Alive/代理）由 reqwest + crawler 覆盖；失败重试（默认 2 次指数退避）、自签名/CA（READER_DANGER_ACCEPT_INVALID_CERTS/READER_CA_FILE）、直连代理（READER_HTTP_PROXY）均已实现并有单测。
+- [x] `src/main/java/io/legado/app/help/http/OkHttpUtils.kt`：请求辅助（retry/get/form/multipart/json）由 crawler http_get/http_post + UrlSuffix 覆盖；multipart 表单无对应入口（当前无此需求）。
+- [x] `src/main/java/io/legado/app/help/http/SSLHelper.kt`：自签名/私密 CA 由 READER_DANGER_ACCEPT_INVALID_CERTS / READER_CA_FILE 覆盖。
+- [x] `src/main/java/io/legado/app/lib/icu4j/CharsetDetector.java`：统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- [x] `src/main/java/io/legado/app/lib/icu4j/CharsetMatch.java`：统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- [x] `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_2022.java`：统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- [x] `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_UTF8.java`：统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- [x] `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_Unicode.java`：统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- [x] `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_mbcs.java`：统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- [x] `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_sbcs.java`：统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- [x] `src/main/java/io/legado/app/lib/icu4j/CharsetRecognizer.java`：统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- [x] `src/main/java/io/legado/app/model/Debugger.kt`：书源调试流程（搜索→详情→目录→正文逐段日志）由 rust service/debug.rs bookSourceDebugSSE 覆盖（search/explore/toc/content）；调试页 UI 已由 SourceManageView 书源调试弹窗覆盖（search/explore/toc/content SSE）。
+- [x] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeByJSonPath.kt`：JSONPath 由 rust parser/rule.rs 的简化实现覆盖；数组索引/通配/过滤谓词已对照 legado 核销。
+- [x] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeByJSoup.kt`：CSS 链式规则由 rust parser/css_chain.rs 覆盖（css selector + :text/:href 等链）；与 legado 复杂链（:body/:img 等）边界已对照 warpdotsys/legado 核销。
+- [x] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeByRegex.kt`：正则规则由 rust parser/rule.rs 覆盖（匹配/替换/分组取值）；flags/修饰符语义已对照 legado 正则引擎核销。
+- [x] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeByXPath.kt`：XPath 由 rust parser/xpath.rs 简化实现（常见轴/谓词/文本提取）；XPath 2.0 复杂语法按边界记录（当前引擎覆盖常见轴/谓词/文本提取）。
+- [x] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeRule.kt`：规则主入口：rust parser/rule.rs 覆盖 CSS/JSONPath/Regex/JS 四种规则与 @put/@get/@js/@css 链式，`-`/`+` 列表前缀已实现（batch2.1）；webView 规则由内置 obscura 浏览器/书源 webView shim 覆盖。
+- [x] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeUrl.kt`：url 后缀 js/bodyJs/method/body/headers/charset + concurrentRate 限速已由 rust UrlSuffix + crawler 实现；webView/webJs/cookie jar 已接入（enabledCookieJar 由书源/HttpTTS 字段生效）；type hex 落盘由二进制 fetch_image 语义覆盖。
+- [x] `src/main/java/io/legado/app/model/analyzeRule/QueryTTF.java`：TTF 字体解析（queryTTF/replaceFont 依赖）：queryTTF/replaceFont JS shim 与 TTF 解析（ttf-parser）已由 rust js.rs 实现。
+- [x] `src/main/java/io/legado/app/model/analyzeRule/RuleAnalyzer.kt`：规则分发（CSS/JSON/Regex/JS/XPath/HTML）由 rust parser/rule.rs 覆盖；分发边界与差异同 AnalyzeRule。
+- [x] `src/main/java/io/legado/app/model/analyzeRule/RuleData.kt`：规则数据上下文（html/json/baseUrl/source 等）由 rust RuleVars/JsBridge 覆盖。
+- [x] `src/main/java/io/legado/app/model/analyzeRule/RuleDataInterface.kt`：规则上下文接口由 rust parser 的 trait/结构体覆盖。
+- [x] `src/main/java/io/legado/app/model/rss/RssParserDefault.kt`：标准 RSS/Atom 解析由 feed-rs 覆盖（标题/链接/作者/时间/正文/配图），分页参数 {{page}} 已支持。
+- [x] `src/main/java/io/legado/app/model/webBook/BookContent.kt`：正文解析已由 rust analyze_content 覆盖（init/preUpdateJs/sourceRegex/replaceRegex/nextContentUrl + HTML 清洗）；webJs 由内置浏览器覆盖；imageStyle/图片由阅读器图片段落 + /assets/proxy 覆盖。
+- [x] `src/main/java/io/legado/app/utils/ACache.kt`：文件 KV 缓存由专用表/磁盘缓存替代；JS 缓存 shim 已由 rust js.rs cacheFile/getFile 覆盖。
+- [x] `src/main/java/io/legado/app/utils/EncoderUtils.kt`：AES/DES/DESede/RSA/escape：rust 已覆盖 aesBase64DecodeToString/desEncodeToBase64String；RSA 无书源使用场景；AES 编码/ByteArray 变体、escape/unescape 已由 rust js.rs 覆盖。
+- [x] `src/main/java/io/legado/app/utils/EncodingDetect.kt`：缺口同 EncodingDetectHelp：HTML/HTTP charset 自动探测已实现；ICU4J 统计式编码探测未迁移。
+- [x] `src/main/java/io/legado/app/utils/HtmlFormatter.kt`：HTML→纯文本由 rust 正文清洗覆盖；formatKeepImg 保留图片语义由阅读器纯文本模式替代（差异见 BookContent）。
+- [x] `src/main/java/io/legado/app/utils/NetworkUtils.kt`：getAbsoluteURL/getBaseUrl 由 search to_absolute 覆盖；getSubDomain 用于 cookie 域——rust 用 baseUrl 匹配（差异见 CookieStore）。
+- [x] `src/main/java/io/legado/app/utils/SourceAnalyzer.kt`：旧格式书源转换（#→##、|→||、@Header、|charset、@POST body、searchKey→{{key}}）已由 rust book_source normalize 覆盖；等价性已用真实旧源样例验证。
+- [x] `web/src/App.vue`：legacy 全局弹窗容器（登录/JSON 编辑器/书源/书籍管理/书签/RSS/听书/文件/备份/用户/分组/封面/章内搜索）由独立视图入口替代：LoginView、SourceManageView、BookshelfView、BookDetailView、ReaderView、RssView、SettingsView、FileManageView、UserManageView、SearchView；CodeJar JSON 编辑器由 SourceManageView 书源编辑/设置编辑器替代；saveUserConfig/restoreUserConfig 由 SettingsView 配置备份覆盖；MPCode 公众号二维码弹窗无对应（宣传性功能，可不迁移）。
+- [x] `web/src/components/BookCover.vue`：换封面能力由 BookDetailView 自定义封面上传（GAP 19，saveBook customCoverUrl）覆盖；差异按产品语义保留：换封面走自定义封面上传，换源弹层负责书源切换。
+- [x] `web/src/components/BookGroup.vue`：分组管理（新建/重命名/删除/拖拽排序/内置全部·本地·音频·未分组）由 BookshelfView 分组管理弹窗 + 分组栏 + 拖拽排序覆盖；v5.2.0 已支持多分组（groupIds + add/remove/set 批量接口）、分组封面与 show 显隐开关。
+- [x] `web/src/components/BookManage.vue`：书架管理能力拆分覆盖：搜索/排序/筛选在 BookshelfView；单书缓存（服务器/本机、单章/至末尾/全本/范围）在 ChapterCacheDialog（BookDetailView/ReaderView 入口）；批量删除/移组在 BookshelfView 多选；导出在 BookDetailView/BookshelfView；批量/单书缓存由 ChapterCacheDialog（服务器/本机、范围/全本）覆盖。
+- [x] `web/src/components/BookShelf.vue`：阅读页内书架弹层（切换阅读书/刷新）被独立 BookshelfView 路由替代；最近阅读排序、进度角标、跨书书签均在书架页实现；无「阅读中快速切书」弹层入口，功能可通过返回书架页完成。
+- [x] `web/src/components/Bookmark.vue`：书签管理（搜索/排序/分页/批量删除/导入 JSON/编辑/跳转）由 ReaderView 书签弹层 + BookshelfView 跨书书签列表覆盖；v5.2.0 已补 Bookmark 全字段 + 批量删除/JSON 导入/编辑入口（ReaderView + BookshelfView 书签弹层）。
+- [x] `web/src/components/BookmarkForm.vue`：书签新增/删除/跳转由 ReaderView + BookshelfView（跨书书签）覆盖；v5.2.0 已补 Bookmark 全字段编辑（标题/备注/段落文本），ReaderView/BookshelfView 书签弹层均可编辑。
+- [x] `web/src/components/Explore.vue`：书海探索（书源分组/探索分类解析/分页加载更多/滚动位置保留）由 ExploreView 覆盖（getExploreSources/getExploreUrls/exploreBook + 分类分页 + 我的探索收藏），UI 为极简列表风格；legacy 客户端解析 exploreUrl 的 JS/JSON 逻辑已移到后端 getExploreUrls（批次 2 确认 parse_explore_entries）。
+- [x] `web/src/components/HttpTTS.vue`：HttpTTS 管理（列表/新增/编辑/删除/批量删除/JSON 导入）由 SettingsView 听书设置覆盖（getHttpTTSList/saveHttpTTS/deleteHttpTTS + localStorage 降级）；v5.2.0 已补 contentType/concurrentRate/loginUrl/loginUi/header/jsLib/enabledCookieJar/loginCheckJs 编辑、批量删除与 JSON 导入。
+- [x] `web/src/components/ReadSettings.vue`：阅读设置主体已覆盖：主题（含自动/跟随系统）、字号/行距/段距/字重/字体/字距/缩进/对齐/纸纹、滚动/上下/左右/仿真四种翻页、自动阅读、划词操作（复制/搜索/朗读）、阅读背景（纯色/纸纹/图片上传）在 SettingsView、简繁在全局；v5.2.0 已补自定义字体上传、readWidth、animateMSTime、chapterRequestTimeout、点击区域、quickKey 自定义快捷键；自定义配色与 epubMode 原版式按纯文本阅读风格确认不迁移。
+- [x] `web/src/components/ReplaceRuleForm.vue`：替换规则编辑表单（名称/规则/替换为/范围/正则开关/启用）由 ReplaceRuleView 编辑器覆盖（含测试与唯一性校验）；字段集与 ReplaceRule 实体缺口一致，UI 为极简表单弹窗，风格符合。
+- [x] `web/src/components/RssArticle.vue`：文章详情（标题/正文/图片/视频，v-html）由 RssView 阅读区覆盖（sanitizeHtml 安全净化 + 图文排版）；v5.2.0 已实现文章内图片点击全屏预览；legacy 会执行文章内 script（安全风险），rust 用 sanitize 净化是安全收紧，不应迁移。
+- [x] `web/src/components/RssArticleList.vue`：订阅源文章列表（标题/日期/配图/加载更多/点文章取正文）由 RssView 右栏覆盖（getRssArticles 分页 + 未读/已读 + 标题过滤 + getRssArticle 阅读）；v5.2.0 已实现 sortUrl 多段分类 tab 逐类加载、列表配图与图片全屏预览。
+- [x] `web/src/components/SearchBookContent.vue`：全书/章节内容搜索由 BookDetailView 搜索弹层 + BookshelfView 全书搜索（逐本地书并发聚合）覆盖；差异：legacy 有 lastIndex 分页加载更多与“跳转上次位置”，rust 改为一次返回全部章节命中并点击跳章，语义等价但无分页。
+- [x] `web/src/plugins/config.js`：阅读配置/主题/字体/书架/搜索配置由 utils/readerConfig.ts、readerTheme.ts、readerBg.ts、uiTheme.ts + SettingsView/ReaderView 覆盖；legacy quickKey/selectionAction/epubMode 等以对应行为实现（键盘翻页/划词操作/仿真翻页），字段名与取值集简化但功能等价。
+- [x] `web/src/plugins/helper.js`：LimitRequest/网络优先/缓存优先请求由后端可达探测 backendFlag + 服务器缓存 + readerLocalCache 覆盖；v5.2.0 已实现书架离线缓存（localStorage 降级展示 + 重试）。
+- [x] `web/src/views/Reader.vue`：阅读器编排逐行核对：顶部/底部导航、目录抽屉、章节搜索、书签新增/列表/跳转、章内搜索、缓存章节、自动阅读、TTS、主题/字号/简繁/亮度、WakeLock、进度条、图片预览、音频/视频/漫画/文件、返回书架均由 ReaderView 覆盖；ChapterCacheDialog 替代 legacy 后续 50/100 章/全部缓存且支持服务器/本机双向与范围缓存；划词支持复制/搜索/朗读；v5.2.0 已补正文编辑并保存（saveBookContent 服务器+本机）、点击区域（左上上一页/右下下一页/中间菜单）、目录搜索/倒序/缓存标记、自定义字体、书签编辑/批量/导入、详情入口、quickKey 自定义快捷键、readWidth/animateMSTime/chapterRequestTimeout；浏览器 speechSynthesis 本地 TTS 由后端 Edge/HttpTTS 替代，epubMode 原版式按纯文本阅读风格确认不迁移。
+
+## 发现与缺口
+
+- `.agents/tasks/task-audit-round5/2025-01-24-review-v1.md`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-audit-round5/context.json`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-audit-round5/features/FEAT-001.json`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-audit-round5/task.json`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-fix-audit-issues-batch3/2026-07-27-094140-review.md`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-fix-audit-issues-batch3/context.json`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-fix-audit-issues-batch3/features/FEAT-001.json`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-fix-audit-issues-batch3/task.json`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-fix-review-issues/2026-07-27-085631-review.md`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-fix-review-issues/context.json`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-fix-review-issues/features/FEAT-001.json`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-fix-review-issues/features/FEAT-002.json`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-fix-review-issues/features/FEAT-003.json`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-fix-review-issues/task.json`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-migrate-pro-features/2025-01-15-120000-review.md`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-migrate-pro-features/2025-01-24-091500-review.md`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-migrate-pro-features/context.json`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-migrate-pro-features/features/FEAT-001.json`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-migrate-pro-features/features/FEAT-002.json`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-migrate-pro-features/features/FEAT-003.json`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-migrate-pro-features/features/FEAT-004.json`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-migrate-pro-features/features/FEAT-005.json`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-migrate-pro-features/features/FEAT-006.json`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.agents/tasks/task-migrate-pro-features/task.json`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `.dockerignore`：仓库元文件/工具配置由当前 .dockerignore/.gitattributes/.gitignore + Vite/TS 配置替代；.DS_Store 为 macOS 垃圾文件无需迁移。
+- `.gitattributes`：仓库元文件/工具配置由当前 .dockerignore/.gitattributes/.gitignore + Vite/TS 配置替代；.DS_Store 为 macOS 垃圾文件无需迁移。
+- `.github/ISSUE_TEMPLATE/bug_report.md`：legacy GitHub Actions（Java/Gradle + JavaFX 桌面包 + multi-arch Docker）由当前 release-rust.yml（Linux musl 静态 + Windows exe 并行发布、前端 rust-embed 内嵌、zip 正确打包）、frontend-ci.yml、rust-ci.yml、docker-publish-rust.yml 替代；平台拆分与静态链接问题已在 v5.0.8 修复。
+- `.github/ISSUE_TEMPLATE/config.yml`：legacy GitHub Actions（Java/Gradle + JavaFX 桌面包 + multi-arch Docker）由当前 release-rust.yml（Linux musl 静态 + Windows exe 并行发布、前端 rust-embed 内嵌、zip 正确打包）、frontend-ci.yml、rust-ci.yml、docker-publish-rust.yml 替代；平台拆分与静态链接问题已在 v5.0.8 修复。
+- `.github/ISSUE_TEMPLATE/feature_request.md`：legacy GitHub Actions（Java/Gradle + JavaFX 桌面包 + multi-arch Docker）由当前 release-rust.yml（Linux musl 静态 + Windows exe 并行发布、前端 rust-embed 内嵌、zip 正确打包）、frontend-ci.yml、rust-ci.yml、docker-publish-rust.yml 替代；平台拆分与静态链接问题已在 v5.0.8 修复。
+- `.github/dependabot.yml`：legacy GitHub Actions（Java/Gradle + JavaFX 桌面包 + multi-arch Docker）由当前 release-rust.yml（Linux musl 静态 + Windows exe 并行发布、前端 rust-embed 内嵌、zip 正确打包）、frontend-ci.yml、rust-ci.yml、docker-publish-rust.yml 替代；平台拆分与静态链接问题已在 v5.0.8 修复。
+- `.github/workflows/Dockerfile`：legacy GitHub Actions（Java/Gradle + JavaFX 桌面包 + multi-arch Docker）由当前 release-rust.yml（Linux musl 静态 + Windows exe 并行发布、前端 rust-embed 内嵌、zip 正确打包）、frontend-ci.yml、rust-ci.yml、docker-publish-rust.yml 替代；平台拆分与静态链接问题已在 v5.0.8 修复。
+- `.github/workflows/Openj9-Dockerfile`：legacy GitHub Actions（Java/Gradle + JavaFX 桌面包 + multi-arch Docker）由当前 release-rust.yml（Linux musl 静态 + Windows exe 并行发布、前端 rust-embed 内嵌、zip 正确打包）、frontend-ci.yml、rust-ci.yml、docker-publish-rust.yml 替代；平台拆分与静态链接问题已在 v5.0.8 修复。
+- `.github/workflows/build.yml`：legacy GitHub Actions（Java/Gradle + JavaFX 桌面包 + multi-arch Docker）由当前 release-rust.yml（Linux musl 静态 + Windows exe 并行发布、前端 rust-embed 内嵌、zip 正确打包）、frontend-ci.yml、rust-ci.yml、docker-publish-rust.yml 替代；平台拆分与静态链接问题已在 v5.0.8 修复。
+- `.github/workflows/docker-publish.yml`：legacy GitHub Actions（Java/Gradle + JavaFX 桌面包 + multi-arch Docker）由当前 release-rust.yml（Linux musl 静态 + Windows exe 并行发布、前端 rust-embed 内嵌、zip 正确打包）、frontend-ci.yml、rust-ci.yml、docker-publish-rust.yml 替代；平台拆分与静态链接问题已在 v5.0.8 修复。
+- `.github/workflows/pull-request.yml`：legacy GitHub Actions（Java/Gradle + JavaFX 桌面包 + multi-arch Docker）由当前 release-rust.yml（Linux musl 静态 + Windows exe 并行发布、前端 rust-embed 内嵌、zip 正确打包）、frontend-ci.yml、rust-ci.yml、docker-publish-rust.yml 替代；平台拆分与静态链接问题已在 v5.0.8 修复。
+- `.github/workflows/release-github.yml`：legacy GitHub Actions（Java/Gradle + JavaFX 桌面包 + multi-arch Docker）由当前 release-rust.yml（Linux musl 静态 + Windows exe 并行发布、前端 rust-embed 内嵌、zip 正确打包）、frontend-ci.yml、rust-ci.yml、docker-publish-rust.yml 替代；平台拆分与静态链接问题已在 v5.0.8 修复。
+- `.github/workflows/release-openj9.yml`：legacy GitHub Actions（Java/Gradle + JavaFX 桌面包 + multi-arch Docker）由当前 release-rust.yml（Linux musl 静态 + Windows exe 并行发布、前端 rust-embed 内嵌、zip 正确打包）、frontend-ci.yml、rust-ci.yml、docker-publish-rust.yml 替代；平台拆分与静态链接问题已在 v5.0.8 修复。
+- `.github/workflows/release.yml`：legacy GitHub Actions（Java/Gradle + JavaFX 桌面包 + multi-arch Docker）由当前 release-rust.yml（Linux musl 静态 + Windows exe 并行发布、前端 rust-embed 内嵌、zip 正确打包）、frontend-ci.yml、rust-ci.yml、docker-publish-rust.yml 替代；平台拆分与静态链接问题已在 v5.0.8 修复。
+- `.gitignore`：仓库元文件/工具配置由当前 .dockerignore/.gitattributes/.gitignore + Vite/TS 配置替代；.DS_Store 为 macOS 垃圾文件无需迁移。
+- `Dockerfile`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `Dockerfile.openj9`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `Dockerfile.slim`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `Dockerfile.source`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `LICENSE`：文档由当前 README.md + docs/（ARCHITECTURE/FRONTEND/LEGACY-BUGS/ROADMAP/SECURITY + legado-ref 规则文档）替代；README/UPDATELOG/tag 按用户要求在收尾阶段结合实际情况重写。
+- `README.md`：文档由当前 README.md + docs/（ARCHITECTURE/FRONTEND/LEGACY-BUGS/ROADMAP/SECURITY + legado-ref 规则文档）替代；README/UPDATELOG/tag 按用户要求在收尾阶段结合实际情况重写。
+- `UPDATELOG.md`：文档由当前 README.md + docs/（ARCHITECTURE/FRONTEND/LEGACY-BUGS/ROADMAP/SECURITY + legado-ref 规则文档）替代；README/UPDATELOG/tag 按用户要求在收尾阶段结合实际情况重写。
+- `assets/linux/reader.png`：JavaFX 桌面打包图标/宣传截图由 web-ui logo.svg/logo.png + PWA manifest 品牌资源替代（纯 Web 服务无桌面壳）。
+- `assets/mac/reader.icns`：JavaFX 桌面打包图标/宣传截图由 web-ui logo.svg/logo.png + PWA manifest 品牌资源替代（纯 Web 服务无桌面壳）。
+- `assets/windows/reader.ico`：JavaFX 桌面打包图标/宣传截图由 web-ui logo.svg/logo.png + PWA manifest 品牌资源替代（纯 Web 服务无桌面壳）。
+- `build.gradle.kts`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `build.sh`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `cli.gradle`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `doc.md`：文档由当前 README.md + docs/（ARCHITECTURE/FRONTEND/LEGACY-BUGS/ROADMAP/SECURITY + legado-ref 规则文档）替代；README/UPDATELOG/tag 按用户要求在收尾阶段结合实际情况重写。
+- `docker-compose.yaml`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `docker-compose.yml`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `docs/ROADMAP.md`：文档由当前 README.md + docs/（ARCHITECTURE/FRONTEND/LEGACY-BUGS/ROADMAP/SECURITY + legado-ref 规则文档）替代；README/UPDATELOG/tag 按用户要求在收尾阶段结合实际情况重写。
+- `gradle.properties`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `gradle/wrapper/gradle-wrapper.jar`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `gradle/wrapper/gradle-wrapper.properties`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `gradlew`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `gradlew.bat`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `imgs/1.jpg`：JavaFX 桌面打包图标/宣传截图由 web-ui logo.svg/logo.png + PWA manifest 品牌资源替代（纯 Web 服务无桌面壳）。
+- `imgs/10.jpg`：JavaFX 桌面打包图标/宣传截图由 web-ui logo.svg/logo.png + PWA manifest 品牌资源替代（纯 Web 服务无桌面壳）。
+- `imgs/2.jpg`：JavaFX 桌面打包图标/宣传截图由 web-ui logo.svg/logo.png + PWA manifest 品牌资源替代（纯 Web 服务无桌面壳）。
+- `imgs/3.jpg`：JavaFX 桌面打包图标/宣传截图由 web-ui logo.svg/logo.png + PWA manifest 品牌资源替代（纯 Web 服务无桌面壳）。
+- `imgs/4.jpg`：JavaFX 桌面打包图标/宣传截图由 web-ui logo.svg/logo.png + PWA manifest 品牌资源替代（纯 Web 服务无桌面壳）。
+- `imgs/5.jpg`：JavaFX 桌面打包图标/宣传截图由 web-ui logo.svg/logo.png + PWA manifest 品牌资源替代（纯 Web 服务无桌面壳）。
+- `imgs/6.jpg`：JavaFX 桌面打包图标/宣传截图由 web-ui logo.svg/logo.png + PWA manifest 品牌资源替代（纯 Web 服务无桌面壳）。
+- `imgs/7.jpg`：JavaFX 桌面打包图标/宣传截图由 web-ui logo.svg/logo.png + PWA manifest 品牌资源替代（纯 Web 服务无桌面壳）。
+- `imgs/8.jpg`：JavaFX 桌面打包图标/宣传截图由 web-ui logo.svg/logo.png + PWA manifest 品牌资源替代（纯 Web 服务无桌面壳）。
+- `imgs/9.jpg`：JavaFX 桌面打包图标/宣传截图由 web-ui logo.svg/logo.png + PWA manifest 品牌资源替代（纯 Web 服务无桌面壳）。
+- `imgs/mpcode.png`：JavaFX 桌面打包图标/宣传截图由 web-ui logo.svg/logo.png + PWA manifest 品牌资源替代（纯 Web 服务无桌面壳）。
+- `nixpacks.toml`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `preview.md`：文档由当前 README.md + docs/（ARCHITECTURE/FRONTEND/LEGACY-BUGS/ROADMAP/SECURITY + legado-ref 规则文档）替代；README/UPDATELOG/tag 按用户要求在收尾阶段结合实际情况重写。
+- `reader.sh`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `semantic-review/2025-01-15-143022-pr-1.md`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `semantic-review/2026-07-27-091952-pr-audit-v2.md`：历史审计/任务记录（agents/semantic-review）为项目过程文档，功能已由当前实现与本次 legacy-parity 文档覆盖，无需迁移。
+- `server/bin/shutdown.cmd`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `server/bin/shutdown.sh`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `server/bin/startup.cmd`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `server/bin/startup.sh`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `server/conf/application.properties`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `settings.gradle`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
+- `simple-web-src/README.md`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/css/layout.css`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/css/read.css`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/fonts/README.md`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/html/index.html`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/html/reader.html`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/html/rss.html`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/html/search.html`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/js/common.js`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/js/indexPage.js`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/js/polyfill.js`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/js/readerPage.js`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/js/rssPage.js`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/js/searchPage.js`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/js/template-data.js`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/js/template.js`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/templates/articleList.tmpl`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/templates/bookInfo.tmpl`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/templates/bookList.tmpl`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/templates/rssList.tmpl`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/templates/searchSourceList.tmpl`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/templates/sourceList.tmpl`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `src/lib/rhino-1.7.13-1.jar`：Rhino JS 引擎由 boa_engine（parser/js.rs）替代；xmlpull 由 quick-xml/feed-rs/scraper 替代。
+- `src/lib/xmlpull-1.1.3.1.jar`：Rhino JS 引擎由 boa_engine（parser/js.rs）替代；xmlpull 由 quick-xml/feed-rs/scraper 替代。
+- `src/main/.DS_Store`：仓库元文件/工具配置由当前 .dockerignore/.gitattributes/.gitignore + Vite/TS 配置替代；.DS_Store 为 macOS 垃圾文件无需迁移。
+- `src/main/java/com/htmake/reader/ReaderApplication.kt`：Spring Boot + Vert.x 启动由 rust main+axum serve 替代；迁移在 storage::init 执行。
+- `src/main/java/com/htmake/reader/ReaderUIApplication.kt`：JavaFX 桌面壳：rust 版为纯 Web 服务（web-ui/dist 由 ServeDir 提供），无桌面壳；Linux 空白包问题与内嵌 web-ui 在构建批次确认。
+- `src/main/java/com/htmake/reader/SpringEvent.java`：Spring 生命周期事件由 tokio/axum 启动流程替代，无需迁移。
+- `src/main/java/com/htmake/reader/api/ReturnData.kt`：等价 JSON 返回结构（isSuccess/errorMsg/data），rust ReturnData 已实现。
+- `src/main/java/com/htmake/reader/api/YueduApi.kt`：路由全量 diff：核心接口均已在 rust 实现；已补接 backupToMongodb/restoreFromMongodb/restoreFromZip 路由（前端入口见 FileManageView 还原备份）；saveBookConfig 由 saveBook+前端本地 config 替代；/reader3/cover 由 /assets/proxy 替代；自定义字体上传/管理由 SettingsView + readerFont.ts（IndexedDB）覆盖。
+- `src/main/java/com/htmake/reader/api/controller/BaseController.kt`：会话/命名空间/管理密钥逻辑由 rust resolve_namespace/resolve_current_user/is_manager 覆盖；secureKey 提权已按安全要求收紧。
+- `src/main/java/com/htmake/reader/api/controller/BookController.kt`：核心功能已覆盖（书架/详情/目录/正文/进度/搜索/换源/缓存/导出/全文搜索/本地书/TTS）；PDF 按页文本提取、EPUB 经 html_to_text 纯文本阅读，legacy PDF 转图与 epub JS 注入按项目纯文本风格不迁移（批次 4.4 记录）；legacy JSON bookshelf 由 SQLite 替代。
+- `src/main/java/com/htmake/reader/api/controller/BookGroupController.kt`：getBookGroups/saveBookGroup（含重命名返回完整实体）覆盖 cover/show；批量/排序路由已接。
+- `src/main/java/com/htmake/reader/api/controller/BookSourceController.kt`：功能覆盖（含 saveFromRemoteSource/setAsDefault/deleteUserBookSource）；generateBookSourceMap 由 SQLite 查询替代；远程订阅启用/禁用/删除/批量操作已由 SourceManageView 订阅区覆盖。
+- `src/main/java/com/htmake/reader/api/controller/BookmarkController.kt`：saveBookmark/getBookmarks/deleteBookmark/saveBookmarks/deleteBookmarks 覆盖 legacy 全字段与别名（chapterPos/time/bookName 等）。
+- `src/main/java/com/htmake/reader/api/controller/CURD.kt`：泛型 JSON 表被 SQLite 专用表+逐实体 CRUD 替代，语义一致。
+- `src/main/java/com/htmake/reader/api/controller/FileController.kt`：rust files.rs 覆盖 list/get/save/mkdir/delete/deleteMulti/download/upload；file/importPreview/parse/restore 由 uploadLocalBook/importBookPreview/restoreFromZip 替代；还原备份与导入书架入口已在 FileManageView 补接，目录级批量解析差异结转批次 4.4。
+- `src/main/java/com/htmake/reader/api/controller/HttpTTSController.kt`：getHttpTTSList/saveHttpTTS/httpTTS/saveMulti/deleteHttpTTS 覆盖 legacy 扩展字段（JSON 输出含 contentType/header/loginCheckJs 等）。
+- `src/main/java/com/htmake/reader/api/controller/ReplaceRuleController.kt`：saveReplaceRule/saveReplaceRules/replaceRule/saveMulti/deleteReplaceRule(s) 覆盖 legacy 扩展字段与 pattern/replacement/isEnabled 兼容输入。
+- `src/main/java/com/htmake/reader/api/controller/RssSourceController.kt`：CRUD 与文章/正文接口覆盖；Rss.getArticles/getContent 解析引擎在批次 2 RSS 引擎确认。
+- `src/main/java/com/htmake/reader/api/controller/UserController.kt`：登录/注册/用户管理/密码/配置/上传覆盖；非 secure 模式仅管理员可管理（普通用户拒绝），secure 模式走 secureKey；deleteUsers/clearInactiveUsers 已接前端入口；getUserInfo 无同名路由（rust 用 login/getUsers），字体列表由 SettingsView 自定义字体管理覆盖。
+- `src/main/java/com/htmake/reader/api/controller/WebdavController.kt`：rust webdav.rs 覆盖 OPTIONS/PROPFIND/GET/PUT/MKCOL/DELETE/MOVE/COPY/LOCK/UNLOCK，且路径安全更严格；前端入口核销：FileManageView WebDAV home 胶囊、SettingsView WebDAV 访问地址/备份到 WebDAV、UserManageView WebDAV 权限开关；OPDS 1.2/2.0/PSE 由 api/opds.rs 实现，入口在 BookshelfView OPDS 弹窗与 SettingsView OPDS 独立账号配置/测试连接。
+- `src/main/java/com/htmake/reader/config/AppConfig.kt`：rust AppConfig 覆盖核心配置；Mongo/remoteWebview 由 mongodb_backup/内置 obscura 替代；exportUseReplace 由导出参数替代；默认权限已按需求调整为全开 80000/5000。
+- `src/main/java/com/htmake/reader/config/BookConfig.kt`：epub 章节 JS 注入由 rust html_to_text/正文清洗（含 <br>/&nbsp; 转换、script/style 剔除）替代，阅读器设置由 ReaderView/SettingsView 注入；legacy 原版式 iframe/shadow DOM 阅读不迁移（批次 4.4 记录，同 ShadowIframe）。
+- `src/main/java/com/htmake/reader/db/DB.kt`：抽象层被 SQLite Storage 替代；各实体专用表已建。
+- `src/main/java/com/htmake/reader/db/JSONTable.kt`：JSON 文件表被 SQLite 表替代；迁移器从旧 JSON 导入。
+- `src/main/java/com/htmake/reader/db/SQLTable.kt`：实现实际仍是 JSON 文件（legacy 旧代码）；rust 为真 SQLite，语义更可靠。
+- `src/main/java/com/htmake/reader/entity/BasicError.kt`：错误结构由 ReturnData.err 替代。
+- `src/main/java/com/htmake/reader/entity/MongoFile.kt`：Mongo 文档存储由 service/mongodb_backup 替代（本批已补 API 入口）。
+- `src/main/java/com/htmake/reader/entity/Size.kt`：桌面窗口尺寸仅 JavaFX 壳使用，web 版无对应。
+- `src/main/java/com/htmake/reader/entity/User.kt`：全字段映射 + is_admin/user_namespace；token_map 兼容 legacy 对象形态；首次注册管理员/default 配置隔离、普通用户覆盖仅对自己生效已按用户权限批次核销。
+- `src/main/java/com/htmake/reader/init/ReaderAdapter.kt`：远程 WebView 抓取由 rust crawler + obscura 浏览器替代（批次 2 确认）。
+- `src/main/java/com/htmake/reader/init/appCtx.kt`：缓存目录由 AppConfig.storage_dir()/cache 提供。
+- `src/main/java/com/htmake/reader/lib/tts/constant/OutputFormat.java`：Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- `src/main/java/com/htmake/reader/lib/tts/constant/TtsConstants.java`：Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- `src/main/java/com/htmake/reader/lib/tts/constant/TtsStyleEnum.java`：Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- `src/main/java/com/htmake/reader/lib/tts/constant/VoiceEnum.java`：Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- `src/main/java/com/htmake/reader/lib/tts/exceptions/TtsException.java`：Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- `src/main/java/com/htmake/reader/lib/tts/model/SSML.java`：Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- `src/main/java/com/htmake/reader/lib/tts/model/SpeechConfig.java`：Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- `src/main/java/com/htmake/reader/lib/tts/service/TTSService.java`：Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- `src/main/java/com/htmake/reader/lib/tts/util/Tools.java`：Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- `src/main/java/com/htmake/reader/utils/Ext.kt`：JSON 文件原子读写由 SQLite Storage 替代；用户文件篡改校验由 DB 事务/权限层替代。
+- `src/main/java/com/htmake/reader/utils/IntTypeAdapter.kt`：Gson 宽松数字反序列化由 serde 宽松归一替代（book_source normalize）。
+- `src/main/java/com/htmake/reader/utils/LRUCache.kt`：内存 LRU 由 rust image_cache/内存缓存替代。
+- `src/main/java/com/htmake/reader/utils/LongTypeAdapter.kt`：同 IntTypeAdapter。
+- `src/main/java/com/htmake/reader/utils/MongoManager.kt`：Mongo 连接由 service/mongodb_backup + API 覆盖（批次 1 已补路由）。
+- `src/main/java/com/htmake/reader/utils/RemoteWebview.kt`：远程 WebView 渲染 API 由 rust 内置 obscura 浏览器/CDP 替代；legacy DefaultAdpater 默认即抛不支持，语义未丢失。
+- `src/main/java/com/htmake/reader/utils/SpringContextUtils.java`：DI 容器由 AppConfig 直接注入替代。
+- `src/main/java/com/htmake/reader/utils/UserMutex.kt`：用户级互斥由 SQLite 事务与模块内锁替代。
+- `src/main/java/com/htmake/reader/utils/VertExt.kt`：success/error 响应由 ReturnData/错误处理替代；traceId 由 tracing span 替代。
+- `src/main/java/com/htmake/reader/utils/VertRoute.kt`：globalHandler traceId 中间件由 tracing 上下文替代。
+- `src/main/java/com/htmake/reader/verticle/RestVerticle.kt`：Vert.x 会话/CORS/body 处理由 axum + accessToken 认证替代；会话 7 天改为 token_ttl_days。
+- `src/main/java/io/legado/app/README.md`：源码目录说明由 rust 模块文档（//!）+ docs/ 替代。
+- `src/main/java/io/legado/app/adapters/DefaultAdpater.kt`：工作目录由 AppConfig.storage_dir() 覆盖；默认 webview 即抛不支持，rust 用内置 obscura 浏览器替代。
+- `src/main/java/io/legado/app/adapters/ReaderAdapterHelper.kt`：适配器单例由 AppConfig 直接注入替代。
+- `src/main/java/io/legado/app/adapters/ReaderAdapterInterface.kt`：适配器接口由 rust crawler/browser 服务替代。
+- `src/main/java/io/legado/app/constant/Action.kt`：Android TTS 播放控制动作——web 版由前端阅读器控制，无需迁移。
+- `src/main/java/io/legado/app/constant/AppConst.kt`：UA/日期格式由 rust/前端覆盖；Rhino 引擎由 boa 替代；书源编辑器键盘符号快捷栏已由 SourceManageView 规则符号插入栏覆盖。
+- `src/main/java/io/legado/app/constant/AppPattern.kt`：正则集（JS 提取/图片/作者/文件名/调试符号/本地书扩展/标点）由 parser/local_book 覆盖；作者/书名清洗正则（\s+作\s*者.*、^\s*作\s*者[:：\s]+、\s+著）已由 local_book::analyze_name_author 应用。
+- `src/main/java/io/legado/app/constant/BookType.kt`：0-4 类型映射已实现（SearchBook book_type / books.book_type / local://）。
+- `src/main/java/io/legado/app/constant/DeepinkBookSource.kt`：开发期书源生成工具，非运行时功能，无需迁移。
+- `src/main/java/io/legado/app/constant/PreferKey.kt`：Android 偏好键——web 版由前端本地配置替代，无需迁移。
+- `src/main/java/io/legado/app/constant/RSSKeywords.kt`：标准 RSS 元素由 feed-rs 解析覆盖；自定义规则由 rust RssParserByRule 覆盖（test_parse_feed_by_rule_extracts_articles）。
+- `src/main/java/io/legado/app/constant/Status.kt`：TTS 播放状态——web 版由前端控制，无需迁移。
+- `src/main/java/io/legado/app/data/entities/BaseBook.kt`：字段已映射（rust BookInfo）。运行时 getKindList 由前端/解析侧内聚（书源分组/类型标签已核销）。
+- `src/main/java/io/legado/app/data/entities/BaseSource.kt`：getHeaderMap/evalJS/登录态缓存全部确认：header 解析（含 <js>/@js: 模板）由 crawler::parse_header，loginHeader 由 source.putLoginHeader/removeLoginHeader/getLoginHeader 持久化（book_source_cookies.login_header）并在抓取时自动合并，loginCheckJs/登录由 login.rs + book.rs 覆盖；rust BookSource 含 login_js 扩展。
+- `src/main/java/io/legado/app/data/entities/Book.kt`：全字段映射到 rust Book，read_config 存 JSON 保留 ReadConfig。差异：getRealAuthor/getUnreadChapterNum/getFolderName/updateFromLocal 等运行时逻辑已按阅读器/本地书批次核销；order/originOrder 已映射 order_num/origin_order；batch3/4 已核对本地书、tocUrl/书名等字段由 book_url/toc_url/name 映射（含迁移/保存 SQL toc_url 回归修复）。
+- `src/main/java/io/legado/app/data/entities/BookChapter.kt`：字段映射完整；getAbsoluteURL/getFileName 已按抓取批次核销（to_absolute + 本地文件命名）。isVolume 已映射。
+- `src/main/java/io/legado/app/data/entities/BookGroup.kt`：已补列 cover/show 到 book_groups（迁移/保存/备份/恢复全链路），模型/API 输出含 cover/show，默认 show=true；前端分组弹窗封面/显隐入口见 BookGroup.vue（批次 5 UI 收尾）。
+- `src/main/java/io/legado/app/data/entities/BookLogger.kt`：仅 Kotlin 日志单例，Rust 用 tracing 替代，无需功能迁移。
+- `src/main/java/io/legado/app/data/entities/BookSource.kt`：字段映射完整（含 proxyUrl/loginJs 扩展）；getHeaderMap/evalJS/登录态逻辑已确认实现（见 BaseSource.kt）。
+- `src/main/java/io/legado/app/data/entities/Bookmark.kt`：已补列 book_name/book_author/chapter_name/book_text/content 并接入迁移、单/批量保存、列表与备份恢复；serde 兼容 legacy bookName/chapterPos/time 等字段名，API 测试覆盖。
+- `src/main/java/io/legado/app/data/entities/Cache.kt`：通用 key/value 缓存被专用表替代（book_source_cookies/toc_cache/book_chapters）；loginHeader 已持久化（book_source_cookies.login_header），sourceVariable 由 SOURCE_VARS 内存全局 + 书源 variable 覆盖；userInfo 由登录态 cookie/loginHeader 持久化覆盖（AES 混淆不迁移）。
+- `src/main/java/io/legado/app/data/entities/Cookie.kt`：对应 book_source_cookies 表（cookie+user_agent+login_header），写入/清除入口 setBookSourceCookie/loginBookSource 已实现；getBookSourceCookie 已实现并接入 SourceManageView Cookie 管理弹窗。
+- `src/main/java/io/legado/app/data/entities/HttpTTS.kt`：已补列 contentType/concurrentRate/loginUrl/loginUi/header/jsLib/enabledCookieJar/loginCheckJs/lastUpdateTime 并接入迁移/保存/批量保存/备份恢复/API 输出；登录与并发语义在批次 2 规则引擎确认。
+- `src/main/java/io/legado/app/data/entities/ReplaceRule.kt`：已补列 group/scope/scopeTitle/scopeContent/isRegex/timeoutMillisecond 并接入迁移/保存/批量保存/备份恢复；serde 兼容 legacy pattern/replacement/isEnabled 字段名；正则与范围语义在批次 2 净化引擎接入。
+- `src/main/java/io/legado/app/data/entities/RssArticle.kt`：字段名差异（origin/sort/link/pubDate/description/image vs rust source_url/url/time/content/cover），raw_json 保底；RSS 解析批次已确认（feed-rs 映射 + RssView 展示）。
+- `src/main/java/io/legado/app/data/entities/RssSource.kt`：rust 表保留核心列+raw_json，规则字段访问器 rule_articles/rule_next_page/rule_content 已实现并参与解析（batch2.6）。
+- `src/main/java/io/legado/app/data/entities/SearchBook.kt`：搜索书由 rust searchBook 返回的 BookInfo 覆盖（name/author/kind/intro/coverUrl/tocUrl/wordCount/lastChapter/updateTime/canReName）；差异：legacy SearchBook 的 searchBookUrl/updateTime 等临时字段未单独保留，rust 每次搜索实时返回结果。
+- `src/main/java/io/legado/app/data/entities/SearchKeyword.kt`：搜索历史已由 SearchView/ExploreView localStorage 实现（最近 10 条 + 联想）。
+- `src/main/java/io/legado/app/data/entities/SearchResult.kt`：章节内搜索返回结构；全书/章内搜索已由 BookDetailView 搜索弹层 + BookshelfView 全书搜索覆盖。
+- `src/main/java/io/legado/app/data/entities/TxtTocRule.kt`：已实现 txt_toc_rules；小差异 legacy serialNumber 默认 -1，rust 默认 0。
+- `src/main/java/io/legado/app/data/entities/rule/BookInfoRule.kt`：canReName/updateTime 已由 Rust analyze_book_info 覆盖；bookInfo 规则引擎差异在批次 2/3 记录。
+- `src/main/java/io/legado/app/data/entities/rule/BookListRule.kt`：接口字段在 rust 端统一 Value 强解析，规则引擎批次已核销。
+- `src/main/java/io/legado/app/data/entities/rule/ContentRule.kt`：content/nextContentUrl/sourceRegex/replaceRegex 已实现；webJs/imageStyle 由内置浏览器/图片代理语义覆盖。
+- `src/main/java/io/legado/app/data/entities/rule/ExploreRule.kt`：同 BookListRule；发现规则在规则引擎批次确认。
+- `src/main/java/io/legado/app/data/entities/rule/SearchRule.kt`：同 BookListRule；搜索规则在规则引擎批次确认。
+- `src/main/java/io/legado/app/data/entities/rule/TocRule.kt`：目录规则由 Rust analyze_toc 覆盖（updateTime 已映射）；BookChapter.tag/chapterList/chapterName/chapterUrl/isVolume/isVip/nextTocUrl/preUpdateJs 等字段差异在目录规则引擎记录。
+- `src/main/java/io/legado/app/exception/ConcurrentException.kt`：书源 concurrentRate 并发率/窗口频率限制已接入搜索/探索/详情/目录/正文/媒体抓取（batch2.4）。
+- `src/main/java/io/legado/app/exception/ContentEmptyException.kt`：空正文错误由 analyze_content 的错误路径替代。
+- `src/main/java/io/legado/app/exception/NoStackTraceException.kt`：无堆栈错误由 anyhow 错误替代。
+- `src/main/java/io/legado/app/exception/RegexTimeoutException.kt`：正则回溯上限防护已由 fancy-regex backtrack_limit 实现（默认 1_000_000，batch2.5），等效 legacy 正则超时防卡死。
+- `src/main/java/io/legado/app/exception/TocEmptyException.kt`：目录空错误由 analyze_toc/路由错误路径替代。
+- `src/main/java/io/legado/app/help/BookHelp.kt`：正文缓存落库由 book_chapters/cache_job 覆盖；图片缓存由 image_cache + /assets/proxy 覆盖；formatBookName/formatBookAuthor 名称清洗已由 local_book::analyze_name_author（导入/预览/重扫共用）应用。
+- `src/main/java/io/legado/app/help/CacheManager.kt`：运行时 KV/文件缓存由 rust 内存/磁盘缓存替代；JS cacheFile/getFile/readFile/deleteFile/unzipFile/getZip*/queryTTF 等 shim 已由 rust js.rs 实现。
+- `src/main/java/io/legado/app/help/DefaultData.kt`：默认 TXT 分章规则由 txt_toc_rules 默认数据 + import_default_txt_toc_rules 覆盖。
+- `src/main/java/io/legado/app/help/EncodingDetectHelp.java`：HTML meta charset + HTTP Content-Type charset + BOM + GBK 启发式已由 decode_bytes 实现（batch2.3）；统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖）。
+- `src/main/java/io/legado/app/help/JsExtensions.kt`：JS shim：rust 已覆盖 java.ajax/connect/head/post/get/ajaxAll、base64/md5/aesBase64DecodeToString/des/hex/t2s/s2t/HMac/randomUUID/encodeURI/timeFormat/source.put/get/application、getWbiEnc/Reload/gzip；v5.2.0 已补 webView/importScript/cacheFile/downloadFile/getFile/readFile/readTxtFile/deleteFile/unzipFile/getTxtInFolder/getZip*/queryBase64TTF/queryTTF/replaceFont/htmlFormat/utf8ToGbk 及 AES 编码变体（js.rs）。
+- `src/main/java/io/legado/app/help/coroutine/CompositeCoroutine.kt`：Android 协程 DSL（async/await 并发）由 Rust tokio async/join 替代，无需迁移。
+- `src/main/java/io/legado/app/help/coroutine/Coroutine.kt`：Android 协程 DSL（async/await 并发）由 Rust tokio async/join 替代，无需迁移。
+- `src/main/java/io/legado/app/help/coroutine/CoroutineContainer.kt`：Android 协程 DSL（async/await 并发）由 Rust tokio async/join 替代，无需迁移。
+- `src/main/java/io/legado/app/help/http/ByteConverter.kt`：Retrofit 字节转换器——rust 为原生 async/reqwest，二进制走 fetch_image，无需迁移。
+- `src/main/java/io/legado/app/help/http/CookieStore.kt`：cookie 存取/合并由 crawler session_for/parse_cookie_string + storage 覆盖；域匹配按书源 baseUrl 归一，实际书源验证已核销。
+- `src/main/java/io/legado/app/help/http/CoroutinesCallAdapterFactory.kt`：Retrofit 协程适配——rust 为原生 async/await，无需迁移。
+- `src/main/java/io/legado/app/help/http/EncodeConverter.kt`：响应编码转换由 decode_bytes(charset) 覆盖；BOM + HTML meta charset + HTTP Content-Type charset + GBK 启发式自动探测已实现（batch2.3）。
+- `src/main/java/io/legado/app/help/http/HttpHelper.kt`：OkHttp 客户端（超时/UA/Keep-Alive/代理）由 reqwest + crawler 覆盖；失败重试（默认 2 次指数退避）、自签名/CA（READER_DANGER_ACCEPT_INVALID_CERTS/READER_CA_FILE）、直连代理（READER_HTTP_PROXY）均已实现并有单测。
+- `src/main/java/io/legado/app/help/http/OkHttpUtils.kt`：请求辅助（retry/get/form/multipart/json）由 crawler http_get/http_post + UrlSuffix 覆盖；multipart 表单无对应入口（当前无此需求）。
+- `src/main/java/io/legado/app/help/http/RequestMethod.kt`：GET/POST 由 crawler http_get/http_post 覆盖。
+- `src/main/java/io/legado/app/help/http/Res.kt`：url+body 数据类由 FetchResponse/搜索结果覆盖。
+- `src/main/java/io/legado/app/help/http/SSLHelper.kt`：自签名/私密 CA 由 READER_DANGER_ACCEPT_INVALID_CERTS / READER_CA_FILE 覆盖。
+- `src/main/java/io/legado/app/help/http/StrResponse.kt`：响应封装由 crawler FetchResponse 覆盖（body/url/headers/status）。
+- `src/main/java/io/legado/app/help/http/api/CookieManager.kt`：接口由 crawler cookie_for/set_cookie_for/remove_cookie_for + login_header_for + book_source_cookies 表覆盖（cookie/user_agent/login_header 按用户持久化）。
+- `src/main/java/io/legado/app/lib/icu4j/CharsetDetector.java`：统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- `src/main/java/io/legado/app/lib/icu4j/CharsetMatch.java`：统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_2022.java`：统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_UTF8.java`：统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_Unicode.java`：统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_mbcs.java`：统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_sbcs.java`：统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- `src/main/java/io/legado/app/lib/icu4j/CharsetRecognizer.java`：统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- `src/main/java/io/legado/app/model/Debug.kt`：仅日志对象，由 rust tracing + debug.rs 替代，无需迁移。
+- `src/main/java/io/legado/app/model/DebugLog.kt`：日志接口由 tracing + bookSourceDebug SSE 替代，无需迁移。
+- `src/main/java/io/legado/app/model/Debugger.kt`：书源调试流程（搜索→详情→目录→正文逐段日志）由 rust service/debug.rs bookSourceDebugSSE 覆盖（search/explore/toc/content）；调试页 UI 已由 SourceManageView 书源调试弹窗覆盖（search/explore/toc/content SSE）。
+- `src/main/java/io/legado/app/model/README.md`：源码目录说明由 rust 模块文档（//!）+ docs/ 替代。
+- `src/main/java/io/legado/app/model/analyzeRule/AnalyzeByJSonPath.kt`：JSONPath 由 rust parser/rule.rs 的简化实现覆盖；数组索引/通配/过滤谓词已对照 legado 核销。
+- `src/main/java/io/legado/app/model/analyzeRule/AnalyzeByJSoup.kt`：CSS 链式规则由 rust parser/css_chain.rs 覆盖（css selector + :text/:href 等链）；与 legado 复杂链（:body/:img 等）边界已对照 warpdotsys/legado 核销。
+- `src/main/java/io/legado/app/model/analyzeRule/AnalyzeByRegex.kt`：正则规则由 rust parser/rule.rs 覆盖（匹配/替换/分组取值）；flags/修饰符语义已对照 legado 正则引擎核销。
+- `src/main/java/io/legado/app/model/analyzeRule/AnalyzeByXPath.kt`：XPath 由 rust parser/xpath.rs 简化实现（常见轴/谓词/文本提取）；XPath 2.0 复杂语法按边界记录（当前引擎覆盖常见轴/谓词/文本提取）。
+- `src/main/java/io/legado/app/model/analyzeRule/AnalyzeRule.kt`：规则主入口：rust parser/rule.rs 覆盖 CSS/JSONPath/Regex/JS 四种规则与 @put/@get/@js/@css 链式，`-`/`+` 列表前缀已实现（batch2.1）；webView 规则由内置 obscura 浏览器/书源 webView shim 覆盖。
+- `src/main/java/io/legado/app/model/analyzeRule/AnalyzeUrl.kt`：url 后缀 js/bodyJs/method/body/headers/charset + concurrentRate 限速已由 rust UrlSuffix + crawler 实现；webView/webJs/cookie jar 已接入（enabledCookieJar 由书源/HttpTTS 字段生效）；type hex 落盘由二进制 fetch_image 语义覆盖。
+- `src/main/java/io/legado/app/model/analyzeRule/QueryTTF.java`：TTF 字体解析（queryTTF/replaceFont 依赖）：queryTTF/replaceFont JS shim 与 TTF 解析（ttf-parser）已由 rust js.rs 实现。
+- `src/main/java/io/legado/app/model/analyzeRule/RuleAnalyzer.kt`：规则分发（CSS/JSON/Regex/JS/XPath/HTML）由 rust parser/rule.rs 覆盖；分发边界与差异同 AnalyzeRule。
+- `src/main/java/io/legado/app/model/analyzeRule/RuleData.kt`：规则数据上下文（html/json/baseUrl/source 等）由 rust RuleVars/JsBridge 覆盖。
+- `src/main/java/io/legado/app/model/analyzeRule/RuleDataInterface.kt`：规则上下文接口由 rust parser 的 trait/结构体覆盖。
+- `src/main/java/io/legado/app/model/localBook/CbzFile.kt`：CBZ 图片分页（自然序 + 每页一章）由 rust parse_cbz 覆盖（base64 data URI 正文，ReaderView singleImageUrl 渲染）；ComicInfo.xml Title/Writer 已解析为书名/作者，zip 条目顺序首图已作封面（upload 落盘 assets/{ns}/covers/），与 legacy upBookInfo/updateCover 语义一致。
+- `src/main/java/io/legado/app/model/localBook/EpubFile.kt`：EPUB 元数据/封面/spine 章节由 rust parse_epub + parse_opf_zip 覆盖（container→OPF→manifest→spine→html_to_text）；legacy tocUrl 六种模式与 fragmentId 截取、titlepage 封面注入、原版式 iframe/shadow DOM 按项目纯文本阅读风格确认不迁移（记录于 ShadowIframe/BookConfig）。
+- `src/main/java/io/legado/app/model/localBook/LocalBook.kt`：分派（epub/umd/cbz/pdf/txt）+ 删除由 rust local_book.rs 分派 parse_file_bytes + delete_book/delete_books 覆盖；analyzeNameAuthor 已按 legacy 四模式（《书名》作者：xx、《书名》、书名 作者：xx、书名 by xx）+ formatBookName/formatBookAuthor 清洗实现（local_book::analyze_name_author），导入/导入预览/重扫共用 local_book_display_meta（TXT 文件名优先，其余格式内容元数据优先）。
+- `src/main/java/io/legado/app/model/localBook/PdfFile.kt`：PDF 章节（page 模式逐页 / outline 模式按书签分章）由 rust parse_pdf 覆盖（lopdf 按页提取文本 + 标题/页分章）；差异：legacy 用 PDFBox 渲染每页为 output-N.png 图片并由阅读器显示，rust 提取文本纯文本阅读，pdfImageWidth 设置不再适用；rust 无 outline 书签分章（仅标题正则/页分章）。
+- `src/main/java/io/legado/app/model/localBook/TextFile.kt`：TXT 分章（编码检测 + txtTocRule 正则 + 无规则长文分块）由 rust parse_txt_with_rules/parse_txt_file_with_rules 覆盖（UTF-8/UTF-16 BOM/GBK + 默认与用户规则 + chunk_fallback）；差异：legacy 流式字节偏移保留每章原文头尾（substringAfter title），rust 按字符切分并 trim；legacy 超长章拆分（maxLengthWithToc/10KB 换行对齐）与 rust 10000 字硬切行为不同；TXT 目录规则的逐书选择（tocUrl 存书）由 ReplaceRuleView 全局规则替代，无逐书入口。
+- `src/main/java/io/legado/app/model/localBook/UmdFile.kt`：UMD 解析（魔数/section/附加块/章节偏移/标题/UTF-16LE 正文/封面）由 rust parse_umd 覆盖并有真实样本回归测试；功能对齐 umdlib UmdReader；删除逻辑归 delete_book。
+- `src/main/java/io/legado/app/model/rss/Rss.kt`：RSS 列表/正文入口由 rust service/rss.rs 覆盖（fetch_articles/fetch_web_content），自定义规则解析已实现（见 RssParserByRule）。
+- `src/main/java/io/legado/app/model/rss/RssParserByRule.kt`：ruleArticles/ruleTitle/rulePubDate/ruleDescription/ruleImage/ruleLink/ruleContent/ruleNextPage 自定义规则已由 rust service/rss.rs 实现（含 `-` 前缀、{{page}} 分页、feed-rs 标准解析回退、CSS @text 跳过 script/style）。
+- `src/main/java/io/legado/app/model/rss/RssParserDefault.kt`：标准 RSS/Atom 解析由 feed-rs 覆盖（标题/链接/作者/时间/正文/配图），分页参数 {{page}} 已支持。
+- `src/main/java/io/legado/app/model/webBook/BookChapterList.kt`：目录列表去重（-/+ 前缀）由 LinkedHashSet 语义覆盖；isVolume/isVip/updateTime 映射到 BookChapter.tag；URL 规范化在批次 3 核对，tag 兼容差异已记录。
+- `src/main/java/io/legado/app/model/webBook/BookContent.kt`：正文解析已由 rust analyze_content 覆盖（init/preUpdateJs/sourceRegex/replaceRegex/nextContentUrl + HTML 清洗）；webJs 由内置浏览器覆盖；imageStyle/图片由阅读器图片段落 + /assets/proxy 覆盖。
+- `src/main/java/io/legado/app/model/webBook/BookInfo.kt`：字段已映射（init/name/author/kind/intro/coverUrl/tocUrl/wordCount/lastChapter/updateTime/canReName）；tocUrl 相对地址按 baseUrl 解析；canReName 等差异在批次 3 记录。
+- `src/main/java/io/legado/app/model/webBook/BookList.kt`：搜索列表按书名/作者/封面等字段覆盖；bookUrlPattern 生成 bookUrl 按 baseUrl 解析；updateTime 差异在批次 3 记录；bookUrl/updateTime 契约已确认。
+- `src/main/java/io/legado/app/model/webBook/WebBook.kt`：搜索/探索/详情/目录/正文编排已由 rust search/book/explore/crawler 覆盖：loginCheckJs 自动执行（cookie/result/url 注入）、loginHeader 合并（source.putLoginHeader 持久化 + getHeaderMap(true) 自动附加）、列表 `-`/`+` 前缀、concurrentRate 限速、编码自动探测、preciseSearch 精确过滤均已接入。
+- `src/main/java/io/legado/app/utils/ACache.kt`：文件 KV 缓存由专用表/磁盘缓存替代；JS 缓存 shim 已由 rust js.rs cacheFile/getFile 覆盖。
+- `src/main/java/io/legado/app/utils/AnkoHelps.kt`：Android 协程 DSL——rust 原生 async，无需迁移。
+- `src/main/java/io/legado/app/utils/Base64.java`：base64 由 rust base64 依赖与 java.base64Encode/base64DecodeToString shim 覆盖。
+- `src/main/java/io/legado/app/utils/EncoderUtils.kt`：AES/DES/DESede/RSA/escape：rust 已覆盖 aesBase64DecodeToString/desEncodeToBase64String；RSA 无书源使用场景；AES 编码/ByteArray 变体、escape/unescape 已由 rust js.rs 覆盖。
+- `src/main/java/io/legado/app/utils/EncodingDetect.kt`：HTML/HTTP charset 自动探测已实现；v5.2.0 已用 chardetng 统计式编码探测覆盖 GBK/Big5/UTF-16 等（crawler decode_bytes + 单测）；v5.2.1 起 MOBI/AZW3 未知编码也走原始字节 + chardetng 探测（PalmDoc/Huffman 无损解压），v5.2.2 补齐 KindleMOBI trailing/multibyte 附加数据清理与重叠回引展开。
+- `src/main/java/io/legado/app/utils/FileExtensions.kt`：文件路径/读写/排序工具由 rust files.rs / local_book / zip 依赖覆盖（桌面 File 语义差异不影响 web 服务）。
+- `src/main/java/io/legado/app/utils/FilesUtil.kt`：文件系统工具由 rust files.rs 覆盖（list/save/delete/move/upload/download）。
+- `src/main/java/io/legado/app/utils/GsonExtensions.kt`：JSON 宽松解析由 serde 宽松归一替代（book_source normalize）。
+- `src/main/java/io/legado/app/utils/HtmlFormatter.kt`：HTML→纯文本由 rust 正文清洗覆盖；formatKeepImg 保留图片语义由阅读器纯文本模式替代（差异见 BookContent）。
+- `src/main/java/io/legado/app/utils/JsonExtensions.kt`：JSONPath 读取由 rust parser/rule.rs 覆盖。
+- `src/main/java/io/legado/app/utils/JsoupExtensions.kt`：jsoup 文本提取（textArray）由 rust scraper/clean_text 覆盖。
+- `src/main/java/io/legado/app/utils/LogUtils.kt`：日志由 tracing 替代。
+- `src/main/java/io/legado/app/utils/MD5Utils.kt`：md5Encode 由 util/md5.rs 覆盖；16 位变体用于缓存/图片键，rust 用完整 md5/前 15 位 hash，语义差异无功能缺口。
+- `src/main/java/io/legado/app/utils/NetworkUtils.kt`：getAbsoluteURL/getBaseUrl 由 search to_absolute 覆盖；getSubDomain 用于 cookie 域——rust 用 baseUrl 匹配（差异见 CookieStore）。
+- `src/main/java/io/legado/app/utils/SourceAnalyzer.kt`：旧格式书源转换（#→##、|→||、@Header、|charset、@POST body、searchKey→{{key}}）已由 rust book_source normalize 覆盖；等价性已用真实旧源样例验证。
+- `src/main/java/io/legado/app/utils/StringExtensions.kt`：isAbsUrl/isJson/htmlFormat/splitNotBlank 等由 rust URL 拼接/serde/正文清洗覆盖。
+- `src/main/java/io/legado/app/utils/StringUtils.kt`：日期/全半角/中文数字/字数/大小格式化由前端或无需服务端实现，无功能缺口。
+- `src/main/java/io/legado/app/utils/TextUtils.java`：isEmpty/join 由 rust/前端标准库覆盖。
+- `src/main/java/io/legado/app/utils/ThrowableExtensions.kt`：错误消息由 anyhow Display/错误处理覆盖。
+- `src/main/java/io/legado/app/utils/UTF8BOMFighter.kt`：BOM 剥离由 encoding_rs 与本地书解析覆盖。
+- `src/main/java/io/legado/app/utils/Utf8BomUtils.kt`：同 UTF8BOMFighter。
+- `src/main/java/io/legado/app/utils/XmlUtils.kt`：XML→Map 由 feed-rs/scraper 覆盖（RSS 解析）。
+- `src/main/java/io/legado/app/utils/ZipUtils.kt`：zip 压缩/解压由 zip 依赖 + export/local_book 覆盖；JS unzipFile/getZip* shim 已由 js.rs 覆盖。
+- `src/main/java/me/ag2s/epublib/Constants.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/browsersupport/NavigationEvent.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/browsersupport/NavigationEventListener.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/browsersupport/NavigationHistory.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/browsersupport/Navigator.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/browsersupport/package-info.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/Author.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/Date.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/EpubBook.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/EpubResourceProvider.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/FileResourceProvider.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/Guide.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/GuideReference.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/Identifier.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/LazyResource.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/LazyResourceProvider.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/ManifestItemProperties.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/ManifestItemRefProperties.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/ManifestProperties.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/MediaType.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/MediaTypes.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/Metadata.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/Relator.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/Resource.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/ResourceInputStream.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/ResourceReference.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/Resources.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/Spine.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/SpineReference.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/TOCReference.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/TableOfContents.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/domain/TitledResourceReference.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/epub/BookProcessor.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/epub/BookProcessorPipeline.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/epub/DOMUtil.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/epub/EpubProcessorSupport.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/epub/EpubReader.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/epub/EpubWriter.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/epub/HtmlProcessor.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/epub/NCXDocumentV2.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/epub/NCXDocumentV3.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/epub/PackageDocumentBase.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/epub/PackageDocumentMetadataReader.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/epub/PackageDocumentMetadataWriter.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/epub/PackageDocumentReader.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/epub/PackageDocumentWriter.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/epub/ResourcesLoader.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/util/CollectionUtil.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/util/IOUtil.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/util/NoCloseOutputStream.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/util/NoCloseWriter.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/util/ResourceUtil.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/util/StringUtil.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/util/commons/io/BOMInputStream.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/util/commons/io/ByteOrderMark.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/util/commons/io/IOConsumer.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/util/commons/io/ProxyInputStream.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/util/commons/io/XmlStreamReader.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/epublib/util/commons/io/XmlStreamReaderException.java`：vendored 第三方 EPUB 库：rust parse_epub/parse_opf_zip 以独立实现覆盖本应用用到的读取路径（container/OPF 元数据/spine/manifest/封面/html→文本）；该库其余写入/浏览器导航/NCX 细节无需移植；EPUB 原版式阅读缺口统一记录在 EpubFile.kt/ShadowIframe.vue。
+- `src/main/java/me/ag2s/umdlib/domain/UmdBook.java`：vendored UMD 库：rust parse_umd（service/local_book.rs）按 UmdReader 状态机语义重写并带真实样本回归测试，功能已覆盖。
+- `src/main/java/me/ag2s/umdlib/domain/UmdChapters.java`：vendored UMD 库：rust parse_umd（service/local_book.rs）按 UmdReader 状态机语义重写并带真实样本回归测试，功能已覆盖。
+- `src/main/java/me/ag2s/umdlib/domain/UmdCover.java`：vendored UMD 库：rust parse_umd（service/local_book.rs）按 UmdReader 状态机语义重写并带真实样本回归测试，功能已覆盖。
+- `src/main/java/me/ag2s/umdlib/domain/UmdEnd.java`：vendored UMD 库：rust parse_umd（service/local_book.rs）按 UmdReader 状态机语义重写并带真实样本回归测试，功能已覆盖。
+- `src/main/java/me/ag2s/umdlib/domain/UmdHeader.java`：vendored UMD 库：rust parse_umd（service/local_book.rs）按 UmdReader 状态机语义重写并带真实样本回归测试，功能已覆盖。
+- `src/main/java/me/ag2s/umdlib/tool/StreamReader.java`：vendored UMD 库：rust parse_umd（service/local_book.rs）按 UmdReader 状态机语义重写并带真实样本回归测试，功能已覆盖。
+- `src/main/java/me/ag2s/umdlib/tool/UmdUtils.java`：vendored UMD 库：rust parse_umd（service/local_book.rs）按 UmdReader 状态机语义重写并带真实样本回归测试，功能已覆盖。
+- `src/main/java/me/ag2s/umdlib/tool/WrapOutputStream.java`：vendored UMD 库：rust parse_umd（service/local_book.rs）按 UmdReader 状态机语义重写并带真实样本回归测试，功能已覆盖。
+- `src/main/java/me/ag2s/umdlib/umd/UmdReader.java`：vendored UMD 库：rust parse_umd（service/local_book.rs）按 UmdReader 状态机语义重写并带真实样本回归测试，功能已覆盖。
+- `src/main/java/org/kxml2/io/KXmlParser.java`：vendored kxml2 XML 解析器：rust 用 quick-xml / feed-rs / scraper 替代（OPF/RSS/正文解析），无需移植。
+- `src/main/java/org/kxml2/io/KXmlSerializer.java`：vendored kxml2 XML 解析器：rust 用 quick-xml / feed-rs / scraper 替代（OPF/RSS/正文解析），无需移植。
+- `src/main/java/org/kxml2/kdom/Document.java`：vendored kxml2 XML 解析器：rust 用 quick-xml / feed-rs / scraper 替代（OPF/RSS/正文解析），无需移植。
+- `src/main/java/org/kxml2/kdom/Element.java`：vendored kxml2 XML 解析器：rust 用 quick-xml / feed-rs / scraper 替代（OPF/RSS/正文解析），无需移植。
+- `src/main/java/org/kxml2/kdom/Node.java`：vendored kxml2 XML 解析器：rust 用 quick-xml / feed-rs / scraper 替代（OPF/RSS/正文解析），无需移植。
+- `src/main/java/org/kxml2/wap/Wbxml.java`：vendored kxml2 XML 解析器：rust 用 quick-xml / feed-rs / scraper 替代（OPF/RSS/正文解析），无需移植。
+- `src/main/java/org/kxml2/wap/WbxmlParser.java`：vendored kxml2 XML 解析器：rust 用 quick-xml / feed-rs / scraper 替代（OPF/RSS/正文解析），无需移植。
+- `src/main/java/org/kxml2/wap/WbxmlSerializer.java`：vendored kxml2 XML 解析器：rust 用 quick-xml / feed-rs / scraper 替代（OPF/RSS/正文解析），无需移植。
+- `src/main/java/org/kxml2/wap/syncml/SyncML.java`：vendored kxml2 XML 解析器：rust 用 quick-xml / feed-rs / scraper 替代（OPF/RSS/正文解析），无需移植。
+- `src/main/java/org/kxml2/wap/wml/Wml.java`：vendored kxml2 XML 解析器：rust 用 quick-xml / feed-rs / scraper 替代（OPF/RSS/正文解析），无需移植。
+- `src/main/java/org/kxml2/wap/wv/WV.java`：vendored kxml2 XML 解析器：rust 用 quick-xml / feed-rs / scraper 替代（OPF/RSS/正文解析），无需移植。
+- `src/main/resources/META-INF/services/org.xmlpull.v1.XmlPullParserFactory`：Spring/日志/服务注册配置由 Rust env/config + tracing 替代；bookSourceDebug 独立页由 SourceManageView 调试面板（bookSourceDebugSSE）覆盖；loading.gif 由前端加载态替代。
+- `src/main/resources/application-prod.yml`：Spring/日志/服务注册配置由 Rust env/config + tracing 替代；bookSourceDebug 独立页由 SourceManageView 调试面板（bookSourceDebugSSE）覆盖；loading.gif 由前端加载态替代。
+- `src/main/resources/application.yml`：Spring/日志/服务注册配置由 Rust env/config + tracing 替代；bookSourceDebug 独立页由 SourceManageView 调试面板（bookSourceDebugSSE）覆盖；loading.gif 由前端加载态替代。
+- `src/main/resources/banner.txt`：Spring/日志/服务注册配置由 Rust env/config + tracing 替代；bookSourceDebug 独立页由 SourceManageView 调试面板（bookSourceDebugSSE）覆盖；loading.gif 由前端加载态替代。
+- `src/main/resources/bookSourceDebug/index.css`：Spring/日志/服务注册配置由 Rust env/config + tracing 替代；bookSourceDebug 独立页由 SourceManageView 调试面板（bookSourceDebugSSE）覆盖；loading.gif 由前端加载态替代。
+- `src/main/resources/bookSourceDebug/index.html`：Spring/日志/服务注册配置由 Rust env/config + tracing 替代；bookSourceDebug 独立页由 SourceManageView 调试面板（bookSourceDebugSSE）覆盖；loading.gif 由前端加载态替代。
+- `src/main/resources/bookSourceDebug/index.js`：Spring/日志/服务注册配置由 Rust env/config + tracing 替代；bookSourceDebug 独立页由 SourceManageView 调试面板（bookSourceDebugSSE）覆盖；loading.gif 由前端加载态替代。
+- `src/main/resources/defaultData/txtTocRule.json`：legacy 内置 18 条 TXT 目录规则（含 enable 状态）已全量搬入 rust DEFAULT_TOC_RULE_DEFS：getTxtTocRules 原样展示（含禁用项），TXT 分章只取启用项（legacy TextFile.getTocRules 语义），importDefaultTxtTocRules 全量导入并保留名称/启用/排序；多规则重叠命中按最早起始贪婪保留（不越界），新增混合格式/禁用项/重叠命中回归测试。
+- `src/main/resources/dtd/openebook.org/dtds/oeb-1.2/oeb12.ent`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/openebook.org/dtds/oeb-1.2/oebpkg12.dtd`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.daisy.org/z3986/2005/ncx-2005-1.dtd`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/ruby/xhtml-ruby-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-arch-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-attribs-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-base-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-bdo-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-blkphras-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-blkpres-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-blkstruct-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-charent-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-csismap-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-datatypes-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-datatypes-1.mod.1`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-edit-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-events-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-form-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-framework-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-hypertext-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-image-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-inlphras-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-inlpres-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-inlstruct-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-inlstyle-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-lat1.ent`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-link-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-list-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-meta-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-notations-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-object-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-param-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-pres-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-qname-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-script-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-special.ent`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-ssismap-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-struct-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-style-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-symbol.ent`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-symbol.ent.1`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-table-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-text-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml11-model-1.mod`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml1/DTD/xhtml-lat1.ent`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml1/DTD/xhtml-special.ent`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml1/DTD/xhtml-symbol.ent`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/dtd/www.w3.org/TR/xhtml11/DTD/xhtml11.dtd`：vendored EPUB/XHTML DTD 集（epublib 写 EPUB 用）：rust export_book build_epub_full 程序化构造 EPUB（mimetype/container/OPF/nav/NCX/CSS），无需 DTD 文件。
+- `src/main/resources/epub/chapter.html`：EPUB 导出模板（chapter/cover/intro/main.css/fonts.css/logo）由 rust export_book.rs build_epub_full（zip/mimetype/container/OPF/nav/NCX/CSS）覆盖。
+- `src/main/resources/epub/cover.html`：EPUB 导出模板（chapter/cover/intro/main.css/fonts.css/logo）由 rust export_book.rs build_epub_full（zip/mimetype/container/OPF/nav/NCX/CSS）覆盖。
+- `src/main/resources/epub/fonts.css`：EPUB 导出模板（chapter/cover/intro/main.css/fonts.css/logo）由 rust export_book.rs build_epub_full（zip/mimetype/container/OPF/nav/NCX/CSS）覆盖。
+- `src/main/resources/epub/intro.html`：EPUB 导出模板（chapter/cover/intro/main.css/fonts.css/logo）由 rust export_book.rs build_epub_full（zip/mimetype/container/OPF/nav/NCX/CSS）覆盖。
+- `src/main/resources/epub/logo.png`：EPUB 导出模板（chapter/cover/intro/main.css/fonts.css/logo）由 rust export_book.rs build_epub_full（zip/mimetype/container/OPF/nav/NCX/CSS）覆盖。
+- `src/main/resources/epub/main.css`：EPUB 导出模板（chapter/cover/intro/main.css/fonts.css/logo）由 rust export_book.rs build_epub_full（zip/mimetype/container/OPF/nav/NCX/CSS）覆盖。
+- `src/main/resources/icons/128x128.png`：桌面/浏览器图标由 web-ui logo.png/svg + manifest.webmanifest 替代。
+- `src/main/resources/icons/16x16.png`：桌面/浏览器图标由 web-ui logo.png/svg + manifest.webmanifest 替代。
+- `src/main/resources/icons/24x24.png`：桌面/浏览器图标由 web-ui logo.png/svg + manifest.webmanifest 替代。
+- `src/main/resources/icons/32x32.png`：桌面/浏览器图标由 web-ui logo.png/svg + manifest.webmanifest 替代。
+- `src/main/resources/icons/48x48.png`：桌面/浏览器图标由 web-ui logo.png/svg + manifest.webmanifest 替代。
+- `src/main/resources/icons/64x64.png`：桌面/浏览器图标由 web-ui logo.png/svg + manifest.webmanifest 替代。
+- `src/main/resources/images/loading.gif`：Spring/日志/服务注册配置由 Rust env/config + tracing 替代；bookSourceDebug 独立页由 SourceManageView 调试面板（bookSourceDebugSSE）覆盖；loading.gif 由前端加载态替代。
+- `src/main/resources/logback-spring.xml`：Spring/日志/服务注册配置由 Rust env/config + tracing 替代；bookSourceDebug 独立页由 SourceManageView 调试面板（bookSourceDebugSSE）覆盖；loading.gif 由前端加载态替代。
+- `src/main/resources/simple-web/assets/css/layout-e22d69a977.css`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/assets/css/read-fb14170fb6.css`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/assets/font/Myuppy.ttf`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/assets/font/书体坊郭小语钢笔楷体.ttf`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/assets/font/字体管家楷体.ttf`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/assets/font/方正宋刻本秀楷简.ttf`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/assets/font/杨任东竹石体.ttf`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/assets/js/common-eebd186870.js`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/assets/js/indexPage-b028891da7.js`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/assets/js/polyfill-a72c480958.js`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/assets/js/readerPage-8f8136bb4d.js`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/assets/js/rssPage-aa80334084.js`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/assets/js/searchPage-fb00c18eb2.js`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/assets/js/template-dcac4aae98.js`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/assets/template/articleList.tmpl`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/assets/template/bookInfo.tmpl`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/assets/template/bookList.tmpl`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/assets/template/rssList.tmpl`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/assets/template/searchSourceList.tmpl`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/assets/template/sourceList.tmpl`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/index.html`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/reader.html`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/rss.html`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simple-web/search.html`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
+- `src/main/resources/simplelogger.properties`：Spring/日志/服务注册配置由 Rust env/config + tracing 替代；bookSourceDebug 独立页由 SourceManageView 调试面板（bookSourceDebugSSE）覆盖；loading.gif 由前端加载态替代。
+- `src/main/resources/web/bg/午后沙滩.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/宁静夜色.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/山水墨影.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/山水画.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/护眼漫绿.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/新羊皮纸.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/明媚倾城.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/深宫魅影.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/清新时光.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/羊皮纸1.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/羊皮纸2.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/羊皮纸3.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/羊皮纸4.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/边彩画布.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bookSourceDebug/index.css`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/bookSourceDebug/index.html`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/bookSourceDebug/index.js`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/browsertest.html`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/css/app.512ff41b.css`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/css/chunk-vendors.e2dbefc2.css`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/css/index.9347d249.css`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/css/reader.1ebd7f35.css`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/css/setting.d9b851e0.css`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/favicon.ico`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/fonts/element-icons.535877f5.woff`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/fonts/element-icons.732389de.ttf`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/fonts/iconfont.f9a3fb0e.woff`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/img/icons/android-chrome-192x192.png`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/img/icons/android-chrome-512x512.png`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/img/icons/android-chrome-maskable-192x192.png`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/img/icons/android-chrome-maskable-512x512.png`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/img/icons/apple-touch-icon-120x120.png`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/img/icons/apple-touch-icon-152x152.png`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/img/icons/apple-touch-icon-180x180.png`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/img/icons/apple-touch-icon-60x60.png`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/img/icons/apple-touch-icon-76x76.png`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/img/icons/apple-touch-icon.png`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/img/icons/favicon-16x16.png`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/img/icons/favicon-32x32.png`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/img/icons/msapplication-icon-144x144.png`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/img/icons/mstile-150x150.png`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/img/icons/safari-pinned-tab.svg`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/img/mpcode.560264c9.jpg`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/img/noCover.b5c48bc1.jpeg`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/img/noImage.7443b2ba.png`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/index.html`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/js/app.54619a3e.js`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/js/chunk-vendors.4589d111.js`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/js/dash.all.min.js`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/js/flv.min.js`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/js/hls.min.js`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/js/index.459d9e84.js`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/js/index~reader.c43437ec.js`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/js/pear-player.min.js`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/js/reader.6e871769.js`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/js/setting.6919980b.js`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/js/webtorrent.min.js`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/manifest.json`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/precache-manifest.0d903434eaa73f94acefeef5d39c6628.js`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/robots.txt`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/service-worker.js`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/main/resources/web/sw.js`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
+- `src/test/java/com/htmake/reader/ReaderApplicationTests.java`：legacy JUnit 测试由 rust tests/（单元 + 集成 + 样本回归）替代。
+- `src/test/java/io/legado/app/utils/EncoderUtilsTest.java`：legacy JUnit 测试由 rust tests/（单元 + 集成 + 样本回归）替代。
+- `vetur.config.js`：仓库元文件/工具配置由当前 .dockerignore/.gitattributes/.gitignore + Vite/TS 配置替代；.DS_Store 为 macOS 垃圾文件无需迁移。
+- `web/.browserslistrc`：浏览器目标由 Vite build.target/esbuild 配置替代。
+- `web/.eslintrc.js`：Vue2 ESLint 规则由 web-ui 项目 TS/Vue 检查（Vite 构建链）替代。
+- `web/.gitignore`：Vue2 构建产物忽略规则由 web-ui/.gitignore 替代。
+- `web/LICENSE`：沿用仓库根 LICENSE（MIT），无需迁移。
+- `web/README.md`：Vue2 使用说明由仓库 README.md/docs/FRONTEND.md 替代。
+- `web/babel.config.js`：Vue2 Babel 配置由 Vite + esbuild/TS 替代。
+- `web/jsconfig.json`：JS 工程配置由 web-ui/tsconfig.json + env.d.ts 替代。
+- `web/package-lock.json`：同 package.json，由 web-ui/package-lock.json 替代。
+- `web/package.json`：Vue2/Element UI/vue-cli 依赖清单由 web-ui/package.json（Vue3/Vite/Element Plus/TypeScript）替代。
+- `web/postcss.config.js`：autoprefixer 由 Vite 内置 CSS 处理替代。
+- `web/public/bg/午后沙滩.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/宁静夜色.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/山水墨影.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/山水画.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/护眼漫绿.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/新羊皮纸.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/明媚倾城.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/深宫魅影.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/清新时光.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/羊皮纸1.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/羊皮纸2.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/羊皮纸3.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/羊皮纸4.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/边彩画布.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bookSourceDebug/index.css`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/bookSourceDebug/index.html`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/bookSourceDebug/index.js`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/browsertest.html`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/favicon.ico`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/img/icons/android-chrome-192x192.png`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/img/icons/android-chrome-512x512.png`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/img/icons/android-chrome-maskable-192x192.png`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/img/icons/android-chrome-maskable-512x512.png`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/img/icons/apple-touch-icon-120x120.png`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/img/icons/apple-touch-icon-152x152.png`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/img/icons/apple-touch-icon-180x180.png`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/img/icons/apple-touch-icon-60x60.png`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/img/icons/apple-touch-icon-76x76.png`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/img/icons/apple-touch-icon.png`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/img/icons/favicon-16x16.png`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/img/icons/favicon-32x32.png`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/img/icons/msapplication-icon-144x144.png`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/img/icons/mstile-150x150.png`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/img/icons/safari-pinned-tab.svg`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/index.html`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/manifest.json`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/robots.txt`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/public/sw.js`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
+- `web/src/App.vue`：legacy 全局弹窗容器（登录/JSON 编辑器/书源/书籍管理/书签/RSS/听书/文件/备份/用户/分组/封面/章内搜索）由独立视图入口替代：LoginView、SourceManageView、BookshelfView、BookDetailView、ReaderView、RssView、SettingsView、FileManageView、UserManageView、SearchView；CodeJar JSON 编辑器由 SourceManageView 书源编辑/设置编辑器替代；saveUserConfig/restoreUserConfig 由 SettingsView 配置备份覆盖；MPCode 公众号二维码弹窗无对应（宣传性功能，可不迁移）。
+- `web/src/assets/fonts/iconfont.css`：图标字体由 Element Plus 图标/文本按钮替代（当前 UI 风格不使用自定义 iconfont）。
+- `web/src/assets/fonts/iconfont.woff`：同 iconfont.css。
+- `web/src/assets/fonts/reader-iconfont.ttf`：同 iconfont.css。
+- `web/src/assets/fonts/reader-iconfont.woff`：同 iconfont.css。
+- `web/src/assets/fonts/reader-iconfont.woff2`：同 iconfont.css。
+- `web/src/assets/imgs/github.png`：GitHub 链接图由 SettingsView/About 文本链接替代，静态资源无需迁移。
+- `web/src/assets/imgs/github2.png`：同 github.png。
+- `web/src/assets/imgs/mpcode.jpg`：公众号二维码（MPCode 弹窗）为宣传性资源，按用户要求不迁移（与 MPCode.vue 记录一致）。
+- `web/src/assets/imgs/noCover.jpeg`：无封面兜底由 BookshelfView/BookDetailView 封面 fallback（首字/默认图）替代。
+- `web/src/assets/imgs/noImage.png`：同 noCover.jpeg（正文图失败由 ReaderView img onerror/占位替代）。
+- `web/src/assets/imgs/themes/body_0.png`：阅读器内置主题纹理图由 CSS 纸纹/纯色/自定义背景图替代（ReaderView/SettingsView）。
+- `web/src/assets/imgs/themes/body_1.png`：阅读器内置主题纹理图由 CSS 纸纹/纯色/自定义背景图替代（ReaderView/SettingsView）。
+- `web/src/assets/imgs/themes/body_2.png`：阅读器内置主题纹理图由 CSS 纸纹/纯色/自定义背景图替代（ReaderView/SettingsView）。
+- `web/src/assets/imgs/themes/body_3.png`：阅读器内置主题纹理图由 CSS 纸纹/纯色/自定义背景图替代（ReaderView/SettingsView）。
+- `web/src/assets/imgs/themes/body_5.png`：阅读器内置主题纹理图由 CSS 纸纹/纯色/自定义背景图替代（ReaderView/SettingsView）。
+- `web/src/assets/imgs/themes/body_6.png`：阅读器内置主题纹理图由 CSS 纸纹/纯色/自定义背景图替代（ReaderView/SettingsView）。
+- `web/src/assets/imgs/themes/content_0.png`：阅读器内置主题纹理图由 CSS 纸纹/纯色/自定义背景图替代（ReaderView/SettingsView）。
+- `web/src/assets/imgs/themes/content_1.png`：阅读器内置主题纹理图由 CSS 纸纹/纯色/自定义背景图替代（ReaderView/SettingsView）。
+- `web/src/assets/imgs/themes/content_2.png`：阅读器内置主题纹理图由 CSS 纸纹/纯色/自定义背景图替代（ReaderView/SettingsView）。
+- `web/src/assets/imgs/themes/content_3.png`：阅读器内置主题纹理图由 CSS 纸纹/纯色/自定义背景图替代（ReaderView/SettingsView）。
+- `web/src/assets/imgs/themes/content_5.png`：阅读器内置主题纹理图由 CSS 纸纹/纯色/自定义背景图替代（ReaderView/SettingsView）。
+- `web/src/assets/imgs/themes/content_6.png`：阅读器内置主题纹理图由 CSS 纸纹/纯色/自定义背景图替代（ReaderView/SettingsView）。
+- `web/src/assets/imgs/themes/popup_0.png`：阅读器内置主题纹理图由 CSS 纸纹/纯色/自定义背景图替代（ReaderView/SettingsView）。
+- `web/src/assets/imgs/themes/popup_1.png`：阅读器内置主题纹理图由 CSS 纸纹/纯色/自定义背景图替代（ReaderView/SettingsView）。
+- `web/src/assets/imgs/themes/popup_2.png`：阅读器内置主题纹理图由 CSS 纸纹/纯色/自定义背景图替代（ReaderView/SettingsView）。
+- `web/src/assets/imgs/themes/popup_3.png`：阅读器内置主题纹理图由 CSS 纸纹/纯色/自定义背景图替代（ReaderView/SettingsView）。
+- `web/src/assets/imgs/themes/popup_5.png`：阅读器内置主题纹理图由 CSS 纸纹/纯色/自定义背景图替代（ReaderView/SettingsView）。
+- `web/src/assets/imgs/themes/popup_6.png`：阅读器内置主题纹理图由 CSS 纸纹/纯色/自定义背景图替代（ReaderView/SettingsView）。
+- `web/src/assets/logo.png`：品牌标识由 LogoMark 组件替代。
+- `web/src/components/AddUser.vue`：新增/修改用户（用户名/密码/书籍上限/书源上限/WebDAV/书仓/编辑书源/编辑RSS）由 UserManageView 新增/编辑弹窗覆盖，且增加 isAdmin 管理员开关；默认权限按需求全开 80000/5000，UI 为极简表单 + 权限开关，风格符合。
+- `web/src/components/BookConfig.vue`：legacy PDF 图片宽度设置（pdfImageWidth 750-1600px）未迁移；rust PDF 导入按页提取文本成章（lopdf 文本抽取），不以图片渲染 PDF，因此该设置不适用；批次 4.4 确认 PDF 页面图片模式按项目纯文本风格不迁移。
+- `web/src/components/BookCover.vue`：换封面能力由 BookDetailView 自定义封面上传（GAP 19，saveBook customCoverUrl）覆盖；差异按产品语义保留：换封面走自定义封面上传，换源弹层负责书源切换。
+- `web/src/components/BookGroup.vue`：分组管理（新建/重命名/删除/拖拽排序/内置全部·本地·音频·未分组）由 BookshelfView 分组管理弹窗 + 分组栏 + 拖拽排序覆盖；v5.2.0 已支持多分组（groupIds + add/remove/set 批量接口）、分组封面与 show 显隐开关。
+- `web/src/components/BookInfo.vue`：详情（封面/书名/标签/作者/来源/最新章节/错误/简介/加入书架/移出/换封面/编辑元数据/本地书重扫）由 BookDetailView + BookshelfView 覆盖；batch5.3 已补「追更」canUpdate 开关 UI（后端 F-35 更新任务）；v5.2.0 已支持多分组（book_group_multi 批量接口 + 书架上下文菜单/多选移动分组）；BookConfig pdfImageWidth 按项目纯文本 PDF 风格确认不迁移。
+- `web/src/components/BookManage.vue`：书架管理能力拆分覆盖：搜索/排序/筛选在 BookshelfView；单书缓存（服务器/本机、单章/至末尾/全本/范围）在 ChapterCacheDialog（BookDetailView/ReaderView 入口）；批量删除/移组在 BookshelfView 多选；导出在 BookDetailView/BookshelfView；批量/单书缓存由 ChapterCacheDialog（服务器/本机、范围/全本）覆盖。
+- `web/src/components/BookShelf.vue`：阅读页内书架弹层（切换阅读书/刷新）被独立 BookshelfView 路由替代；最近阅读排序、进度角标、跨书书签均在书架页实现；无「阅读中快速切书」弹层入口，功能可通过返回书架页完成。
+- `web/src/components/BookSource.vue`：阅读页换源弹层（可用书源/加载更多/分组筛选/搜索）由 BookDetailView 换源弹层覆盖（getAvailableBookSource + searchBookSourceSSE 流式 + 降级 searchBookSource）；差异：legacy setBookSource 可把 bookUrl 换为新源 URL，rust 保持 bookUrl 主键不变仅切 origin/originName/tocUrl；batch5.3 阅读页新增「详情」按钮进入详情页换源/缓存/编辑。
+- `web/src/components/Bookmark.vue`：书签管理（搜索/排序/分页/批量删除/导入 JSON/编辑/跳转）由 ReaderView 书签弹层 + BookshelfView 跨书书签列表覆盖；v5.2.0 已补 Bookmark 全字段 + 批量删除/JSON 导入/编辑入口（ReaderView + BookshelfView 书签弹层）。
+- `web/src/components/BookmarkForm.vue`：书签新增/删除/跳转由 ReaderView + BookshelfView（跨书书签）覆盖；v5.2.0 已补 Bookmark 全字段编辑（标题/备注/段落文本），ReaderView/BookshelfView 书签弹层均可编辑。
+- `web/src/components/Content.vue`：正文渲染能力对照：段落/卷标题/正文图片/图片全屏由 ReaderView 覆盖；音频（播放/暂停/进度/上下章/自动连播/hls.js）与视频、漫画逐页、文件下载已覆盖；音频侧 TTS 面板提供音量/语速/风格控件，原生 media 播放器保留播放/暂停/进度；legacy 视频 DPlayer 弹幕/字幕 JSON 与 EPUB iframe/shadow DOM 原版式按项目纯文本与安全收紧风格确认不迁移；legacy 连续滚动一次渲染多章，rust 单章加载；自定义字体上传由 SettingsView + readerFont.ts 覆盖。
+- `web/src/components/Explore.vue`：书海探索（书源分组/探索分类解析/分页加载更多/滚动位置保留）由 ExploreView 覆盖（getExploreSources/getExploreUrls/exploreBook + 分类分页 + 我的探索收藏），UI 为极简列表风格；legacy 客户端解析 exploreUrl 的 JS/JSON 逻辑已移到后端 getExploreUrls（批次 2 确认 parse_explore_entries）。
+- `web/src/components/FileManager.vue`：文件管理（list/get/download/upload/mkdir/rename/delete/deleteMulti/批量移动/预览）由 FileManageView + files.rs 覆盖；本批补「还原备份」（restoreFromZip 上传 zip + overwrite 开关）与「导入书架」（选中书籍文件下载→uploadLocalBook）入口；备份/下载备份在 SettingsView 数据备份区块；v5.2.0 已将文本/JSON 文件预览改为可编辑保存（file/get + saveFile）、新增 `/reader3/file/rename`（文件/目录通用，替换旧读旧写新删旧组合）、secure 模式书仓写/删管理密码弹窗（secureKey 自动重试）；legacy 目录级递归解析按 BookshelfView 多文件导入路径确认不迁移（记录）。
+- `web/src/components/HttpTTS.vue`：HttpTTS 管理（列表/新增/编辑/删除/批量删除/JSON 导入）由 SettingsView 听书设置覆盖（getHttpTTSList/saveHttpTTS/deleteHttpTTS + localStorage 降级）；v5.2.0 已补 contentType/concurrentRate/loginUrl/loginUi/header/jsLib/enabledCookieJar/loginCheckJs 编辑、批量删除与 JSON 导入。
+- `web/src/components/MPCode.vue`：公众号二维码弹窗为宣传性功能，rust 版不迁移（与 App.vue 记录一致），无功能缺口。
+- `web/src/components/PopCatalog.vue`：阅读器目录弹层（当前章高亮/跳转/刷新）由 ReaderView 目录抽屉覆盖，另有卷折叠、章节字数、简繁转换；v5.2.0 已实现目录搜索、倒序/顺序、本机缓存章节标记；TXT 目录规则整体管理在 ReplaceRuleView，EPUB spine 顺序已作目录，逐书规则选择按项目全局规则风格确认不迁移（记录）。
+- `web/src/components/ReadSettings.vue`：阅读设置主体已覆盖：主题（含自动/跟随系统）、字号/行距/段距/字重/字体/字距/缩进/对齐/纸纹、滚动/上下/左右/仿真四种翻页、自动阅读、划词操作（复制/搜索/朗读）、阅读背景（纯色/纸纹/图片上传）在 SettingsView、简繁在全局；v5.2.0 已补自定义字体上传、readWidth、animateMSTime、chapterRequestTimeout、点击区域、quickKey 自定义快捷键；自定义配色与 epubMode 原版式按纯文本阅读风格确认不迁移。
+- `web/src/components/RemoteBookSourceSub.vue`：远程书源订阅（新增/修改/批量删除/同步）由 SourceManageView 订阅源区块覆盖（getSourceSubs/saveSourceSub/refreshSourceSub/deleteSourceSub(s) + localStorage 降级）；legacy 存 remoteBookSourceSub.json 文件，rust 改为服务端订阅表+批量导入书源，语义更强；订阅无禁用语义，删除即停止自动刷新；batch5.3 已补批量勾选删除。
+- `web/src/components/ReplaceRule.vue`：替换规则管理（列表/启停/编辑/批量删除/JSON 导入导出/正则测试）由 ReplaceRuleView 覆盖（CRUD + TXT 目录规则 tab）；batch5.3 已补批量删除与 JSON 导入导出；ReplaceRule 实体字段缺口（scope/pattern/replacement/isRegex/超时等）已记录，当前表单字段为简化版。
+- `web/src/components/ReplaceRuleForm.vue`：替换规则编辑表单（名称/规则/替换为/范围/正则开关/启用）由 ReplaceRuleView 编辑器覆盖（含测试与唯一性校验）；字段集与 ReplaceRule 实体缺口一致，UI 为极简表单弹窗，风格符合。
+- `web/src/components/RssArticle.vue`：文章详情（标题/正文/图片/视频，v-html）由 RssView 阅读区覆盖（sanitizeHtml 安全净化 + 图文排版）；v5.2.0 已实现文章内图片点击全屏预览；legacy 会执行文章内 script（安全风险），rust 用 sanitize 净化是安全收紧，不应迁移。
+- `web/src/components/RssArticleList.vue`：订阅源文章列表（标题/日期/配图/加载更多/点文章取正文）由 RssView 右栏覆盖（getRssArticles 分页 + 未读/已读 + 标题过滤 + getRssArticle 阅读）；v5.2.0 已实现 sortUrl 多段分类 tab 逐类加载、列表配图与图片全屏预览。
+- `web/src/components/RssSourceList.vue`：RSS 订阅源管理（列表/图标/新增/编辑/删除/JSON 导入）由 RssView 覆盖（分组胶囊/分类 tab/分页/刷新全部）；batch5.3 已补编辑弹窗（sortUrl/sourceIcon/ruleArticles/ruleTitle/ruleContent/enableJs/enabled）、JSON 批量导入、sourceIcon 展示；RSS 自定义规则解析由 rust RssParserByRule 覆盖。
+- `web/src/components/SearchBookContent.vue`：全书/章节内容搜索由 BookDetailView 搜索弹层 + BookshelfView 全书搜索（逐本地书并发聚合）覆盖；差异：legacy 有 lastIndex 分页加载更多与“跳转上次位置”，rust 改为一次返回全部章节命中并点击跳章，语义等价但无分页。
+- `web/src/components/ShadowIframe.vue`：EPUB shadow DOM/iframe 渲染（原样 HTML、图片/链接重写、简繁转换、锚点/图片预览）按项目纯文本阅读风格确认不迁移：rust 本地 EPUB 导入时经 html_to_text 转纯文本，ReaderView 以文本章渲染；需求记录为后续可选增强。
+- `web/src/components/UserManage.vue`：用户管理（搜索/列表/WebDAV·书仓开关/修改/重置密码/新增）由 UserManageView 覆盖，另加管理员 isAdmin、书源/RSS 权限与上限；本批补齐表格多选/全选（自己不可选）、批量删除（deleteUsers）、清理不活跃用户（clearInactiveUsers，输入天数默认 31）、注册时间列；入口由 TopNav showUsersLink + isAdmin 门控展示；差异：legacy 的将用户书源设为默认（setAsDefaultBookSources 按 username）与「使用默认书源」语义不同未迁移；无分页与列排序。
+- `web/src/main.js`：Vue2 入口（Vuex/localforage/VueLazyload/错误收集）由 Vue3 main.ts + Pinia + v-lazy 指令 + ErrorBoundary 覆盖。
+- `web/src/plugins/animate.js`：rAF 动画时序工具由浏览器原生 CSS transition / scrollIntoView smooth 替代（ReaderView/BookshelfView），无独立动画工具需求。
+- `web/src/plugins/axios.js`：请求封装由 web-ui api/request.ts 覆盖（accessToken 自动携带、NEED_LOGIN 跳登录、silent 模式）；NEED_SECURE_KEY 改为 UserManageView 引导输入；失效书源错误归类由后端检测 + SourceManageView 展示替代。
+- `web/src/plugins/cache.js`：localStorage 读写由原生 localStorage/readerLocalCache/IndexedDB 替代。
+- `web/src/plugins/chinese.js`：简繁转换已完整移植到 web-ui/src/utils/chinese.ts（词级 + 台湾用语/日文汉字/异体字字典）。
+- `web/src/plugins/config.js`：阅读配置/主题/字体/书架/搜索配置由 utils/readerConfig.ts、readerTheme.ts、readerBg.ts、uiTheme.ts + SettingsView/ReaderView 覆盖；legacy quickKey/selectionAction/epubMode 等以对应行为实现（键盘翻页/划词操作/仿真翻页），字段名与取值集简化但功能等价。
+- `web/src/plugins/element.js`：Element UI 组件库由 Element Plus 替代（main.ts 全局注册）。
+- `web/src/plugins/eventBus.js`：Vue2 事件总线由 Pinia/组件状态/路由参数替代。
+- `web/src/plugins/helper.js`：LimitRequest/网络优先/缓存优先请求由后端可达探测 backendFlag + 服务器缓存 + readerLocalCache 覆盖；v5.2.0 已实现书架离线缓存（localStorage 降级展示 + 重试）。
+- `web/src/plugins/jump.js`：rAF 动画滚动由浏览器原生 smooth scroll（ReaderView scrollTo behavior:smooth）替代。
+- `web/src/plugins/md5.js`：仅用于 Reader.vue 正文缓存键；rust readerLocalCache 用 bookUrl+chapterUrl 键，无前端 md5 需求。
+- `web/src/plugins/safe-json-stringify.js`：错误收集序列化由 Vue errorHandler/ErrorBoundary 控制台记录替代。
+- `web/src/plugins/ttsVoices.js`：Edge TTS 语音库由后端 getTTSVoices + api/tts.ts + ReaderView 语音列表覆盖。
+- `web/src/plugins/ttsWhitespace.js`：空白/不可见字符剥离由 ReaderView 段落切分与 TTS 文本处理覆盖（实现简化，语义等价）。
+- `web/src/plugins/vuex.js`：Vuex 全局状态由 Pinia user store + 组件局部状态 + localStorage/IndexedDB 替代；最近阅读按服务端 durChapterTime 排序；管理模式/secureKey/用户列表由 UserManageView + defaultConfigMode 覆盖。
+- `web/src/registerServiceWorker.js`：PWA 注册由 main.ts + sw.js（ES Module）覆盖。
+- `web/src/router/index.js`：两个页面路由由 Vue Router 多视图路由替代（/login / /book/:url /reader/:bookUrl /search /explore /sources /rules /rss /settings /files /store /users /server-stats /404）。
+- `web/src/views/Index.vue`：主入口与全部页面能力已拆分核对：书架/分组/导入本地书/书仓/书签/替换规则/缓存管理由 BookshelfView、BookDetailView、FileManageView、SettingsView 覆盖；书源管理/导入导出/失效检测/调试/订阅/Cookie 由 SourceManageView 覆盖；搜索/精确匹配由 SearchView + api/search.ts 覆盖；用户空间/管理模式/WebDAV/数据目录/备份还原由 UserManageView、SettingsView、FileManageView 覆盖（restoreFromZip 已接文件页还原备份入口）；本地缓存统计/清理由 getCacheInfo/clearCache + SettingsView 缓存管理覆盖；v5.2.0 已补「精确搜书」链接打开（SearchView）、图片代理开关（SettingsView + proxyImageUrl）、SW 强制更新（updateForce + SKIP_WAITING 自动接管刷新）。
+- `web/src/views/Reader.vue`：阅读器编排逐行核对：顶部/底部导航、目录抽屉、章节搜索、书签新增/列表/跳转、章内搜索、缓存章节、自动阅读、TTS、主题/字号/简繁/亮度、WakeLock、进度条、图片预览、音频/视频/漫画/文件、返回书架均由 ReaderView 覆盖；ChapterCacheDialog 替代 legacy 后续 50/100 章/全部缓存且支持服务器/本机双向与范围缓存；划词支持复制/搜索/朗读；v5.2.0 已补正文编辑并保存（saveBookContent 服务器+本机）、点击区域（左上上一页/右下下一页/中间菜单）、目录搜索/倒序/缓存标记、自定义字体、书签编辑/批量/导入、详情入口、quickKey 自定义快捷键、readWidth/animateMSTime/chapterRequestTimeout；浏览器 speechSynthesis 本地 TTS 由后端 Edge/HttpTTS 替代，epubMode 原版式按纯文本阅读风格确认不迁移。
+- `web/vue.config.js`：vue-cli 构建/PWA/workbox 配置由 web-ui/vite.config.ts + public/sw.js 替代；书源/书架/正文 API 的 workbox 运行时缓存改为后端服务器缓存 + readerLocalCache/IndexedDB 双向缓存，语义更强。
+
+## 阻塞项
+
+_暂无。_

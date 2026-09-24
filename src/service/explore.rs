@@ -1,0 +1,906 @@
+//! 发现/探索（ruleExplore）：exploreUrl 集合 + 书单解析
+//!
+//! 对齐 legacy WebBook.exploreBook：URL 列表 → 抓取 → ruleExplore 字段 → SearchBook
+
+use anyhow::Result;
+
+use crate::model::BookSource;
+use crate::service::crawler;
+use crate::service::search::SearchBook;
+
+/// 探索条目（title + url）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ExploreEntry {
+    pub title: String,
+    pub url: String,
+    /// book=书单分类（探索加载）/ link=外部链接（点击打开）
+    #[serde(default)]
+    pub r#type: String,
+}
+
+/// 判断分类类型：外部链接（群/导入/渠道/发布等）vs 书单
+fn entry_type(title: &str, url: &str) -> String {
+    let t = title.to_lowercase();
+    let keywords = [
+        "导入",
+        "群",
+        "发布",
+        "渠道",
+        "交流",
+        "关注",
+        "频道",
+        "公众号",
+    ];
+    // 「更新」不在列——漫画站「最近更新」是真实书单分类（实测误判 link 会被前端当外链打开）
+    if keywords.iter().any(|k| t.contains(k)) {
+        return "link".to_string();
+    }
+    let domains = [
+        "qm.qq.com",
+        "bilibili.com",
+        "mp.weixin.qq.com",
+        "shuyuan-api",
+        "yckceo.com",
+        "t.me",
+    ];
+    if domains.iter().any(|d| url.contains(d)) {
+        return "link".to_string();
+    }
+    "book".to_string()
+}
+
+/// 离线探索分类计数（getExploreSources 用——列表页对每个源计数，**不执行 JS**）：
+/// `@js:` 型 exploreUrl 的求值含 java.ajax 网络调用，数百源累计会拖垮列表接口
+/// （实测 431 源场景前端 15s 超时——"书源加载失败"）。真实分类在用户点进该源时
+/// 由 getExploreUrls 执行 JS 获得，此处：
+/// - JSON 数组 → 条目数
+/// - `@js:`/`js:`/`<js>` → 1（标记"有探索"）
+/// - 多行格式 → 非空非注释行数
+pub fn count_explore_entries_offline(explore_url: &str) -> usize {
+    let trimmed = explore_url.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+    if trimmed.starts_with('[') {
+        if let Ok(serde_json::Value::Array(list)) =
+            serde_json::from_str::<serde_json::Value>(trimmed)
+        {
+            return list
+                .iter()
+                .filter(|i| {
+                    i.get("url").and_then(|u| u.as_str()).map(|u| !u.is_empty()).unwrap_or(false)
+                })
+                .count();
+        }
+        return 0;
+    }
+    let low = trimmed.to_ascii_lowercase();
+    if low.starts_with("@js:") || low.starts_with("js:") || trimmed.contains("<js>") {
+        return 1;
+    }
+    trimmed
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .count()
+}
+
+/// 解析 exploreUrl（legado 语义）：
+/// - JSON 数组（[{"title","url"},...]，真实书源常见形态——导入时规范为紧凑 JSON 字符串）
+/// - `@js:代码`：执行 JS（返回 JSON.stringify([{title,url},...])）→ 解析条目
+/// - 整段 `<js>...</js>` 脚本（漫画站探索：脚本内构建 [{title,url,style}] 数组，
+///   常以 `{{source.getBookSourceUrl()}}` 模板引用书源 URL——模板经 bridge 展开）
+/// - 普通多行 URL：每行一个条目（title 从 URL 尾部提取）
+pub fn parse_explore_entries(explore_url: &str) -> Vec<ExploreEntry> {
+    parse_explore_entries_impl(explore_url, None)
+}
+
+/// [`parse_explore_entries`] 带书源版本：`@js:`/`<js>` 脚本经真实书源 bridge 执行——
+/// `source.getBookSourceUrl()` 等书源引用才能拿到真实值（默认空 bridge 下为空串）
+pub fn parse_explore_entries_for_source(
+    explore_url: &str,
+    source: &crate::model::BookSource,
+    ns: &str,
+) -> Vec<ExploreEntry> {
+    let bridge = crate::parser::js::JsBridge::from_source(source, ns);
+    parse_explore_entries_impl(explore_url, Some(&bridge))
+}
+
+/// 模板展开：`{{表达式}}` → 经 bridge 求值（`source.*`/JS 表达式；失败 → 空串）。
+/// 仅识别 `{{` 双花括号（脚本内单花括号 style 对象不受影响）
+fn expand_braced_templates(code: &str, bridge: Option<&crate::parser::js::JsBridge>) -> String {
+    if !code.contains("{{") {
+        return code.to_string();
+    }
+    let mut result = code.to_string();
+    loop {
+        let Some(start) = result.find("{{") else { break };
+        let Some(end_rel) = result[start + 2..].find("}}") else {
+            break;
+        };
+        let end = start + 2 + end_rel;
+        let inner = result[start + 2..end].trim();
+        let replacement = match bridge {
+            Some(b) => crate::parser::js::eval_js_with_bridge(inner, &Default::default(), b)
+                .unwrap_or_default(),
+            None => crate::parser::js::eval_js(inner, &Default::default()).unwrap_or_default(),
+        };
+        result.replace_range(start..=end + 1, &replacement);
+    }
+    result
+}
+
+fn parse_explore_entries_impl(
+    explore_url: &str,
+    bridge: Option<&crate::parser::js::JsBridge>,
+) -> Vec<ExploreEntry> {
+    let mut entries = Vec::new();
+    let trimmed = explore_url.trim();
+    // 整段 JSON 数组：直接结构化解析（失败/全空落回逐行）
+    if trimmed.starts_with('[') {
+        if let Ok(serde_json::Value::Array(list)) =
+            serde_json::from_str::<serde_json::Value>(trimmed)
+        {
+            for item in list {
+                let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                if !url.is_empty() {
+                    entries.push(ExploreEntry {
+                        title: title.to_string(),
+                        url: url.to_string(),
+                        r#type: entry_type(title, url),
+                    });
+                }
+            }
+            if !entries.is_empty() {
+                return entries;
+            }
+        }
+    }
+    // 整段 `<js>...</js>` 脚本（legado jsRule 形态——脚本自建 [{title,url}] 数组；
+    // 实测漫画站探索：未支持时整段脚本被当作条目 URL，探索必报「目标 URL 非法」）
+    if trimmed.starts_with("<js>") && trimmed.ends_with("</js>") {
+        // 注意 </js> 为 5 字节（<js> 为 4）——用 strip 组合避免差一刀截断
+        let inner = trimmed
+            .strip_prefix("<js>")
+            .and_then(|s| s.strip_suffix("</js>"))
+            .unwrap_or(trimmed);
+        let code = expand_braced_templates(inner, bridge);
+        let vars: std::collections::HashMap<String, String> = Default::default();
+        let evaluated = match bridge {
+            Some(b) => crate::parser::js::eval_js_json_with_bridge(&code, &vars, b),
+            None => crate::parser::js::eval_js_json_with_bridge(
+                &code,
+                &vars,
+                &crate::parser::js::JsBridge::default(),
+            ),
+        };
+        if let Ok(serde_json::Value::Array(items)) = evaluated {
+            for item in items {
+                let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                if !url.is_empty() {
+                    entries.push(ExploreEntry {
+                        title: title.to_string(),
+                        url: url.to_string(),
+                        r#type: entry_type(title, url),
+                    });
+                }
+            }
+            if !entries.is_empty() {
+                return entries;
+            }
+        }
+        // 脚本失败 → 落回逐行（保持旧行为可见性）
+    }
+    let lines: Vec<&str> = explore_url.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i].trim();
+        if line.is_empty() || line.starts_with('#') {
+            i += 1;
+            continue;
+        }
+        // @js: 格式：同行（@js:代码）或独立行（@js: 后所有行为代码——legado 常见）
+        if line == "@js:" || line.starts_with("@js:") {
+            let code = if line == "@js:" {
+                // 独立行：后续所有行拼接为代码
+                let rest = &lines[i + 1..];
+                i = lines.len();
+                rest.join(
+                    "
+",
+                )
+            } else {
+                i += 1;
+                line[4..].to_string()
+            };
+            // eval 直接取结构化结果（数组/对象递归 JSON 转换——避免 ToString 的
+            // "[object Object]" 导致条目解析为空；JSON.stringify 字符串出口自动解析）
+            let evaluated = match bridge {
+                Some(b) => crate::parser::js::eval_js_json_with_bridge(&code, &Default::default(), b),
+                None => crate::parser::js::eval_js_json_with_bridge(
+                    &code,
+                    &Default::default(),
+                    &crate::parser::js::JsBridge::default(),
+                ),
+            };
+            if let Ok(list) = evaluated {
+                if let serde_json::Value::Array(items) = list {
+                    for item in items {
+                        let title = item
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let url = item
+                            .get("url")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if !url.is_empty() {
+                            entries.push(ExploreEntry {
+                                title: title.clone(),
+                                url: url.clone(),
+                                r#type: entry_type(&title, &url),
+                            });
+                        }
+                    }
+                    i = lines.len();
+                    continue;
+                }
+            }
+            continue;
+        }
+        // JSON 数组格式：[{"title":"...","url":"..."}, ...]（inline 或跨行）
+        if line.starts_with('[') || line.starts_with('{') {
+            // 收集到匹配的 ]（多行 JSON）
+            let mut json_str = line.to_string();
+            let mut j = i + 1;
+            while !json_str.trim_end().ends_with(']') && j < lines.len() {
+                json_str.push('\n');
+                json_str.push_str(lines[j]);
+                j += 1;
+            }
+            i = j;
+            if let Ok(list) = serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
+                for item in list {
+                    let title = item
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let url = item
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if !url.is_empty() {
+                        entries.push(ExploreEntry {
+                            title: title.clone(),
+                            url: url.clone(),
+                            r#type: entry_type(&title, &url),
+                        });
+                    }
+                }
+                continue;
+            }
+            continue;
+        }
+        // "标题::URL" 格式（legado 常见）
+        if let Some((title, url)) = line.split_once("::") {
+            let title = title.trim().to_string();
+            let url = url.trim().to_string();
+            if !url.is_empty() {
+                entries.push(ExploreEntry {
+                    title: title.clone(),
+                    url: url.clone(),
+                    r#type: entry_type(&title, &url),
+                });
+            }
+            // 空 url = 分组标题行（"❀男生频道❀::"）——纯展示装饰，跳过；
+            // 此前落穿到「普通 URL 行」把整行（含 ::）当可点条目，点击即报
+            // 「目标 URL 非法: relative URL without a base」（JSON 数组分支本就过滤）
+            i += 1;
+            continue;
+        }
+        // 普通 URL 行：title 从尾部提取
+        let title = url_title(line);
+        entries.push(ExploreEntry {
+            title: title.clone(),
+            url: line.to_string(),
+            r#type: entry_type(&title, line),
+        });
+        i += 1;
+    }
+    entries
+}
+
+/// 从 URL 提取分类名（尾部路径段/查询参数，解码）
+fn url_title(url: &str) -> String {
+    let cleaned = url.split(['?', '&', '#']).next().unwrap_or(url);
+    let seg = cleaned
+        .trim_end_matches('/')
+        .rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or(cleaned);
+    let decoded = percent_decode(seg);
+    if !decoded.is_empty() && decoded != "/" {
+        return decoded;
+    }
+    // 查询参数 name/type/id
+    for param in ["name", "type", "id"] {
+        for pair in url.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                if k == param && !v.is_empty() {
+                    return percent_decode(v);
+                }
+            }
+        }
+    }
+    url.to_string()
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// 构造分页探索 URL（GAP #51：服务端解析书源规则分页变量 {{page}}/{page}）
+pub fn build_explore_url(url: &str, page: i64) -> String {
+    url.replace("{{page}}", &page.to_string())
+        .replace("{page}", &page.to_string())
+}
+
+/// 单页发现：抓取 + 解析（复用搜索的 SearchRule 语义）
+///
+/// GAP #51：page 参数由服务端替换书源分页变量（{{page}}/{page}，URL 与 POST body）
+pub async fn explore_url(
+    ns: &str,
+    url: &str,
+    page: i64,
+    source: &BookSource,
+) -> Result<Vec<SearchBook>> {
+    // URL 模板（{{page}}/{page}）→ 页码
+    let url = build_explore_url(url, page);
+    // 相对 URL 拼书源 baseUrl
+    let raw_url = if url.starts_with('/') && !url.starts_with("//") {
+        let base = source
+            .book_source_url
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim_end_matches('/');
+        format!("{base}{url}")
+    } else {
+        url.to_string()
+    };
+    // URL 后缀（,{...}：charset/method/body——对齐搜索链路）
+    let (final_url, suffix) = crate::service::search::split_url_suffix(&raw_url);
+    let mut headers = source
+        .header
+        .as_deref()
+        .map(crawler::parse_header)
+        .unwrap_or_default();
+    if let Some(extra) = &suffix.headers {
+        for (k, v) in extra {
+            headers.insert(k.clone(), v.clone());
+        }
+    }
+    // legado concurrentRate：发现请求前限速（A2 共享滑窗/间隔）
+    crate::service::search::concurrent_rate_acquire(ns, source).await;
+    let post_body = suffix.body.as_ref().map(|b| build_explore_url(b, page));
+    // 书源抓取（自动带书源 cookie——按用户命名空间）
+    let method = suffix.method.as_deref().unwrap_or("GET");
+    // A1 webView：探索 URL option webView=true 时经浏览器渲染（失败回退 HTTP）
+    let resp = if suffix.web_view == Some(true) {
+        match crate::service::browser::solve_cf_challenge(
+            ns,
+            &final_url,
+            &[],
+            15_000,
+            source.proxy_url.as_deref(),
+        )
+        .await
+        {
+            Ok(sol) => Ok(crawler::FetchResponse {
+                body: sol.html,
+                url: final_url.clone(),
+                headers: Vec::new(),
+                status: 200,
+            }),
+            Err(e) => {
+                tracing::warn!("webView 探索渲染失败，回退 HTTP [{final_url}]: {e}");
+                if method.eq_ignore_ascii_case("POST") {
+                    crawler::http_post_retry(
+                        ns,
+                        &final_url,
+                        &headers,
+                        15,
+                        post_body.as_deref(),
+                        suffix.charset.as_deref(),
+                        source.proxy_url.as_deref(),
+                        suffix.retry,
+                    )
+                    .await
+                } else {
+                    crawler::http_get_retry(
+                        ns,
+                        &final_url,
+                        &headers,
+                        15,
+                        suffix.charset.as_deref(),
+                        source.proxy_url.as_deref(),
+                        suffix.retry,
+                    )
+                    .await
+                }
+                .map_err(|e| anyhow::anyhow!("抓取失败（{final_url}）: {e:#}"))
+            }
+        }
+    } else if method.eq_ignore_ascii_case("POST") {
+        crawler::http_post_retry(
+            ns,
+            &final_url,
+            &headers,
+            15,
+            post_body.as_deref(),
+            suffix.charset.as_deref(),
+            source.proxy_url.as_deref(),
+            suffix.retry,
+        )
+        .await
+    } else {
+        crawler::http_get_retry(
+            ns,
+            &final_url,
+            &headers,
+            15,
+            suffix.charset.as_deref(),
+            source.proxy_url.as_deref(),
+            suffix.retry,
+        )
+        .await
+    }
+    .map_err(|e| anyhow::anyhow!("抓取失败（{final_url}）: {e:#}"))?;
+    // legado WebBook.exploreBook：发现页抓取后执行 loginCheckJs
+    let body =
+        crate::service::book::apply_login_check_js(ns, source, &resp.body, &resp.url, None).await;
+
+    // legado BookList：explore ruleBookList 为空 → 回退 ruleSearch
+    let rule = explore_rule(source);
+    // legado BookList：响应 URL 匹配 bookUrlPattern → 按详情页规则解析为单本
+    if let Some(pat) = source
+        .book_url_pattern
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+    {
+        let matched = crate::util::regex::Regex::new(pat)
+            .map(|r| r.is_match(&resp.url))
+            .unwrap_or(false);
+        if matched {
+            let info =
+                crate::service::book::analyze_book_info(ns, &body, &resp.url, source, &url, None);
+            if !info.name.is_empty() {
+                return Ok(vec![crate::service::search::single_search_book(
+                    info, source, &url,
+                )]);
+            }
+        }
+    }
+    let Some(book_list_rule) = rule.book_list.clone() else {
+        return Ok(vec![]);
+    };
+    let books = crate::service::search::analyze_book_list_for_explore(
+        ns,
+        &body,
+        &resp.url,
+        source,
+        &rule,
+        &book_list_rule,
+    );
+    Ok(books)
+}
+
+/// 探索规则：ruleExplore.bookList 为空时回退 ruleSearch（legacy BookList 语义）
+fn explore_rule(source: &BookSource) -> crate::service::search::SearchRule {
+    let explore: crate::service::search::SearchRule = source
+        .rule_explore
+        .as_ref()
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    if explore
+        .book_list
+        .as_deref()
+        .is_some_and(|r| !r.trim().is_empty())
+    {
+        return explore;
+    }
+    source
+        .rule_search
+        .as_ref()
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// GAP 141：内置探索源清单（JSON 原文，与 bookSource.json 同构——可直接 saveBookSources 导入）
+///
+/// 验证状态（2026-08 网络实测）：
+/// - 新笔趣阁 biquge365.net：探索分类 /sort/{n}_1/、书籍详情、章节目录 ul.info、正文 div.txt 单页全流程可用
+/// - 看泡书屋 kpshu.cc：探索分类 /list{n}/、搜索 /search.php、书籍详情、目录 div.book_list、正文 article.font_max
+///   （章节正文分页时仅取首页——nextContentUrl 缺失避免串章；站点结构变更时用户可自行修正规则）
+pub const BUILTIN_EXPLORE_SOURCES: &[&str] = &[
+    // 新笔趣阁（biquge365.net）
+    r#"{
+  "bookSourceUrl": "https://www.biquge365.net",
+  "bookSourceName": "新笔趣阁（内置）",
+  "bookSourceGroup": "内置探索",
+  "enabled": true,
+  "enabledExplore": true,
+  "customOrder": 900,
+  "exploreUrl": "玄幻魔法::https://www.biquge365.net/sort/1_1/\n仙侠修真::https://www.biquge365.net/sort/2_1/\n都市言情::https://www.biquge365.net/sort/3_1/\n网游动漫::https://www.biquge365.net/sort/4_1/\n科幻小说::https://www.biquge365.net/sort/5_1/\n恐怖灵异::https://www.biquge365.net/sort/6_1/\n历史军事::https://www.biquge365.net/sort/7_1/\n其他小说::https://www.biquge365.net/sort/8_1/",
+  "searchUrl": "https://www.biquge365.net/s.php,{method:POST,body:type=articlename&s={{key}}}",
+  "ruleExplore": {
+    "bookList": "ul.gengxin@li",
+    "name": "span.name a@text",
+    "author": "span.zuo@text",
+    "bookUrl": "span.name a@href"
+  },
+  "ruleSearch": {
+    "bookList": "ul.search li:not(.fen)@li",
+    "name": "span.name a@text",
+    "author": "span.zuo@text",
+    "bookUrl": "span.name a@href"
+  },
+  "ruleBookInfo": {
+    "name": "h1@text",
+    "author": "div.xinxi span.x1 a@text",
+    "kind": "div.xinxi span.x1.1@text",
+    "intro": "div.x3@text",
+    "coverUrl": "div.zhutu img@src",
+    "tocUrl": "div.gongneng a@href"
+  },
+  "ruleToc": {
+    "chapterList": "ul.info@li",
+    "chapterName": "a@text",
+    "chapterUrl": "a@href"
+  },
+  "ruleContent": {
+    "content": "div.txt@html",
+    "replaceRegex": "一秒记住【笔趣阁】.*?！|（请记住看台湾小说认准台湾小说网.*?）##"
+  }
+}"#,
+    // 看泡书屋（kpshu.cc）
+    r#"{
+  "bookSourceUrl": "http://www.kpshu.cc",
+  "bookSourceName": "看泡书屋（内置）",
+  "bookSourceGroup": "内置探索",
+  "enabled": true,
+  "enabledExplore": true,
+  "customOrder": 901,
+  "exploreUrl": "玄幻小说::http://www.kpshu.cc/list1/\n武侠小说::http://www.kpshu.cc/list2/\n都市小说::http://www.kpshu.cc/list3/\n历史小说::http://www.kpshu.cc/list4/\n网游小说::http://www.kpshu.cc/list5/\n科幻小说::http://www.kpshu.cc/list6/\n言情小说::http://www.kpshu.cc/list7/\n其他小说::http://www.kpshu.cc/list8/",
+  "searchUrl": "http://www.kpshu.cc/search.php?q={{key}}&p=1",
+  "ruleExplore": {
+    "bookList": "div.row dl@dl",
+    "name": "dd h3 a@text",
+    "author": "dd.book_other span a@text",
+    "bookUrl": "dd h3 a@href",
+    "coverUrl": "dt a img@src"
+  },
+  "ruleSearch": {
+    "bookList": "div.row dl@dl",
+    "name": "dd h3 a@text",
+    "author": "dd.book_other span a@text",
+    "bookUrl": "dd h3 a@href",
+    "coverUrl": "dt a img@src"
+  },
+  "ruleBookInfo": {
+    "name": "h1@text",
+    "author": "div.options li a@text",
+    "intro": "div.intro@text",
+    "coverUrl": "div.book_info img@src"
+  },
+  "ruleToc": {
+    "chapterList": "div.book_list ul.row@li",
+    "chapterName": "a@text",
+    "chapterUrl": "a@href"
+  },
+  "ruleContent": {
+    "content": "article.font_max@html"
+  }
+}"#,
+];
+
+/// GAP 141：解析内置探索源 → BookSource 列表（JSON 非法项跳过并告警）
+pub fn builtin_explore_sources() -> Vec<crate::model::BookSource> {
+    let mut out = Vec::with_capacity(BUILTIN_EXPLORE_SOURCES.len());
+    for raw in BUILTIN_EXPLORE_SOURCES {
+        match serde_json::from_str::<crate::model::BookSource>(raw) {
+            Ok(mut s) => {
+                s.raw_json = Some((*raw).to_string());
+                out.push(s);
+            }
+            Err(e) => tracing::warn!("内置探索源解析失败（跳过）: {e}"),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_urls() {
+        let urls = "https://a.com/list\n#注释\nhttps://b.com/{{page}}\n";
+        let parsed = parse_explore_entries(urls);
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed[1].url.contains("{{page}}"));
+        // @js: 代码行生成条目
+        let js = "@js:JSON.stringify([{title:'分类A',url:'https://a.com/x'}])";
+        let parsed = parse_explore_entries(js);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].title, "分类A");
+    }
+
+    /// `title::url` 格式的空 url 分组标题行（"❀男生频道❀::"）——纯装饰，应跳过；
+    /// 此前落穿到「普通 URL 行」把整行（含 ::）当可点条目，点击即报
+    /// 「目标 URL 非法: relative URL without a base」（第十九轮实测）
+    #[test]
+    fn test_parse_group_header_line_skipped() {
+        let urls = "❀ 男 生 频 道 ❀::\n都市小说::https://a.com/city\n❀ 女 生 频 道 ❀::\n玄幻小说::https://a.com/fantasy";
+        let parsed = parse_explore_entries(urls);
+        assert_eq!(parsed.len(), 2, "分组标题行应被跳过: {parsed:?}");
+        assert_eq!(parsed[0].title, "都市小说");
+        assert_eq!(parsed[0].url, "https://a.com/city");
+        assert_eq!(parsed[1].title, "玄幻小说");
+        // 纯分组头（全部分组）→ 空列表
+        assert!(parse_explore_entries("标题A::\n标题B::").is_empty());
+    }
+
+    /// exploreUrl JS 返回数组字面量（非 JSON.stringify 字符串）——此前 ToString
+    /// 输出 "[object Object]" 导致条目解析为空
+    #[test]
+    fn test_parse_js_entries_array_literal() {
+        let js =
+            "@js:[{title:'分类X',url:'https://a.com/x'},{title:'分类Y',url:'https://a.com/y'}]";
+        let parsed = parse_explore_entries(js);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].title, "分类X");
+        assert_eq!(parsed[0].url, "https://a.com/x");
+        assert_eq!(parsed[1].title, "分类Y");
+        assert_eq!(parsed[1].url, "https://a.com/y");
+        // JSON.parse 数组出口
+        let js = "@js:JSON.parse('[{\"title\":\"类P\",\"url\":\"https://a.com/p\"}]')";
+        let parsed = parse_explore_entries(js);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].title, "类P");
+        // 无 url 条目丢弃
+        let js = "@js:[{title:'空',url:''}]";
+        assert!(parse_explore_entries(js).is_empty());
+    }
+
+    /// GAP #51：分页变量替换（{{page}}/{page} 双格式，URL 与 POST body 一致）
+    #[test]
+    fn test_build_explore_url_page() {
+        assert_eq!(
+            build_explore_url("https://a.com/list/{{page}}", 3),
+            "https://a.com/list/3"
+        );
+        assert_eq!(
+            build_explore_url("https://a.com/list/{page}", 2),
+            "https://a.com/list/2"
+        );
+        assert_eq!(
+            build_explore_url("https://a.com/list?p={{page}}", 7),
+            "https://a.com/list?p=7"
+        );
+        // 无占位符：原样返回
+        assert_eq!(
+            build_explore_url("https://a.com/list", 5),
+            "https://a.com/list"
+        );
+    }
+
+    /// GAP 141：内置探索源——JSON 合法、探索入口可解析且非空、ruleExplore/ruleToc/
+    /// ruleContent 规则完整（bookList 定位 + 字段规则），可直接导入书源库使用
+    #[test]
+    fn test_builtin_explore_sources_parse() {
+        let sources = builtin_explore_sources();
+        assert!(
+            sources.len() >= 2,
+            "内置探索源应 >= 2 个（当前 {}）",
+            sources.len()
+        );
+        for s in &sources {
+            assert!(!s.book_source_url.is_empty(), "书源 URL 必填");
+            assert!(!s.book_source_name.is_empty());
+            assert!(s.enabled);
+            assert!(s.enabled_explore, "探索源应启用 enabledExplore");
+            // 探索入口：解析出条目且非空
+            let entries = parse_explore_entries(s.explore_url.as_deref().unwrap_or(""));
+            assert!(
+                entries.len() >= 4,
+                "{} 探索分类应 >= 4（当前 {}）",
+                s.book_source_name,
+                entries.len()
+            );
+            assert!(entries.iter().all(|e| e.r#type == "book"), "分类应为书单型");
+            // 规则完整性：ruleExplore bookList + 字段规则；ruleToc/ruleContent 齐备
+            let explore: crate::service::search::SearchRule =
+                serde_json::from_value(s.rule_explore.clone().unwrap()).unwrap();
+            assert!(explore.book_list.is_some(), "ruleExplore.bookList 必填");
+            assert!(
+                explore.name.is_some() && explore.book_url.is_some(),
+                "name/bookUrl 字段规则必填"
+            );
+            let toc: crate::service::book::TocRule =
+                serde_json::from_value(s.rule_toc.clone().unwrap()).unwrap();
+            assert!(
+                toc.chapter_list.is_some()
+                    && toc.chapter_name.is_some()
+                    && toc.chapter_url.is_some()
+            );
+            let content: crate::service::book::ContentRule =
+                serde_json::from_value(s.rule_content.clone().unwrap()).unwrap();
+            assert!(content.content.is_some(), "ruleContent.content 必填");
+        }
+    }
+
+    /// legado BookList：ruleExplore.bookList 为空 → 回退 ruleSearch
+    #[test]
+    fn test_explore_rule_falls_back_to_search() {
+        let mut source = crate::model::BookSource::default();
+        source.rule_explore = Some(serde_json::json!({ "bookList": "" }));
+        source.rule_search = Some(serde_json::json!({ "bookList": "ul.list li" }));
+        let rule = explore_rule(&source);
+        assert_eq!(rule.book_list.as_deref(), Some("ul.list li"));
+
+        // ruleExplore 有 bookList 时优先用探索规则
+        source.rule_explore = Some(serde_json::json!({ "bookList": "div.explore li" }));
+        let rule = explore_rule(&source);
+        assert_eq!(rule.book_list.as_deref(), Some("div.explore li"));
+
+        // 两边都空 → 默认空规则
+        source.rule_explore = None;
+        source.rule_search = None;
+        assert!(explore_rule(&source).book_list.is_none());
+    }
+
+    /// bookUrlPattern 单详情：BookInfo → SearchBook 字段映射（legacy Book.toSearchBook）
+    #[test]
+    fn test_single_search_book_mapping() {
+        let mut source = crate::model::BookSource::default();
+        source.book_source_url = "https://a.com".into();
+        source.book_source_name = "A源".into();
+        source.custom_order = 7;
+        source.book_source_type = 0;
+        let info = crate::model::book_chapter::BookInfo {
+            name: "书名".into(),
+            author: "作者".into(),
+            kind: Some("玄幻".into()),
+            intro: Some("简介".into()),
+            cover_url: Some("https://a.com/c.jpg".into()),
+            word_count: Some("100万".into()),
+            latest_chapter_title: Some("第1章".into()),
+            toc_url: Some("https://a.com/toc".into()),
+            book_url: "https://a.com/book/1".into(),
+            origin: "https://a.com".into(),
+            origin_name: "A源".into(),
+            book_type: 0,
+            ..Default::default()
+        };
+        let book =
+            crate::service::search::single_search_book(info, &source, "https://a.com/book/1");
+        assert_eq!(book.name, "书名");
+        assert_eq!(book.author, "作者");
+        assert_eq!(book.kind.as_deref(), Some("玄幻"));
+        assert_eq!(book.cover_url.as_deref(), Some("https://a.com/c.jpg"));
+        assert_eq!(book.toc_url, "https://a.com/toc");
+        assert_eq!(book.origin, "https://a.com");
+        assert_eq!(book.origin_name, "A源");
+        assert_eq!(book.origin_order, 7);
+        assert_eq!(book.book_url, "https://a.com/book/1");
+        assert_eq!(book.book_type, 0);
+    }
+
+    /// 离线探索分类计数（getExploreSources 列表页用——不执行 JS/网络）
+    #[test]
+    fn count_explore_entries_offline_forms() {
+        use super::count_explore_entries_offline as cnt;
+        // JSON 数组（真实书源标准形态；空 url 的分组标题不计）
+        let json = r#"[{"title":"排行","url":"","style":{}},{"title":"月票榜","url":"/api/rank?p={{page}}"},{"title":"新书榜","url":"/api/new?p={{page}}"}]"#;
+        assert_eq!(cnt(json), 2);
+        // @js: 型 → 计 1（标记"有探索"，真实分类点进后执行）
+        assert_eq!(cnt("@js:
+java.ajax(source.getKey())"), 1);
+        assert_eq!(cnt("js:var u = key"), 1);
+        assert_eq!(cnt("<js>1</js>"), 1);
+        // 多行格式 → 非空非注释行数
+        assert_eq!(cnt("/a/1
+/a/2
+
+# 注释
+/a/3"), 3);
+        // 空 → 0
+        assert_eq!(cnt(""), 0);
+        assert_eq!(cnt("   "), 0);
+    }
+
+    /// 用户报障原文复现（漫画站探索）：<js> 整段脚本 + {{source.getBookSourceUrl()}} 模板
+    /// ——此前整段脚本被当作条目 URL（「目标 URL 非法: relative URL without a base」）
+    #[test]
+    fn test_parse_explore_js_script_with_source_url_template() {
+        let script = r#"<js>var U='{{source.getBookSourceUrl()}}';var k=[];function G(t){k.push({title:t,style:{layout_flexBasisPercent:1,layout_wrapBefore:true,layout_justifySelf:'flex_start'}});}function B(t,u){k.push({title:t,url:U+u,style:{layout_flexBasisPercent:0.23}});}function W(t,a){k.push({title:t,type:'button',action:a,style:{layout_flexBasisPercent:0.23}});}var C=String.fromCharCode(39);G('🆕 更新');B('最近更新','albums-index-page-1.html');B('全部','albums-index-page-1-cate-5.html');G('🔥 排行');B('日榜','albums-favorite_ranking-page-1-type-day.html');G('🛠 维护');W('清图片线路缓存','source.put('+C+'imgH'+C+','+C+C+');java.toast('+C+'已清除'+C+')');JSON.stringify(k);</js>"#;
+        let src = crate::model::BookSource {
+            book_source_url: "https://albums.test/".into(),
+            book_source_name: "测试漫画".into(),
+            ..Default::default()
+        };
+        let entries = parse_explore_entries_for_source(script, &src, "default");
+        // G()/W() 条目无 url 应跳过；B() 条目 url = 书源 URL + 相对路径
+        assert!(
+            entries.iter().any(|e| e.title == "最近更新" && e.url == "https://albums.test/albums-index-page-1.html"),
+            "模板应展开为书源 URL: {entries:?}"
+        );
+        assert!(
+            entries.iter().any(|e| e.title == "日榜" && e.url == "https://albums.test/albums-favorite_ranking-page-1-type-day.html"),
+            "{entries:?}"
+        );
+        assert!(
+            !entries.iter().any(|e| e.title == "🛠 维护" || e.title == "🆕 更新"),
+            "分组标题/按钮条目（无 url）不应出现: {entries:?}"
+        );
+    }
+
+    /// 全链路：explore_url 从 `,{...}` POST 后缀到裸键 JSON 书单解析（纵横式 API mock）
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_explore_url_full_chain_post_suffix() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = r#"{"code":0,"result":{"resultList":[{"bookName":"剑来","bookId":"101"}]}}"#;
+        let app = axum::Router::new().route(
+            "/api/rank/details",
+            axum::routing::post(move || {
+                let body = body.to_string();
+                async move {
+                    axum::http::Response::builder()
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(body))
+                        .unwrap()
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let src = crate::model::BookSource {
+            book_source_url: format!("http://{addr}"),
+            rule_explore: Some(serde_json::json!({
+                "bookList": "result.resultList||result.bookList",
+                "name": "bookName||name",
+                "bookUrl": "/novel/{ $.bookId }"
+            })),
+            ..Default::default()
+        };
+        let _g = crate::service::crawler::ssrf_allow_private_guard(true);
+        let url = format!(
+            "http://{addr}/api/rank/details,{{\"method\":\"POST\",\"body\":\"pageNum={{{{page}}}}\"}}"
+        );
+        let books = explore_url("default", &url, 1, &src).await.unwrap();
+        println!("mock full-chain books: {} -> {:?}", books.len(), books.iter().map(|b| b.name.clone()).collect::<Vec<_>>());
+        assert!(!books.is_empty(), "全链路 mock 应解析出书");
+    }
+}

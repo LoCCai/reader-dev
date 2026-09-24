@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>搜索 - Reader</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-size:20px; line-height:1.5; color:#222; background:#f7f5f0;
+         font-family:"STSong","SimSun","Noto Serif CJK SC",serif; }
+  #wrap { max-width:640px; margin:0 auto; padding:10px; }
+  h1 { font-size:26px; padding:8px 2px; }
+  nav a { display:inline-block; font-size:20px; padding:10px 16px; margin:4px 6px 4px 0;
+          background:#333; color:#fff; text-decoration:none; border-radius:6px; }
+  .row { margin:12px 0; }
+  #key { width:100%; font-size:22px; padding:12px; border:2px solid #999; border-radius:6px; }
+  button { font-size:22px; padding:12px 20px; margin-top:8px; background:#356; color:#fff;
+           border:none; border-radius:6px; }
+  #status { margin:10px 2px; color:#666; font-size:18px; min-height:26px; }
+  ul#list { list-style:none; }
+  ul#list li { margin:8px 0; }
+  ul#list a { display:block; background:#fff; border:1px solid #ccc; border-radius:8px;
+              padding:14px 12px; text-decoration:none; color:#222; }
+  ul#list .name { font-size:22px; font-weight:bold; }
+  ul#list .meta { font-size:16px; color:#777; margin-top:4px; }
+  ul#list .latest { font-size:17px; color:#356; margin-top:4px; }
+  /* 书籍详情弹窗 */
+  #modal { position:fixed; inset:0; background:rgba(0,0,0,0.5); display:none; z-index:50; }
+  #modalBox { max-width:560px; margin:8vh auto; background:#fff; border-radius:10px;
+              padding:18px; box-shadow:0 6px 24px rgba(0,0,0,0.3); }
+  #mName { font-size:24px; font-weight:bold; padding:4px 0; }
+  #mMeta { font-size:16px; color:#777; margin:4px 0; }
+  #mLatest { font-size:17px; color:#356; margin:6px 0; }
+  #mStatus { font-size:16px; color:#666; min-height:22px; margin:6px 0; }
+  #mSources { margin:6px 0; }
+  #mSources .src { display:block; width:100%; text-align:left; font-size:18px; padding:10px 12px;
+                   margin:4px 0; background:#f2f2f2; color:#222; border:1px solid #ccc; border-radius:6px; }
+  #mSources .src.cur { background:#356; color:#fff; border-color:#356; }
+  .modal-actions { text-align:center; padding-top:10px; border-top:1px solid #eee; }
+  .modal-actions button { font-size:19px; padding:10px 16px; margin:6px 4px 0; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>搜索</h1>
+  <nav>
+    <a href="index.html?accessToken=__TOKEN__">书架</a>
+    <a href="search.html?accessToken=__TOKEN__">搜索</a>
+    <a href="rss.html?accessToken=__TOKEN__">RSS</a>
+  </nav>
+  <div class="row"><input id="key" type="search" placeholder="书名 / 作者"></div>
+  <button id="go">搜索</button>
+  <div id="status"></div>
+  <ul id="list"></ul>
+</div>
+<div id="modal">
+  <div id="modalBox">
+    <div id="mName"></div>
+    <div id="mMeta"></div>
+    <div id="mLatest"></div>
+    <div id="mStatus"></div>
+    <div id="mSources"></div>
+    <div class="modal-actions">
+      <button id="mRead">开始阅读</button>
+      <button id="mSave">加入书架</button>
+      <button id="mRefresh" style="display:none">更新章节</button>
+      <button id="mSource">换源</button>
+      <button id="mClose">关闭</button>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  var QS = {};
+  location.search.replace(/^\?/, "").split("&").forEach(function (p) {
+    var kv = p.split("=");
+    if (kv[0]) QS[decodeURIComponent(kv[0])] = decodeURIComponent(kv[1] || "");
+  });
+  var TOKEN = QS.accessToken || "";
+  var links = document.getElementsByTagName("a");
+  for (var i = 0; i < links.length; i++) {
+    var h = links[i].getAttribute("href") || "";
+    if (h.indexOf("__TOKEN__") >= 0) {
+      links[i].setAttribute("href", h.split("__TOKEN__").join(encodeURIComponent(TOKEN)));
+    }
+  }
+  var keyEl = document.getElementById("key");
+  var status = document.getElementById("status");
+  var list = document.getElementById("list");
+  var results = [];
+  var currentBook = null;
+  var modal = document.getElementById("modal");
+  var modalBox = document.getElementById("modalBox");
+  var mName = document.getElementById("mName");
+  var mMeta = document.getElementById("mMeta");
+  var mLatest = document.getElementById("mLatest");
+  var mStatus = document.getElementById("mStatus");
+  var mSources = document.getElementById("mSources");
+  var mRead = document.getElementById("mRead");
+  var mSave = document.getElementById("mSave");
+  var mRefresh = document.getElementById("mRefresh");
+  var mSource = document.getElementById("mSource");
+
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+  function apiUrl(path, extra) {
+    var parts = [];
+    if (TOKEN) parts.push("accessToken=" + encodeURIComponent(TOKEN));
+    for (var k in extra) parts.push(encodeURIComponent(k) + "=" + encodeURIComponent(extra[k]));
+    return path + "?" + parts.join("&");
+  }
+
+  function readerUrlOf(b) {
+    return "reader.html?bookUrl=" + encodeURIComponent(b.bookUrl) +
+           "&tocUrl=" + encodeURIComponent(b.tocUrl || b.bookUrl) +
+           "&bookSource=" + encodeURIComponent(b.origin || "") +
+           "&accessToken=" + encodeURIComponent(TOKEN);
+  }
+
+  // —— 书籍详情弹窗（开始阅读不加入书架；加入书架走 saveBook）——
+  function openBook(i) {
+    currentBook = results[i];
+    if (!currentBook) return;
+    modal.style.display = "block";
+    document.body.style.overflow = "hidden";
+    renderBookModal();
+    // 书架状态决定操作区（换源/更新章节仅对已入架书开放，避免 saveBook 误入架）
+    fetch(apiUrl("/reader3/getBookshelf", {}))
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!currentBook) return;
+        var list = (j && j.isSuccess !== false) ? (j.data || []) : [];
+        if (list.some(function (b) { return b.bookUrl === currentBook.bookUrl; })) {
+          currentBook.isInShelf = true;
+        }
+        renderBookModal();
+      })
+      .catch(function () {});
+  }
+
+  function closeModal() {
+    modal.style.display = "none";
+    document.body.style.overflow = "";
+    currentBook = null;
+    mSources.innerHTML = "";
+    mStatus.innerHTML = "";
+  }
+
+  function renderBookModal() {
+    var b = currentBook;
+    mName.textContent = b.name || "(无书名)";
+    mMeta.textContent = (b.author || "佚名") + " · " + (b.originName || b.origin || "");
+    mLatest.textContent = b.latestChapterTitle ? "最新章节：" + b.latestChapterTitle : "";
+    mSources.innerHTML = "";
+    mStatus.textContent = "";
+    var inShelf = !!b.isInShelf;
+    mRead.textContent = inShelf ? "继续阅读" : "开始阅读";
+    mSave.style.display = inShelf ? "none" : "inline-block";
+    mRefresh.style.display = inShelf ? "inline-block" : "none";
+    mSource.style.display = inShelf ? "inline-block" : "none";
+  }
+
+  function saveCurrentBook() {
+    var b = currentBook;
+    if (!b || b.isInShelf) return;
+    var body = {
+      bookUrl: b.bookUrl,
+      name: b.name,
+      author: b.author || "",
+      origin: b.origin || "",
+      originName: b.originName || "",
+      tocUrl: b.tocUrl || b.bookUrl,
+      latestChapterTitle: b.latestChapterTitle || "",
+      coverUrl: b.coverUrl || "",
+      intro: b.intro || "",
+      type: b.type != null ? b.type : 0
+    };
+    mStatus.textContent = "加入中…";
+    fetch(apiUrl("/reader3/saveBook", {}), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).then(function (r) { return r.json(); }).then(function (j) {
+      if (!j || j.isSuccess === false) {
+        mStatus.textContent = "加入失败：" + (j && j.errorMsg || "未知错误");
+        return;
+      }
+      b.isInShelf = true;
+      mStatus.textContent = "已加入书架";
+      renderBookModal();
+    }).catch(function (e) {
+      mStatus.textContent = "加入失败：" + (e.message || e);
+    });
+  }
+
+  function refreshCurrentBook() {
+    var b = currentBook;
+    if (!b || !b.isInShelf) return;
+    mStatus.textContent = "更新中…";
+    fetch(apiUrl("/reader3/getBookToc", {
+      url: b.tocUrl || b.bookUrl,
+      tocUrl: b.tocUrl || b.bookUrl,
+      bookSource: b.origin || ""
+    }))
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j || j.isSuccess === false) {
+          mStatus.textContent = "更新失败：" + (j && j.errorMsg || "未知错误");
+          return;
+        }
+        var arr = j.data || [];
+        var chapters = arr.filter(function (c) { return c && c.url && !c.isVolume; });
+        if (chapters.length) {
+          b.totalChapterNum = chapters.length;
+          b.latestChapterTitle = chapters[chapters.length - 1].title;
+          renderBookModal();
+          mStatus.textContent = "已更新，共 " + chapters.length + " 章";
+        } else {
+          mStatus.textContent = "更新完成，未发现章节";
+        }
+      })
+      .catch(function (e) {
+        mStatus.textContent = "更新失败：" + (e.message || e);
+      });
+  }
+
+  function showSourcesForBook() {
+    var b = currentBook;
+    if (!b || !b.isInShelf) return;
+    mSources.innerHTML = "<div class='src'>书源加载中…</div>";
+    fetch(apiUrl("/reader3/getAvailableBookSource", { url: b.bookUrl }))
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        var arr = j && j.isSuccess !== false ? (j.data || []) : [];
+        if (!arr.length) { mSources.innerHTML = "<div class='src'>暂无可用书源</div>"; return; }
+        mSources.innerHTML = "";
+        arr.forEach(function (s) {
+          var url = s.bookSourceUrl || "";
+          var name = s.bookSourceName || url;
+          var btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "src" + (url === b.origin ? " cur" : "");
+          btn.textContent = name;
+          btn.addEventListener("click", function () {
+            switchBookSource(url, name);
+          });
+          mSources.appendChild(btn);
+        });
+      })
+      .catch(function (e) {
+        mSources.innerHTML = "<div class='src'>加载失败：" + esc(e.message || e) + "</div>";
+      });
+  }
+
+  function switchBookSource(url, name) {
+    var b = currentBook;
+    if (!b || !b.isInShelf) return;
+    mStatus.textContent = "切换书源中…";
+    // 先取新书源详情拿到 tocUrl，再增量更新书架书（bookUrl 主键不变）
+    fetch(apiUrl("/reader3/getBookInfo", { url: b.bookUrl, bookSource: url }))
+      .then(function (r) { return r.json(); })
+      .then(function (info) {
+        if (!info || info.isSuccess === false) {
+          mStatus.textContent = "换源失败：" + ((info && info.errorMsg) || "获取新书源详情失败");
+          return null;
+        }
+        var data = info.data || {};
+        var body = {
+          bookUrl: b.bookUrl,
+          origin: url,
+          originName: name,
+          tocUrl: data.tocUrl || b.tocUrl || b.bookUrl
+        };
+        return fetch(apiUrl("/reader3/saveBook", {}), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        }).then(function (r) { return r.json(); });
+      })
+      .then(function (j) {
+        if (!j) return;
+        if (!j || j.isSuccess === false) {
+          mStatus.textContent = "换源失败：" + (j && j.errorMsg || "未知错误");
+          return;
+        }
+        b.origin = url;
+        b.originName = name;
+        b.isInShelf = true;
+        mStatus.textContent = "已切换书源";
+        renderBookModal();
+        showSourcesForBook();
+      })
+      .catch(function (e) {
+        mStatus.textContent = "换源失败：" + (e.message || e);
+      });
+  }
+
+  function doSearch() {
+    var key = keyEl.value.trim();
+    if (!key) { status.innerHTML = "请输入关键字"; return; }
+    list.innerHTML = "";
+    status.innerHTML = "搜索中（多书源并发，请稍候）…";
+    // maxSources=5 控制并发源数量，Kindle 上不至于等太久
+    fetch(apiUrl("/reader3/searchBookMulti", { key: key, page: 1, maxSources: 5 }))
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j || j.isSuccess === false) {
+          status.innerHTML = "搜索失败：" + esc(j && j.errorMsg || "未知错误");
+          return;
+        }
+        var arr = j.data || [];
+        results = arr;
+        if (!arr.length) { status.innerHTML = "无结果"; return; }
+        status.innerHTML = "找到 " + arr.length + " 条结果";
+        var html = "";
+        for (var i = 0; i < arr.length; i++) {
+          var b = arr[i];
+          html += "<li><a href=\"javascript:void(0)\" data-i=\"" + i + "\">" +
+                  "<div class=\"name\">" + esc(b.name) + "</div>" +
+                  "<div class=\"meta\">" + esc(b.author || "佚名") + " · " + esc(b.originName || "") + "</div>" +
+                  (b.latestChapterTitle ? "<div class=\"latest\">" + esc(b.latestChapterTitle) + "</div>" : "") +
+                  "</a></li>";
+        }
+        list.innerHTML = html;
+        var as = list.getElementsByTagName("a");
+        for (var i = 0; i < as.length; i++) {
+          (function (a) {
+            a.addEventListener("click", function () {
+              openBook(parseInt(a.getAttribute("data-i"), 10));
+            });
+          })(as[i]);
+        }
+      })
+      .catch(function (e) {
+        status.innerHTML = "网络错误：" + esc(e.message || e);
+      });
+  }
+
+  document.getElementById("go").addEventListener("click", doSearch);
+  document.getElementById("mRead").addEventListener("click", function () {
+    if (currentBook) location.href = readerUrlOf(currentBook);
+  });
+  document.getElementById("mSave").addEventListener("click", saveCurrentBook);
+  document.getElementById("mRefresh").addEventListener("click", refreshCurrentBook);
+  document.getElementById("mSource").addEventListener("click", showSourcesForBook);
+  document.getElementById("mClose").addEventListener("click", closeModal);
+  modalBox.addEventListener("click", function (ev) { ev.stopPropagation(); });
+  modal.addEventListener("click", closeModal);
+  keyEl.addEventListener("keydown", function (ev) {
+    if (ev.key === "Enter" || ev.keyCode === 13) doSearch();
+  });
+  if (QS.key) { keyEl.value = QS.key; doSearch(); }
+})();
+</script>
+</body>
+</html>
