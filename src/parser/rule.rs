@@ -52,13 +52,17 @@ pub enum RuleKind {
 /// E10/AR5：`chapter_url`/`next_chapter_url` 同为实体字段回退上下文——JS 求值绑定的
 /// `chapter.url`/`nextChapterUrl` 来源（legacy AnalyzeRule.setBook/setChapter），
 /// 不参与持久化。
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct RuleVars {
     map: std::collections::HashMap<String, String>,
     pub chapter_title: Option<String>,
     pub book_name: Option<String>,
     pub chapter_url: Option<String>,
     pub next_chapter_url: Option<String>,
+    /// 书源 JS 上下文（jsLib/loginUrl 函数、java.* 桥）——分析入口注入，
+    /// 规则内所有 @js:/<js> 段求值时使用；None = 旧默认行为（无 jsLib）。
+    /// 不参与持久化（内存上下文，随流程存活）
+    pub(crate) bridge: Option<std::sync::Arc<crate::parser::js::JsBridgeInner>>,
 }
 
 /// E10/AR5 保留键：章节/书上下文经 vars 表传给 JS 求值（[`push_js_context`] 写入、
@@ -111,6 +115,19 @@ pub(crate) fn push_js_context(
     }
 }
 
+impl std::fmt::Debug for RuleVars {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuleVars")
+            .field("map", &self.map)
+            .field("chapter_title", &self.chapter_title)
+            .field("book_name", &self.book_name)
+            .field("chapter_url", &self.chapter_url)
+            .field("next_chapter_url", &self.next_chapter_url)
+            .field("bridge", &self.bridge.as_ref().map(|_| "JsBridgeInner"))
+            .finish()
+    }
+}
+
 impl RuleVars {
     pub fn new() -> Self {
         Self::default()
@@ -141,16 +158,62 @@ const BOOK_VARS_CACHE_MAX: usize = 512;
 const BOOK_VARS_ENTRIES_MAX: usize = 64;
 const BOOK_VARS_BYTES_MAX: usize = 1024 * 1024;
 
-static BOOK_VARS_CACHE: std::sync::RwLock<Vec<((String, String, String), RuleVars)>> =
-    std::sync::RwLock::new(Vec::new());
+/// HashMap + 插入序队列：查找 O(1)（曾为 Vec 线性扫 + FIFO remove(0) O(n) 搬移——
+/// 并发章节渲染热路径上每次 save/load 都全表扫）
+type BookVarsKey = (String, String, String);
+static BOOK_VARS_CACHE: std::sync::LazyLock<std::sync::RwLock<BookVarsMap<RuleVars>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(BookVarsMap::new()));
+static BOOK_VARS_PERSIST_STATE: std::sync::LazyLock<std::sync::RwLock<BookVarsMap<(String, i64)>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(BookVarsMap::new()));
 
 /// SQLite 落库节流状态：每键 (上次已落库 JSON, 上次落库毫秒时间戳)。
 /// 内容未变或距上次落库不足 [`BOOK_VARS_DB_MIN_INTERVAL_MS`] 时跳过落库（变更仍进内存 LRU）——
 /// 修复 book_vars_cache 无界膨胀（章节级双键 × 每次渲染即写 → 466 万行/35GB）。
-static BOOK_VARS_PERSIST_STATE: std::sync::RwLock<Vec<((String, String, String), (String, i64))>> =
-    std::sync::RwLock::new(Vec::new());
 /// 节流状态容量（与内存 LRU 同数量级；超限逐出最旧条目——逐出后下次写入仅多落一次库）
 const BOOK_VARS_PERSIST_STATE_MAX: usize = 4096;
+
+/// 插入序 Map：HashMap O(1) 查找 + VecDeque 维护插入序（超限逐出最旧）
+struct BookVarsMap<V> {
+    map: std::collections::HashMap<BookVarsKey, V>,
+    order: std::collections::VecDeque<BookVarsKey>,
+}
+
+impl<V> BookVarsMap<V> {
+    fn new() -> Self {
+        Self {
+            map: std::collections::HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        }
+    }
+    fn get(&self, key: &BookVarsKey) -> Option<&V> {
+        self.map.get(key)
+    }
+    /// 插入/更新（新键追加插入序；已存在不动序——与原 Vec 行为一致）
+    fn insert(&mut self, key: BookVarsKey, value: V, max: usize) {
+        if !self.map.contains_key(&key) {
+            if self.order.len() >= max {
+                if let Some(old) = self.order.pop_front() {
+                    self.map.remove(&old);
+                }
+            }
+            self.order.push_back(key.clone());
+        }
+        self.map.insert(key, value);
+    }
+    /// 按命名空间前缀清除
+    fn retain_ns(&mut self, ns: &str) {
+        let dead: Vec<BookVarsKey> =
+            self.order.iter().filter(|k| k.0 == ns).cloned().collect();
+        for k in dead {
+            self.map.remove(&k);
+            self.order.retain(|o| o != &k);
+        }
+    }
+    fn clear(&mut self) {
+        self.map.clear();
+        self.order.clear();
+    }
+}
 /// 同键两次落库最小间隔：高频变更（翻页计数等）在间隔内只留内存，30s 后的下一次
 /// save 仍会落库——不丢最终值，只丢中间值
 const BOOK_VARS_DB_MIN_INTERVAL_MS: i64 = 30_000;
@@ -160,8 +223,9 @@ const BOOK_VARS_DB_MIN_INTERVAL_MS: i64 = 30_000;
 /// （two_level 双写保证 root 持有同内容；内容真不同的章节级变量不受影响）——拦截
 /// "海量唯一 URL × 同一份书级变量"的写入洪流（机器人账号实测 9h 54.8 万行、3 次 OOM）。
 /// 容量自然有界（≤ 用户 × 书源数），无需逐出。
-static BOOK_VARS_SOURCE_LAST: std::sync::RwLock<Vec<((String, String), String)>> =
-    std::sync::RwLock::new(Vec::new());
+static BOOK_VARS_SOURCE_LAST: std::sync::LazyLock<
+    std::sync::RwLock<std::collections::HashMap<(String, String), String>>,
+> = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
 
 /// 同源同内容判定（只读）
 fn book_vars_source_recent(ns: &str, source: &str, json: &str) -> bool {
@@ -169,8 +233,7 @@ fn book_vars_source_recent(ns: &str, source: &str, json: &str) -> bool {
         Ok(g) => g,
         Err(e) => e.into_inner(),
     };
-    g.iter()
-        .any(|(k, v)| k.0 == ns && k.1 == source && v == json)
+    g.get(&(ns.to_string(), source.to_string())) == Some(&json.to_string())
 }
 
 /// 登记同源最近落库内容（仅实际写库成功后调用——读穿透不登记，避免误跳过 root 更新）
@@ -179,11 +242,7 @@ fn book_vars_source_mark(ns: &str, source: &str, json: &str) {
         Ok(g) => g,
         Err(e) => e.into_inner(),
     };
-    if let Some(slot) = g.iter_mut().find(|(k, _)| k.0 == ns && k.1 == source) {
-        slot.1 = json.to_string();
-    } else {
-        g.push(((ns.to_string(), source.to_string()), json.to_string()));
-    }
+    g.insert((ns.to_string(), source.to_string()), json.to_string());
 }
 
 /// @put/@get 变量 SQLite 持久化句柄（serve() 启动时注册；None = 未注册（测试/降级）——仅内存）
@@ -220,8 +279,8 @@ pub fn clear_book_vars_memory_cache() {
 /// 清空指定命名空间的内存缓存（重启模拟；不动其他命名空间——并发测试隔离）
 pub fn clear_book_vars_memory_cache_ns(ns: &str) {
     match BOOK_VARS_CACHE.write() {
-        Ok(mut g) => g.retain(|(k, _)| k.0 != ns),
-        Err(e) => e.into_inner().retain(|(k, _)| k.0 != ns),
+        Ok(mut g) => g.retain_ns(ns),
+        Err(e) => e.into_inner().retain_ns(ns),
     }
 }
 
@@ -284,8 +343,8 @@ fn book_vars_persist_due(ns: &str, source: &str, url: &str, json: &str) -> bool 
         Ok(g) => g,
         Err(e) => e.into_inner(),
     };
-    match st.iter().find(|(k, _)| *k == key) {
-        Some((_, (last_json, last_ms))) => {
+    match st.get(&key) {
+        Some((last_json, last_ms)) => {
             last_json != json && now_ms() - last_ms >= BOOK_VARS_DB_MIN_INTERVAL_MS
         }
         None => true,
@@ -298,15 +357,11 @@ fn book_vars_persist_mark(ns: &str, source: &str, url: &str, json: &str, ts_ms: 
         Ok(g) => g,
         Err(e) => e.into_inner(),
     };
-    let key = (ns.to_string(), source.to_string(), url.to_string());
-    if let Some(slot) = st.iter_mut().find(|(k, _)| *k == key) {
-        slot.1 = (json.to_string(), ts_ms);
-    } else {
-        if st.len() >= BOOK_VARS_PERSIST_STATE_MAX {
-            st.remove(0);
-        }
-        st.push((key, (json.to_string(), ts_ms)));
-    }
+    st.insert(
+        (ns.to_string(), source.to_string(), url.to_string()),
+        (json.to_string(), ts_ms),
+        BOOK_VARS_PERSIST_STATE_MAX,
+    );
 }
 
 /// 测试辅助：清空节流状态（重置去抖/去重判定基线；含同源去重）
@@ -383,12 +438,8 @@ fn book_vars_db_write(
 pub fn load_book_vars(ns: &str, source: &str, book_url: &str) -> RuleVars {
     let key = (ns.to_string(), source.to_string(), book_url.to_string());
     let mem_hit = match BOOK_VARS_CACHE.read() {
-        Ok(g) => g.iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone()),
-        Err(e) => e
-            .into_inner()
-            .iter()
-            .find(|(k, _)| *k == key)
-            .map(|(_, v)| v.clone()),
+        Ok(g) => g.get(&key).cloned(),
+        Err(e) => e.into_inner().get(&key).cloned(),
     };
     if let Some(v) = mem_hit {
         return v;
@@ -399,14 +450,7 @@ pub fn load_book_vars(ns: &str, source: &str, book_url: &str) -> RuleVars {
             Ok(g) => g,
             Err(e) => e.into_inner(),
         };
-        if let Some(slot) = g.iter_mut().find(|(k, _)| *k == key) {
-            slot.1 = v.clone();
-        } else {
-            if g.len() >= BOOK_VARS_CACHE_MAX {
-                g.remove(0);
-            }
-            g.push((key, v.clone()));
-        }
+        g.insert(key, v.clone(), BOOK_VARS_CACHE_MAX);
         return v;
     }
     RuleVars::default()
@@ -486,14 +530,7 @@ fn save_book_vars_inner(
         Ok(g) => g,
         Err(e) => e.into_inner(),
     };
-    if let Some(slot) = g.iter_mut().find(|(k, _)| *k == key) {
-        slot.1 = capped.clone();
-    } else {
-        if g.len() >= BOOK_VARS_CACHE_MAX {
-            g.remove(0);
-        }
-        g.push((key, capped.clone()));
-    }
+    g.insert(key, capped.clone(), BOOK_VARS_CACHE_MAX);
     drop(g);
     // 双写落库（capped 已剔除超限条目；上下文字段不序列化；再剔除页面级临时键——
     // 见 [`BOOK_VARS_TRANSIENT_KEYS`]，内存层保留）
@@ -915,6 +952,23 @@ pub fn apply_init_with_vars(context: &str, init: Option<&str>, vars: &mut RuleVa
     apply_init_impl(context, init, Some(vars))
 }
 
+
+/// 规则内 JS 求值统一入口：vars 携带书源 bridge 时走 eval_js_with_bridge
+/// （jsLib 定义的 sign/GetUL 等函数可用），否则旧默认（无 jsLib）
+fn eval_rule_js(
+    code: &str,
+    js_vars: &std::collections::HashMap<String, String>,
+    vars: Option<&RuleVars>,
+) -> anyhow::Result<String> {
+    match vars.and_then(|v| v.bridge.clone()) {
+        Some(inner) => {
+            let bridge = crate::parser::js::js_bridge_from_inner(inner);
+            crate::parser::js::eval_js_with_bridge(code, js_vars, &bridge)
+        }
+        None => crate::parser::js::eval_js(code, js_vars),
+    }
+}
+
 fn apply_init_impl(context: &str, init: Option<&str>, vars: Option<&mut RuleVars>) -> String {
     let Some(r) = init else {
         return context.to_string();
@@ -930,7 +984,8 @@ fn apply_init_impl(context: &str, init: Option<&str>, vars: Option<&mut RuleVars
             js_vars.insert("result".to_string(), context.to_string());
             // E10/AR5：init 段 JS 同样注入章节/书上下文（legacy evalJS 全量绑定）
             push_js_context(&mut js_vars, vars.as_deref());
-            crate::parser::js::eval_js(&parsed.body, &js_vars).unwrap_or_default()
+            crate::parser::rule::eval_rule_js(&parsed.body, &js_vars, vars.as_deref())
+                .unwrap_or_default()
         }
         _ => apply_depth(r, context, 0, vars)
             .into_iter()
@@ -990,7 +1045,7 @@ fn apply_depth(
             js_vars.insert("url".to_string(), String::new());
             // E10/AR5：章节/书上下文绑定（legacy AnalyzeRule evalJS）
             push_js_context(&mut js_vars, vars.as_deref());
-            match crate::parser::js::eval_js(&code, &js_vars) {
+            match eval_rule_js(&code, &js_vars, vars.as_deref()) {
                 Ok(s) => {
                     // 空串结果 → 空列表；下一轮循环检测到空结果即终止整链（AR3）
                     result = Some(if s.is_empty() { vec![] } else { vec![s] });
@@ -1121,7 +1176,7 @@ fn apply_rule_inner(
                 js_vars.insert("urlSearch".to_string(), String::new());
                 js_vars.insert("url".to_string(), String::new());
                 push_js_context(&mut js_vars, vars.as_deref());
-                match crate::parser::js::eval_js(&rule.body, &js_vars) {
+                match eval_rule_js(&rule.body, &js_vars, vars.as_deref()) {
                     Ok(s) if !s.is_empty() => vec![s],
                     _ => vec![],
                 }
@@ -1229,7 +1284,7 @@ pub(crate) fn inline_js(expr: &str, text: &str, vars: Option<&RuleVars>) -> Stri
     js_vars.insert("page".to_string(), "1".to_string());
     // E10/AR5：{{}} 内嵌 JS 同样绑定章节/书上下文
     push_js_context(&mut js_vars, vars);
-    crate::parser::js::eval_js(expr, &js_vars).unwrap_or_default()
+    eval_rule_js(expr, &js_vars, vars).unwrap_or_default()
 }
 
 /// CSS 选择器执行（legado 链式：<js> 链 + &&/||/%% 组合 + @ 链 + 末段属性）

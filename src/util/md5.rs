@@ -9,6 +9,13 @@ pub fn md5_encode(input: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// md5 十六进制（字节版——封面内容寻址命名用）
+pub fn md5_bytes_hex(data: &[u8]) -> String {
+    let mut hasher = Md5::new();
+    hasher.update(data);
+    format!("{:x}", hasher.finalize())
+}
+
 /// legacy 密码加密：md5(md5(password + salt) + salt)
 pub fn gen_encrypted_password(password: &str, salt: &str) -> String {
     md5_encode(&format!(

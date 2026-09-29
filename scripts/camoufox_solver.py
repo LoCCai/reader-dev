@@ -343,9 +343,25 @@ SESSIONS = {}
 
 
 async def get_browser():
-    """惰性启动常驻 camoufox 浏览器（进程生命周期内复用；并发请求经锁排队）"""
+    """惰性启动常驻 camoufox 浏览器（进程生命周期内复用；并发请求经锁排队）。
+    验活：浏览器进程死亡（崩溃/OOM-kill）时 _browser 对象仍残留——只判 None 会
+    永远返回僵死对象，请求静默失败且 /health 误报 ready；死亡则关闭残壳并重启。
+    """
     global _browser, _browser_ready
-    if _browser is None:
+    dead = False
+    if _browser is not None:
+        try:
+            dead = _browser.is_closed()
+        except Exception:
+            dead = True
+    if _browser is None or dead:
+        if dead:
+            try:
+                await _browser.close()
+            except Exception:
+                pass
+            _browser = None
+            _browser_ready = False
         _browser = await AsyncCamoufox(headless=True, humanize=True).__aenter__()
         _browser_ready = True
     return _browser
@@ -1105,10 +1121,17 @@ async def handle_client(reader, writer):
         if method == "POST":
             payload = await read_json_body(reader)
         if method == "GET" and path in ("/health", "/health/"):
+            # browserReady 反映真实存活（曾为一次性置位标志：浏览器死后仍误报 true）
+            alive = False
+            if _browser is not None:
+                try:
+                    alive = not _browser.is_closed()
+                except Exception:
+                    alive = False
             status, payload = 200, {
                 "ok": True,
                 "camoufoxVersion": "0.5.4",
-                "browserReady": _browser_ready,
+                "browserReady": alive,
                 "port": PORT,
                 "sessions": len(SESSIONS),
             }
@@ -1139,8 +1162,26 @@ async def handle_client(reader, writer):
             ).encode("latin-1")
             + data
         )
-    except Exception:
-        pass
+    except Exception as e:
+        # 曾为裸 pass：异常时连接被静默关闭（调用方只看到 RemoteDisconnected）——
+        # 回 500 JSON 让 Rust 侧拿到可归因的错误
+        try:
+            data = json.dumps(
+                {"error": f"solver internal error: {type(e).__name__}: {e}"},
+                ensure_ascii=False,
+            ).encode("utf-8")
+            writer.write(
+                (
+                    "HTTP/1.1 500 ERROR\r\n"
+                    "Content-Type: application/json; charset=utf-8\r\n"
+                    f"Content-Length: {len(data)}\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                ).encode("latin-1")
+                + data
+            )
+        except Exception:
+            pass
     finally:
         try:
             await writer.drain()

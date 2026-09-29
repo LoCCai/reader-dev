@@ -385,6 +385,10 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
             "/reader3/bookSourceDebugSSE",
             get(book_source_debug_sse).post(book_source_debug_sse),
         )
+        .route(
+            "/reader3/debugBookSource",
+            get(debug_book_source).post(debug_book_source),
+        )
         .route("/reader3/cacheBookOnServer", post(cache_book_on_server))
         .route(
             "/reader3/getAllContents",
@@ -2434,7 +2438,13 @@ async fn search_book(
         .get("page")
         .and_then(|v| v.parse().ok())
         .unwrap_or(1i64);
-    let mut book_source_param = params.get("bookSource").cloned().unwrap_or_default();
+    let mut book_source_param = params
+        .get("bookSource")
+        .or_else(|| params.get("bookSourceUrl"))
+        .or_else(|| params.get("sourceUrl"))
+        .or_else(|| params.get("origin"))
+        .cloned()
+        .unwrap_or_default();
     if let Some(body) = body {
         if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body) {
             if let Some(v) = json.get("key").and_then(|v| v.as_str()) {
@@ -2451,6 +2461,8 @@ async fn search_book(
     if key.is_empty() {
         return Json(ReturnData::err("请输入搜索关键字"));
     }
+    // legacy 参数别名 + 尾斜杠（bookSourceUrl/sourceUrl/origin；实测带尾斜杠报"未配置书源"）
+    let book_source_param = book_source_param.trim().trim_end_matches('/').to_string();
     if book_source_param.is_empty() {
         return Json(ReturnData::err("未配置书源"));
     }
@@ -3573,7 +3585,14 @@ async fn get_book_toc(
             }
         }
     }
-    let bs_param = param_of(&params, body_json.as_ref(), "bookSource");
+    let mut bs_param = param_of(&params, body_json.as_ref(), "bookSource");
+    // 兜底：客户端未带 bookSource → 沿用书架书 origin（书籍详情/正文链路同语义）——
+    // 曾直接报「未配置书源」，书架书 origin 明明可用
+    if bs_param.trim().is_empty() {
+        if let Ok(Some(b)) = state.storage.find_book(&namespace, &url_param).await {
+            bs_param = b.origin.clone();
+        }
+    }
     let Some(source) = resolve_book_source(&state, &namespace, &bs_param).await else {
         // legacy getChapterList：非本地书且无可用书源 → 未配置书源
         return Json(ReturnData::err("未配置书源"));
@@ -4421,6 +4440,85 @@ fn sanitize_filename(name: &str) -> String {
         .chars()
         .take(80)
         .collect()
+}
+
+/// POST/GET /reader3/debugBookSource：legacy 薄路由——一次性返回全部调试步骤
+/// （bookSourceDebugSSE 的非流式等价；参数相同）
+async fn debug_book_source(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let action = param_of(&params, body_json.as_ref(), "action");
+    let key = param_of(&params, body_json.as_ref(), "key");
+    let mut target = param_of(&params, body_json.as_ref(), "chapterUrl");
+    if target.is_empty() {
+        target = param_of(&params, body_json.as_ref(), "url");
+    }
+    if !matches!(action.as_str(), "search" | "explore" | "toc" | "content") {
+        return Json(ReturnData::err("请输入调试动作（search|explore|toc|content）"));
+    }
+    if action == "search" && key.is_empty() {
+        return Json(ReturnData::err("请输入搜索关键字"));
+    }
+    let bs_param = param_of(&params, body_json.as_ref(), "bookSource");
+    let Some(source) = resolve_book_source(&state, &namespace, &bs_param).await else {
+        return Json(ReturnData::err("书源不存在"));
+    };
+    let steps: std::sync::Mutex<Vec<serde_json::Value>> = std::sync::Mutex::new(Vec::new());
+    let result =
+        crate::service::debug::run_debug(&namespace, &source, &action, &key, &target, |step| {
+            if let Ok(mut g) = steps.lock() {
+                g.push(serde_json::to_value(step).unwrap_or(serde_json::Value::Null));
+            }
+        })
+        .await;
+    match result {
+        Ok(data) => Json(ReturnData::ok(json!({
+            "steps": steps.into_inner().unwrap_or_default(),
+            "result": data,
+        }))),
+        Err(e) => Json(ReturnData::ok(json!({
+            "steps": steps.into_inner().unwrap_or_default(),
+            "error": format!("{e:#}"),
+        }))),
+    }
+}
+
+/// POST /reader3/addInvalidBookSource：客户端上报失效书源
+/// （legacy 语义：body/参数 bookSource=URL + error-msg；加入后 searchBookWithSource 类
+/// 全源流程跳过该源，600s 内快照去重）
+async fn add_invalid_book_source(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let url = param_of(&params, body_json.as_ref(), "bookSource");
+    let msg = {
+        let m = param_of(&params, body_json.as_ref(), "errorMsg");
+        if m.is_empty() {
+            param_of(&params, body_json.as_ref(), "error-msg")
+        } else {
+            m
+        }
+    };
+    if url.is_empty() {
+        return Json(ReturnData::err("请输入书源 URL"));
+    }
+    crate::service::health::mark_source_invalid(&namespace, &url, &msg);
+    Json(ReturnData::ok(serde_json::Value::Null))
 }
 
 /// 文件型本地书路径解析（严格防穿越 + legacy 目录式兜底）

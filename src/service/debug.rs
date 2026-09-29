@@ -125,7 +125,7 @@ async fn debug_fetch(
     let mut headers = source
         .header
         .as_deref()
-        .map(crawler::parse_header)
+        .map(|h| crawler::parse_header_for(h, source, ns))
         .unwrap_or_default();
     if let Some(extra) = &suffix.headers {
         for (k, v) in extra {
@@ -230,7 +230,7 @@ async fn debug_search(
     let headers = source
         .header
         .as_deref()
-        .map(crawler::parse_header)
+        .map(|h| crawler::parse_header_for(h, source, ns))
         .unwrap_or_default();
     let started = Instant::now();
     // 书源桥接（带用户命名空间：URL 构造 JS 内 java.* 可用）

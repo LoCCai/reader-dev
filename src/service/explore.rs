@@ -393,7 +393,7 @@ pub async fn explore_url(
     let mut headers = source
         .header
         .as_deref()
-        .map(crawler::parse_header)
+        .map(|h| crawler::parse_header_for(h, source, ns))
         .unwrap_or_default();
     if let Some(extra) = &suffix.headers {
         for (k, v) in extra {

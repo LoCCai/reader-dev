@@ -76,7 +76,7 @@ pub fn invalid_snapshot(ns: &str) -> Vec<(String, i64, String)> {
 
 /// 单书源健康检测：HEAD 优先（405/501 或失败回退 GET 首页）
 /// 返回 (是否可用, 说明)
-pub async fn check_source(_ns: &str, source: &BookSource) -> (bool, String) {
+pub async fn check_source(ns: &str, source: &BookSource) -> (bool, String) {
     let base = source
         .book_source_url
         .split('#')
@@ -93,7 +93,7 @@ pub async fn check_source(_ns: &str, source: &BookSource) -> (bool, String) {
     let headers = source
         .header
         .as_deref()
-        .map(crawler::parse_header)
+        .map(|h| crawler::parse_header_for(h, source, ns))
         .unwrap_or_default();
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(8))

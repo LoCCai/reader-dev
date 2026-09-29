@@ -403,6 +403,7 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
     .execute(&pool)
     .await?;
 
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS book_sources (
@@ -550,6 +551,13 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
     )
     .execute(&pool)
     .await?;
+        // get_toc_cache 按 (user_namespace, toc_url) 查询——表主键是 (book_url, ns)，
+        // 无索引则全表扫（随书数线性恶化）
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_toc_cache_toc ON toc_cache (user_namespace, toc_url)",
+        )
+        .execute(&pool)
+        .await?;
 
     // 书签（任务规格：PRIMARY KEY (book_url, title)）
     sqlx::query(
@@ -2263,7 +2271,7 @@ impl Storage {
 
     /// GAP 117：封面文件残留清理——cover_url 形如 /assets/{ns}/covers/{file}，
     /// 且删除后无其他书引用同一路径时删除文件（最佳努力，失败仅告警）
-    async fn cleanup_orphan_cover(&self, ns: &str, cover_url: Option<&str>) {
+    pub(crate) async fn cleanup_orphan_cover(&self, ns: &str, cover_url: Option<&str>) {
         let Some(cover_url) = cover_url else { return };
         let Some(file) = cover_file_name(ns, cover_url) else {
             return;
@@ -3821,7 +3829,8 @@ impl Storage {
                     .join(ns)
                     .join("covers");
                 let _ = std::fs::create_dir_all(&cover_dir);
-                let file_id = format!("{}.jpg", uuid::Uuid::new_v4());
+                // md5 内容寻址：同内容幂等（重复导入/重解析不再新增孤儿文件）
+                let file_id = format!("{}.jpg", crate::util::md5::md5_bytes_hex(cover));
                 if std::fs::write(cover_dir.join(&file_id), cover).is_ok() {
                     let _ = self
                         .update_book_cover(ns, book_url, &format!("/assets/{ns}/covers/{file_id}"))
@@ -3951,6 +3960,19 @@ impl Storage {
         book_url: &str,
         cover_url: &str,
     ) -> Result<u64> {
+        // 换封面 → 清旧文件（引用计数为 0 才删；GAP 117 清理逻辑复用）
+        if let Ok(Some(old)) = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT cover_url FROM books WHERE user_namespace = ?1 AND book_url = ?2",
+        )
+        .bind(ns)
+        .bind(book_url)
+        .fetch_one(&self.pool)
+        .await
+        {
+            if old != cover_url {
+                self.cleanup_orphan_cover(ns, Some(&old)).await;
+            }
+        }
         let r = sqlx::query(
             "UPDATE books SET cover_url = ?3 WHERE user_namespace = ?1 AND book_url = ?2",
         )

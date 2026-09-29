@@ -422,7 +422,7 @@ async fn import_file(
             .join(ns)
             .join("covers");
         let _ = std::fs::create_dir_all(&cover_dir);
-        let file_id = format!("{}.jpg", uuid::Uuid::new_v4());
+        let file_id = format!("{}.jpg", crate::util::md5::md5_bytes_hex(cover));
         if std::fs::write(cover_dir.join(&file_id), cover).is_ok() {
             let _ = storage
                 .update_book_cover(ns, &book_url, &format!("/assets/{ns}/covers/{file_id}"))
@@ -518,7 +518,7 @@ async fn reparse_and_update(
             .join(ns)
             .join("covers");
         let _ = std::fs::create_dir_all(&cover_dir);
-        let file_id = format!("{}.jpg", uuid::Uuid::new_v4());
+        let file_id = format!("{}.jpg", crate::util::md5::md5_bytes_hex(cover));
         if std::fs::write(cover_dir.join(&file_id), cover).is_ok() {
             let _ = storage
                 .update_book_cover(

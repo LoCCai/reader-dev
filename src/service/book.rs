@@ -21,9 +21,7 @@ fn expand_next_url(next: &str, base: &str, source: &BookSource, ns: &str) -> Str
     if !next.contains("{{") && !next.contains("<js>") && !next.starts_with("@js:") {
         return next.to_string();
     }
-    let bridge =
-        crate::parser::js::JsBridge::new(&source.book_source_url, &source.book_source_name)
-            .with_namespace(ns);
+    let bridge = crate::parser::js::JsBridge::from_source(source, ns);
     match crate::service::search::build_request_url(next, "", 1, base, &HashMap::new(), &bridge) {
         Ok((u, _suffix)) => u,
         Err(e) => {
@@ -138,7 +136,7 @@ pub async fn fetch_url(ns: &str, url: &str, source: &BookSource) -> Result<crawl
     let mut headers = source
         .header
         .as_deref()
-        .map(crawler::parse_header)
+        .map(|h| crawler::parse_header_for(h, source, ns))
         .unwrap_or_default();
     // 兜底：header（含 @js 动态生成）中 Referer 为**空串**时回填书源根——
     // 实测「📚QQ浏览器」源 header 为 @js 脚本动态生成 Referer:""（脚本缺陷），
@@ -429,6 +427,7 @@ pub fn analyze_book_info(
     // legado init：先提取详情上下文（如 $.data），字段规则相对应用
     // @put/@get 变量随本书流程贯通（legado Book.putVariable）——详情→目录共享
     let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, book_url);
+    crate::parser::js::attach_source_context(&mut vars, source, ns);
     vars.book_name = book_name.map(str::to_string);
     // E10/AR5：详情页真实 URL → JS 求值绑定 baseUrl（搜索场景无章节上下文）
     vars.insert("baseUrl".to_string(), base_url.to_string());
@@ -735,6 +734,7 @@ async fn analyze_toc_impl(
     // P1 双键合并：book_url 级作底、toc_url 级覆盖
     let mut vars =
         crate::parser::rule::load_book_vars_merged(ns, &source.book_source_url, book_url, toc_url);
+    crate::parser::js::attach_source_context(&mut vars, source, ns);
     vars.book_name = book_name.map(str::to_string);
     // 目录阶段 book.kind 实体引用（chapterUrl JS `BookID: book.kind`）——详情传入；
     // 缺省时从 tocUrl 的 bookId=\d+ 提取（QQ 型源通用形态）
@@ -850,6 +850,7 @@ pub async fn parse_toc_page(
     // P1 双键合并：book_url 级作底、当前页级覆盖
     let mut vars =
         crate::parser::rule::load_book_vars_merged(ns, &source.book_source_url, book_url, url);
+    crate::parser::js::attach_source_context(&mut vars, source, ns);
     vars.book_name = book_name.map(str::to_string);
     // E10/AR5：真实页 URL → JS 求值绑定 baseUrl
     vars.insert("baseUrl".to_string(), base.clone());
@@ -1244,6 +1245,7 @@ pub async fn analyze_media_url(
         book_url,
         chapter_url,
     );
+    crate::parser::js::attach_source_context(&mut vars, source, ns);
     vars.chapter_title = chapter_title.map(str::to_string);
     vars.book_name = book_name.map(str::to_string);
     let resp = fetch_url(ns, chapter_url, source).await?;
@@ -1313,6 +1315,7 @@ pub async fn analyze_comic_images(
         book_url,
         chapter_url,
     );
+    crate::parser::js::attach_source_context(&mut vars, source, ns);
     vars.chapter_title = chapter_title.map(str::to_string);
     vars.book_name = book_name.map(str::to_string);
     let resp = fetch_url(ns, chapter_url, source).await?;
@@ -1418,6 +1421,7 @@ async fn analyze_content_impl(
         book_url,
         chapter_url,
     );
+    crate::parser::js::attach_source_context(&mut vars, source, ns);
     vars.chapter_title = chapter_title.map(str::to_string);
     vars.book_name = book_name.map(str::to_string);
     // E10/AR5：章节上下文 → JS 绑定 chapter.url / title（legacy setChapter）

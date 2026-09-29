@@ -174,8 +174,21 @@ fn cookies_from_json(arr: &Value) -> Vec<(String, String)> {
 
 // ==================== 服务自 spawn（单可执行程序——首次用到自动拉起 Python 服务） ====================
 
-/// 服务状态缓存：0=未尝试，1=就绪，-1=启动失败（快速失败，不反复空转 20s 轮询）
+/// 服务状态缓存：0=未尝试，1=就绪，-1=启动失败（快速失败，不反复空转 20s 轮询）。
+/// 失败缓存带 TTL：距上次失败超过 SPAWN_RETRY_INTERVAL_MS 即重置重试——
+/// 曾为永久缓存：首次 spawn 瞬时失败（依赖未就绪/临时资源竞争）→ 至重启前 CF 永久失效
 static SERVICE_STATE: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(0);
+static LAST_FAIL_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+const SPAWN_RETRY_INTERVAL_MS: i64 = 60_000;
+
+/// 记录本次 spawn 失败时间（TTL 重试用）
+fn mark_spawn_fail() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default();
+    LAST_FAIL_MS.store(now, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// 已 spawn 的 python 子进程（保活 + 检测提前退出）
 static SPAWNED_CHILD: LazyLock<Mutex<Option<std::process::Child>>> =
@@ -237,7 +250,21 @@ pub async fn ensure_service() -> Result<()> {
     }
     match SERVICE_STATE.load(std::sync::atomic::Ordering::Relaxed) {
         1 => return Ok(()),
-        -1 => return Err(anyhow!("camoufox 求解服务启动失败（已缓存）——请检查 python3 与 camoufox 依赖，或设置 READER_CAMOUFOX_URL")),
+        -1 => {
+            let last_fail = LAST_FAIL_MS.load(std::sync::atomic::Ordering::Relaxed);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or_default();
+            if now - last_fail < SPAWN_RETRY_INTERVAL_MS {
+                return Err(anyhow!(
+                    "camoufox 求解服务启动失败（{}s 内不重试）——请检查 python3 与 camoufox 依赖，或设置 READER_CAMOUFOX_URL",
+                    (SPAWN_RETRY_INTERVAL_MS - (now - last_fail)) / 1000
+                ));
+            }
+            // TTL 过期 → 重置为未尝试，走下方正常 spawn 流程
+            SERVICE_STATE.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
         _ => {}
     }
     if std::env::var("READER_CAMOUFOX_SPAWN")
@@ -253,6 +280,7 @@ pub async fn ensure_service() -> Result<()> {
         Some(s) => s,
         None => {
             SERVICE_STATE.store(-1, std::sync::atomic::Ordering::Relaxed);
+            mark_spawn_fail();
             return Err(anyhow!(
                 "找不到 camoufox_solver.py——请设置 READER_CAMOUFOX_SCRIPT（或 READER_CAMOUFOX_URL 连接既有服务）"
             ));
@@ -262,6 +290,7 @@ pub async fn ensure_service() -> Result<()> {
         Some(p) => p,
         None => {
             SERVICE_STATE.store(-1, std::sync::atomic::Ordering::Relaxed);
+            mark_spawn_fail();
             return Err(anyhow!(
                 "找不到 python3/python——无法自 spawn camoufox_solver.py（请设置 READER_CAMOUFOX_URL 连接既有服务）"
             ));
@@ -283,6 +312,7 @@ pub async fn ensure_service() -> Result<()> {
         Ok(c) => c,
         Err(e) => {
             SERVICE_STATE.store(-1, std::sync::atomic::Ordering::Relaxed);
+            mark_spawn_fail();
             return Err(anyhow!(
                 "camoufox_solver.py 启动失败（{python} {}）: {e}",
                 script.display()
@@ -300,6 +330,7 @@ pub async fn ensure_service() -> Result<()> {
             .and_then(|c| c.try_wait().ok().flatten());
         if exited.is_some() {
             SERVICE_STATE.store(-1, std::sync::atomic::Ordering::Relaxed);
+            mark_spawn_fail();
             return Err(anyhow!(
                 "camoufox_solver.py 提前退出（可能是 camoufox 依赖未安装——pip install camoufox && camoufox fetch）"
             ));
@@ -311,6 +342,7 @@ pub async fn ensure_service() -> Result<()> {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     SERVICE_STATE.store(-1, std::sync::atomic::Ordering::Relaxed);
+            mark_spawn_fail();
     Err(anyhow!(
         "camoufox 求解服务启动超时（20s）——请检查 python3 与 camoufox 依赖"
     ))

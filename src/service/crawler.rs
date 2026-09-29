@@ -6,6 +6,7 @@
 //! - `fetch`/`fetch_get`：原始抓取（不带 cookie/FS 逻辑），供 RSS/TTS 等非书源场景。
 
 use anyhow::{anyhow, Result};
+use crate::model::BookSource;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
@@ -2005,8 +2006,24 @@ pub fn merge_turnstile_token(cookie_str: &str, token: &str) -> String {
         .join("; ")
 }
 
-/// 解析书源 header 字段（legacy：`<js>` 模板先执行（返回 JSON）→ JSON 字符串或 key=value 行）
+/// 解析书源 header 字段（legacy：`<js>` 模板先执行（返回 JSON）→ JSON 字符串或 key=value 行）。
+/// 无书源上下文版：jsLib 恒空（测试/health/无 source 场景）
 pub fn parse_header(header: &str) -> HashMap<String, String> {
+    parse_header_impl(header, None, "")
+}
+
+/// 带书源上下文版：header `<js>` 求值注入 jsLib（书源 js_lib/loginUrl 定义的
+/// sign/gethd/GetUL 等函数）——曾用空 bridge：真实书源 header JS 集中报
+/// ReferenceError（12+/全源搜索轮），且失败模板原文被原样拼进请求 URL
+pub fn parse_header_for(header: &str, source: &BookSource, ns: &str) -> HashMap<String, String> {
+    parse_header_impl(header, Some(source), ns)
+}
+
+fn parse_header_impl(
+    header: &str,
+    source: Option<&BookSource>,
+    ns: &str,
+) -> HashMap<String, String> {
     let mut map = HashMap::new();
     let mut header = header.trim().to_string();
     if header.is_empty() {
@@ -2028,7 +2045,14 @@ pub fn parse_header(header: &str) -> HashMap<String, String> {
             ("result".to_string(), String::new()),
             ("headerMap".to_string(), "{}".to_string()),
         ]);
-        match crate::parser::js::eval_js(&code, &vars) {
+        let eval_result = match source {
+            Some(src) => {
+                let bridge = crate::parser::js::JsBridge::from_source(src, ns);
+                crate::parser::js::eval_js_with_bridge(&code, &vars, &bridge)
+            }
+            None => crate::parser::js::eval_js(&code, &vars),
+        };
+        match eval_result {
             Ok(json) => header = json,
             Err(e) => {
                 tracing::warn!("书源 header JS 执行失败: {e}");

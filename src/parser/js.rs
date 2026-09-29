@@ -153,7 +153,9 @@ fn cache_get_value(ns: &str, key: &str) -> Option<String> {
     let storage = js_cache_registered()?;
     let db_ns = cache_db_ns(ns).to_string();
     let db_key = key.to_string();
-    let fut = async move { storage.get_js_cache(&db_ns, &db_key).await };
+    let storage_for_fut = storage.clone();
+    let db_ns_for_fut = db_ns.clone();
+    let fut = async move { storage_for_fut.get_js_cache(&db_ns_for_fut, &db_key).await };
     let (v, exp) = match block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "cache.get") {
         Ok(Some(hit)) => hit,
         Ok(None) => return None,
@@ -165,11 +167,98 @@ fn cache_get_value(ns: &str, key: &str) -> Option<String> {
     if exp > 0 && exp <= cache_now_ms() {
         return None;
     }
+    // putFile 哨兵行 → 回源读文件（值本体在磁盘，表里只存路径标记）
+    let v = match resolve_file_sentinel(&storage, &db_ns, &v) {
+        Some(content) => content,
+        None => return None, // 文件丢失按未命中（下次 putFile 重建）
+    };
     CACHE_STORE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(k, (v.clone(), exp));
     Some(v)
+}
+
+/// js_cache 文件缓存：目录名（data/{ns}/ 下）与哨兵前缀。
+/// legado jsHelp putFile 语义——大值（图片/长文本/二进制）落文件不落库，
+/// 是 cache.put 256KB 落库上限的正当出口
+const JS_CACHE_FILE_DIR: &str = "js_cache_files";
+const JS_CACHE_FILE_SENTINEL: &str = "file:";
+
+fn js_cache_file_path(
+    storage: &crate::storage::Storage,
+    db_ns: &str,
+    key: &str,
+) -> std::path::PathBuf {
+    storage
+        .config
+        .storage_dir()
+        .join("data")
+        .join(db_ns)
+        .join(JS_CACHE_FILE_DIR)
+        .join(format!("{}.bin", crate::util::md5::md5_encode(&format!("{db_ns}\u{1}{key}"))))
+}
+
+/// 哨兵值 → 文件内容（None = 非哨兵值原样返回 Some(v)；文件丢失返回 None）
+fn resolve_file_sentinel(
+    storage: &crate::storage::Storage,
+    db_ns: &str,
+    v: &str,
+) -> Option<String> {
+    let Some(rel) = v.strip_prefix(JS_CACHE_FILE_SENTINEL) else {
+        return Some(v.to_string());
+    };
+    if rel.contains("..") {
+        return None; // 路径穿越防护（哨兵由本服务写入，防御性校验）
+    }
+    let path = storage
+        .config
+        .storage_dir()
+        .join("data")
+        .join(db_ns)
+        .join(rel);
+    std::fs::read(&path)
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
+/// cache.putFile / putFileAsBase64 核心：值写文件、表存哨兵（不受 256KB 落库上限约束）。
+/// 无持久层（测试/降级）→ 仅内存存内容字符串
+fn cache_put_file_value(ns: &str, key: &str, bytes: Vec<u8>, save_time_secs: i64) {
+    let k = cache_store_key(ns, key);
+    let exp = if save_time_secs > 0 {
+        cache_now_ms() + save_time_secs * 1000
+    } else {
+        0
+    };
+    // 内存存内容字符串（getFile 语义为字符串读取）
+    CACHE_STORE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(k, (String::from_utf8_lossy(&bytes).into_owned(), exp));
+    let Some(storage) = js_cache_registered() else {
+        return;
+    };
+    let db_ns = cache_db_ns(ns).to_string();
+    let path = js_cache_file_path(&storage, &db_ns, key);
+    let written = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")))
+        .is_ok()
+        && std::fs::write(&path, &bytes).is_ok();
+    let db_value = if written {
+        // 哨兵：相对 data/{ns}/ 的路径
+        format!(
+            "{JS_CACHE_FILE_SENTINEL}{JS_CACHE_FILE_DIR}/{}",
+            path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+        )
+    } else {
+        tracing::warn!("cache.putFile 文件写入失败 [{}]，退回常规落库（大值将被拒）", key);
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let key_owned = key.to_string();
+    let fut = async move { storage.put_js_cache(&db_ns, &key_owned, &db_value, exp).await };
+    if let Err(e) = block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "cache.putFile") {
+        tracing::warn!("cache.putFile 哨兵落库失败（本次仅内存）: {e}");
+    }
 }
 
 /// E11-2：cache.put 单值落库上限——超大值（如整页 HTML）只进内存不落库，
@@ -250,7 +339,7 @@ pub struct JsBridge {
     inner: Arc<JsBridgeInner>,
 }
 
-struct JsBridgeInner {
+pub(crate) struct JsBridgeInner {
     /// 书源 key（URL），`source.getKey()` 返回
     source_key: String,
     /// 书源名称，`source.getName()` 返回
@@ -2052,6 +2141,13 @@ fn install_globals(context: &mut Context, bridge: &JsBridge) -> Result<()> {
             1,
         )
         .function(bind(bridge, cache_js_put_memory), JsString::from("putToMemory"), 2)
+        .function(bind(bridge, cache_js_put_file), JsString::from("putFile"), 3)
+        .function(
+            bind(bridge, cache_js_put_file_b64),
+            JsString::from("putFileAsBase64"),
+            3,
+        )
+        .function(bind(bridge, cache_js_get), JsString::from("getFile"), 1)
         .function(
             bind(bridge, cache_js_delete),
             JsString::from("deleteMemory"),
@@ -2164,6 +2260,44 @@ fn cache_js_put(
         .map(|n| n as i64)
         .unwrap_or(0);
     cache_put_value(&inner.ns, &key, value, save_time);
+    Ok(JsValue::undefined())
+}
+
+/// cache.putFile(key, value, saveTime)：值写文件、表存哨兵（legado jsHelp 大值语义）
+fn cache_js_put_file(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let key = js_value_to_string(args.get_or_undefined(0), _context);
+    let value = js_value_to_string(args.get_or_undefined(1), _context);
+    let save_time = args
+        .get(2)
+        .and_then(|v| v.as_number())
+        .map(|n| n as i64)
+        .unwrap_or(0);
+    cache_put_file_value(&inner.ns, &key, value.into_bytes(), save_time);
+    Ok(JsValue::undefined())
+}
+
+/// cache.putFileAsBase64(key, valueBase64, saveTime)：base64 解码后写二进制文件
+fn cache_js_put_file_b64(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    use base64::Engine;
+    let key = js_value_to_string(args.get_or_undefined(0), _context);
+    let b64 = js_value_to_string(args.get_or_undefined(1), _context);
+    let save_time = args
+        .get(2)
+        .and_then(|v| v.as_number())
+        .map(|n| n as i64)
+        .unwrap_or(0);
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .unwrap_or_else(|_| b64.into_bytes());
+    cache_put_file_value(&inner.ns, &key, bytes, save_time);
     Ok(JsValue::undefined())
 }
 
@@ -6863,9 +6997,90 @@ fn aes_base64_decode_to_string(data: &str, key: &str, iv: &str) -> String {
     }
 }
 
+/// 测试/内部：从共享 inner 重建桥接（RuleVars.bridge 携带 → eval_rule_js 使用）
+pub(crate) fn js_bridge_from_inner(inner: Arc<JsBridgeInner>) -> JsBridge {
+    JsBridge { inner }
+}
+
+/// 分析入口注入：把书源 JS 上下文（jsLib/loginUrl/书源变量/java.* 桥）挂到 RuleVars——
+/// 规则引擎内所有 @js:/<js>/{{js}} 段求值即可使用书源定义的函数
+/// （曾缺失：规则级 JS 调 js_lib 的 sign/GetUL/AES_KEY 等全部 ReferenceError）
+pub(crate) fn attach_source_context(
+    vars: &mut crate::parser::rule::RuleVars,
+    source: &crate::model::BookSource,
+    ns: &str,
+) {
+    vars.bridge = Some(JsBridge::from_source(source, ns).inner);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cache.putFile/getFile 文件缓存回环：文件落盘 + 表存哨兵 + 清内存后读穿透解析
+    #[tokio::test]
+    async fn test_cache_put_file_roundtrip() {
+        // 临时 Storage（镜像 storage::tests::test_storage 模式）
+        let dir = std::env::temp_dir().join(format!("js-cache-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut config = crate::AppConfig::from_env();
+        config.work_dir = dir.to_string_lossy().into_owned();
+        let storage = crate::storage::init(&config).await.expect("测试存储初始化失败");
+        register_js_cache_storage(storage.clone());
+
+        let big = "A".repeat(600 * 1024); // > 256KB 落库上限——putFile 的存在意义
+        cache_put_file_value("ns1", "bigkey", big.clone().into_bytes(), 0);
+
+        // 文件在盘上、表里是哨兵
+        let db_ns = cache_db_ns("ns1");
+        let path = js_cache_file_path(&storage, db_ns, "bigkey");
+        assert!(path.exists(), "值文件应落盘: {}", path.display());
+        assert!(std::fs::read(&path).unwrap().len() == 600 * 1024);
+        let (row, _) = storage.get_js_cache(db_ns, "bigkey").await.unwrap().unwrap();
+        assert!(row.starts_with(JS_CACHE_FILE_SENTINEL), "表应存哨兵: {row}");
+
+        // 清内存 → 读穿透解析哨兵取回内容
+        CACHE_STORE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&cache_store_key("ns1", "bigkey"));
+        assert_eq!(cache_get_value("ns1", "bigkey").as_deref(), Some(big.as_str()));
+
+        // putFileAsBase64：base64 写二进制
+        cache_put_file_value("ns1", "bink", b"bin-data".to_vec(), 0);
+        let (row2, _) = storage.get_js_cache(db_ns, "bink").await.unwrap().unwrap();
+        assert!(row2.starts_with(JS_CACHE_FILE_SENTINEL));
+        assert_eq!(std::fs::read(js_cache_file_path(&storage, db_ns, "bink")).unwrap(), b"bin-data");
+
+        // 文件丢失 → 按未命中
+        std::fs::remove_file(&path).unwrap();
+        CACHE_STORE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&cache_store_key("ns1", "bigkey"));
+        assert!(cache_get_value("ns1", "bigkey").is_none(), "文件丢失应按未命中");
+
+        clear_js_cache_storage();
+        CACHE_STORE.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        storage.pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 无持久层（未注册）时 putFile 降级为纯内存
+    #[test]
+    fn test_cache_put_file_memory_fallback() {
+        let saved = JS_CACHE_STORAGE.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        clear_js_cache_storage();
+        cache_put_file_value("ns-mem", "k", b"v".to_vec(), 0);
+        assert_eq!(cache_get_value("ns-mem", "k").as_deref(), Some("v"));
+        CACHE_STORE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&cache_store_key("ns-mem", "k"));
+        if saved {
+            // 并行测试可能已注册——不恢复（各测试用独立 ns 键隔离）
+        }
+    }
 
     /// M6：block_on_task 超时后立即返回错误（不再无限等待）——永不完成的任务在短超时内返回
     #[test]

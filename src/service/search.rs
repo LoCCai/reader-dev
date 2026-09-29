@@ -649,13 +649,14 @@ async fn search_one_source_impl(
     let headers = source
         .header
         .as_deref()
-        .map(crawler::parse_header)
+        .map(|h| crawler::parse_header_for(h, source, ns))
         .unwrap_or_default();
 
     // 书源 JS 桥接（带用户命名空间：java.ajax / java.startBrowserAwait 自动携带
     // 书源 cookie；同流程内多次 eval 共享 java.put/get / setContent 文档）
-    let bridge =
-        JsBridge::new(&source.book_source_url, &source.book_source_name).with_namespace(ns);
+    // from_source：注入 jsLib/loginUrl/书源变量——header 与 searchUrl {{js}} 引用的
+    // GetUL/sign/AES_KEY 等函数均定义在 js_lib 或 loginUrl（曾用 new()：全部 ReferenceError）
+    let bridge = JsBridge::from_source(source, ns);
 
     // 1) @js:/js: 前缀 + 2) `,{...}` 后缀（js 修改 URL）→ 最终请求 URL
     let (url, suffix) = build_request_url(
@@ -963,6 +964,7 @@ fn analyze_book_list_impl(
         .filter_map(|(idx, item_html)| {
             // legado：同一本书条目共用一个 AnalyzeRule——@put 跨字段存入、@get 后置字段读取
             let mut vars = RuleVars::new();
+            crate::parser::js::attach_source_context(&mut vars, source, ns);
             // E10/AR5：搜索无章节上下文，仅绑定 baseUrl（JS 字段规则可用）
             vars.insert("baseUrl".to_string(), base_url.to_string());
             // E10：src = 当前条目 HTML（legacy AnalyzeRule.kt:661 bindings["src"]=content——
