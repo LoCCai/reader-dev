@@ -342,18 +342,24 @@ _browser_ready = False
 SESSIONS = {}
 
 
+def browser_alive(b) -> bool:
+    """探活：Browser.is_connected()（is_closed 是 Page 的方法——曾误用：AttributeError
+    被兜底吞掉后健康浏览器恒判死，每次请求重启 + /health 恒 false）。
+    BrowserContext 经 .browser 间连；API 异常按死亡处理（宁可重启不挂死请求）。"""
+    try:
+        target = getattr(b, "browser", None) or b
+        return bool(target.is_connected())
+    except Exception:
+        return False
+
+
 async def get_browser():
     """惰性启动常驻 camoufox 浏览器（进程生命周期内复用；并发请求经锁排队）。
     验活：浏览器进程死亡（崩溃/OOM-kill）时 _browser 对象仍残留——只判 None 会
     永远返回僵死对象，请求静默失败且 /health 误报 ready；死亡则关闭残壳并重启。
     """
     global _browser, _browser_ready
-    dead = False
-    if _browser is not None:
-        try:
-            dead = _browser.is_closed()
-        except Exception:
-            dead = True
+    dead = _browser is not None and not browser_alive(_browser)
     if _browser is None or dead:
         if dead:
             try:
@@ -1138,12 +1144,7 @@ async def handle_client(reader, writer):
             payload = await read_json_body(reader)
         if method == "GET" and path in ("/health", "/health/"):
             # browserReady 反映真实存活（曾为一次性置位标志：浏览器死后仍误报 true）
-            alive = False
-            if _browser is not None:
-                try:
-                    alive = not _browser.is_closed()
-                except Exception:
-                    alive = False
+            alive = _browser is not None and browser_alive(_browser)
             status, payload = 200, {
                 "ok": True,
                 "camoufoxVersion": "0.5.4",
