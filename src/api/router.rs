@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, Query, State};
+use axum::handler::Handler as _;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -277,8 +278,13 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
         .route("/reader3/getSystemInfo", get(get_system_info))
         .route("/reader3/getServerStats", get(get_server_stats))
         .route("/reader3/exportBookSources", get(export_book_sources))
-        // SPA fallback：未匹配路由 → webdav 分流 / API 404 / 前端
-        .fallback(fallback_handler)
+        // SPA fallback：未匹配路由 → webdav 分流 / API 404 / 前端。
+        // fallback_handler 以 Bytes 提取请求体（WebDAV PUT 落盘）——不放开 axum 默认
+        // 2MB 上限的话，>2MB 的 WebDAV 大文件上传一律 413（READER_UPLOAD_MAX_MB 不生效），
+        // 这里与 multipart 上传路由同限放开
+        .fallback(
+            fallback_handler.layer(axum::extract::DefaultBodyLimit::max(upload_limit)),
+        )
         .route("/reader3/getBookshelf", get(get_bookshelf))
         .route(
             "/reader3/getBookSources",
@@ -7990,6 +7996,23 @@ async fn save_book(
             loc_migrated = true;
         }
     }
+    // 安全校验：本地书 bookUrl/local_file 均为客户端可控字段——存在但位于 storage
+    // 容器外（或 env 书仓根外）/保留名（reader.db 等）的路径拒绝入库，防止任意
+    // 路径入库后经 OPDS download/acquire 读服务器任意文件；悬挂路径（文件不存在）
+    // 放行保持 legacy「迁移降级不阻断保存」语义（读取面由硬化后的解析函数兜底）。
+    // 仅新入架或 bookUrl 变化时校验（存量书编辑不动路径，保持兼容）。
+    if (!exists || existing.as_ref().is_some_and(|ex| ex.book_url != book_url)) && !loc_migrated {
+        let storage_dir = state.storage.config.storage_dir();
+        if !crate::api::opds::local_book_save_allowed(
+            &storage_dir,
+            &book_url,
+            &book.origin,
+            book.local_file.as_deref(),
+        ) {
+            tracing::warn!("saveBook 本地书路径非法，拒绝入库 [{namespace}] {book_url}");
+            return Json(ReturnData::err("本地书路径非法"));
+        }
+    }
     let result = if let Some(ex) = existing {
         // 编辑：按 body 出现的字段增量更新。
         // legacy：saveBook 不允许改进度——dur 三字段以库内为准（客户端走 saveBookProgress）
@@ -10600,7 +10623,8 @@ fn resolve_storage_path(
     let root = storage_dir
         .canonicalize()
         .unwrap_or_else(|_| storage_dir.to_path_buf());
-    if abs.starts_with(&root) && abs.is_file() {
+    if abs.starts_with(&root) && abs.is_file() && !crate::api::opds::is_reserved_db_file(&abs, &root)
+    {
         Some(abs)
     } else {
         None
@@ -10727,7 +10751,8 @@ fn resolve_loc_book_file(
     let root = storage_dir
         .canonicalize()
         .unwrap_or_else(|_| storage_dir.to_path_buf());
-    if abs.starts_with(&root) && abs.is_file() {
+    if abs.starts_with(&root) && abs.is_file() && !crate::api::opds::is_reserved_db_file(&abs, &root)
+    {
         Some(abs)
     } else {
         None
@@ -11047,14 +11072,22 @@ fn encode_url_path_segments(rel: &str) -> String {
         .join("/")
 }
 
-/// img 标签列表 → {content} 返回（legacy getBookContent 漫画/PDF 页图模式形态）
+/// img 标签列表 → {content, images} 返回（legacy getBookContent 漫画/PDF 页图模式形态）：
+/// content 为 `<img>` 标签串（legacy 契约）；images 为同序 URL 数组——web-ui 漫画分支
+/// 只读 data.images（ReaderView.vue），本地 CBZ 页图必须同返 images 才能渲染
 fn image_list_content(base_href: String, files: &[String]) -> Json<ReturnData> {
-    let html = files
+    let urls: Vec<String> = files
         .iter()
-        .map(|rel| format!("<img src=\"{base_href}{}\">", encode_url_path_segments(rel)))
+        .map(|rel| format!("{base_href}{}", encode_url_path_segments(rel)))
+        .collect();
+    let html = urls
+        .iter()
+        .map(|u| format!("<img src=\"{u}\">"))
         .collect::<Vec<_>>()
         .join("\n");
-    Json(ReturnData::ok(serde_json::json!({ "content": html })))
+    Json(ReturnData::ok(
+        serde_json::json!({ "content": html, "images": urls }),
+    ))
 }
 
 /// 本地书非文本文型内容（legacy getBookContent 三模式最小对齐）：
@@ -11252,6 +11285,13 @@ async fn serve_data_file(
     let Some(rel) = uri_path.strip_prefix(prefix).and_then(safe_data_rel_path) else {
         return webdav_status_404();
     };
+    // 私有目录排除：data/{ns}/webdav（WebDAV 文件 + 自动备份 zip）与
+    // data/{ns}/opds_files（上传本地书原文件）为用户私有数据。该路由无 accessToken
+    // 鉴权（<img>/EPUB 资源请求无法携带请求头），只能按目录段拦截——否则 secure
+    // 多用户模式下任何人可匿名跨租户读他人 WebDAV 备份/上传书
+    if is_private_data_rel(&rel) {
+        return webdav_status_404();
+    }
     let root = state.storage.config.storage_dir().join("data");
     let file = root.join(&rel);
     // 防穿越兜底：规范化后必须仍位于 data 根内（符号链接/盘符等），且必须是普通文件
@@ -11330,6 +11370,18 @@ fn safe_data_rel_path(tail: &str) -> Option<std::path::PathBuf> {
     } else {
         Some(rel)
     }
+}
+
+/// data/{ns}/ 下的用户私有目录段（首段为命名空间，不参与判定）：
+/// webdav（WebDAV 文件/自动备份 zip）、opds_files（上传本地书原文件）——
+/// 不得经无鉴权的 /book-assets、/epub 静态路由读出
+fn is_private_data_rel(rel: &std::path::Path) -> bool {
+    rel.components().skip(1).any(|c| {
+        matches!(
+            c.as_os_str().to_string_lossy().as_ref(),
+            "webdav" | "opds_files"
+        )
+    })
 }
 
 /// ASCII 大小写不敏感子串查找（返回字节偏移——不能用 to_lowercase 的偏移映射回原文：
@@ -21962,6 +22014,18 @@ mod tests {
             html.find(&t10).expect("缺 10.png"),
         );
         assert!(p1 < p2 && p2 < p10, "页图按文件名自然序: {html}");
+        // images 数组与 content 同返（web-ui 漫画分支只读 data.images——本地 CBZ 必须有）
+        let images = ret.0.data["images"].as_array().expect("应返回 images 数组");
+        let img_urls: Vec<&str> = images.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(
+            img_urls,
+            vec![
+                format!("{base_href}1.png"),
+                format!("{base_href}2.jpg"),
+                format!("{base_href}10.png"),
+            ],
+            "images 与 content 同序"
+        );
         let chapter_dir = state
             .storage
             .config
@@ -22749,6 +22813,80 @@ mod tests {
         cleanup(state, dir).await;
     }
 
+    /// P0：saveBook 安全校验——origin=loc_book 的 bookUrl 指向 storage 根内保留名
+    /// （reader.db 整库/凭证文件）或容器外存在文件（绝对路径逃逸）→ 拒绝入库，
+    /// 防止经 OPDS download/acquire 读服务器任意文件；悬挂路径保持 legacy 降级入架
+    #[tokio::test]
+    async fn test_save_book_rejects_unsafe_local_url() {
+        let (state, dir) = test_state("savereject").await;
+        let save = |state: AppState, body: serde_json::Value| {
+            Box::pin(async move {
+                save_book(
+                    AxumState(state),
+                    Query(HashMap::new()),
+                    HeaderMap::new(),
+                    Some(Bytes::from(body.to_string())),
+                )
+                .await
+            })
+        };
+        // ① storage 根内保留名（reader.db 整库）→ 拒绝
+        let ret = save(
+            state.clone(),
+            serde_json::json!({
+                "bookUrl": "reader.db",
+                "name": "整库书",
+                "author": "X",
+                "origin": "loc_book",
+            }),
+        )
+        .await;
+        assert!(!ret.0.is_success, "保留名整库路径应拒绝入库");
+        assert!(state
+            .storage
+            .find_book("default", "reader.db")
+            .await
+            .unwrap()
+            .is_none());
+
+        // ② 容器外存在的文件（绝对路径逃逸）→ 拒绝
+        let outside =
+            std::env::temp_dir().join(format!("reader-save-reject-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"top secret").unwrap();
+        let ret = save(
+            state.clone(),
+            serde_json::json!({
+                "bookUrl": outside.join("secret.txt").to_string_lossy(),
+                "name": "逃逸书",
+                "author": "X",
+                "origin": "loc_book",
+            }),
+        )
+        .await;
+        assert!(!ret.0.is_success, "容器外路径应拒绝入库");
+
+        // ③ 悬挂路径（文件不存在，legacy 迁移降级语义）→ 放行照常入架
+        let ret = save(
+            state.clone(),
+            serde_json::json!({
+                "bookUrl": "/assets/default/book/ghost.epub",
+                "name": "幽灵书X",
+                "author": "X",
+                "origin": "loc_book",
+            }),
+        )
+        .await;
+        assert!(
+            ret.0.is_success,
+            "悬挂路径应保持 legacy 降级入架: {}",
+            ret.0.error_msg
+        );
+
+        let _ = std::fs::remove_dir_all(&outside);
+        cleanup(state, dir).await;
+    }
+
     /// 缓存淘汰与隔离：ns 隔离、FIFO 插入序淘汰（容量 200）、过期条目清除
     /// （用独立 store 实例验证逻辑——不污染全局缓存，避免并行测试互相干扰）
     #[test]
@@ -22895,6 +23033,64 @@ mod tests {
             let resp = app.clone().oneshot(req(uri.into())).await.unwrap();
             assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri} 应拒绝");
         }
+
+        // ⑦ 私有目录排除：data/{ns}/webdav（WebDAV 文件/自动备份）与
+        //    data/{ns}/opds_files（上传本地书）为用户私有——无鉴权静态路由必须 404
+        let wdv = data.join("alice/webdav/legado");
+        std::fs::create_dir_all(&wdv).unwrap();
+        std::fs::write(wdv.join("auto-20260930.zip"), b"PK\x03\x04backup").unwrap();
+        let opds = data.join("alice/opds_files");
+        std::fs::create_dir_all(&opds).unwrap();
+        std::fs::write(opds.join("u1.epub"), b"uploaded").unwrap();
+        std::fs::write(data.join("alice/webdav/plain.txt"), b"w").unwrap();
+        for uri in [
+            "/book-assets/alice/webdav/legado/auto-20260930.zip",
+            "/epub/alice/webdav/legado/auto-20260930.zip",
+            "/book-assets/alice/webdav/plain.txt",
+            "/book-assets/alice/opds_files/u1.epub",
+        ] {
+            let resp = app.clone().oneshot(req(uri.into())).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri} 应 404（私有目录）");
+        }
+        cleanup(state, dir).await;
+    }
+
+    /// P0：WebDAV PUT 请求体上限——fallback_handler 以 Bytes 提取请求体（WebDAV PUT
+    /// 落盘），未放开 axum 默认 2MB 上限的话 >2MB 大文件上传一律 413
+    /// （READER_UPLOAD_MAX_MB 只作用于 multipart 上传路由）。验证 2MB+1 字节
+    /// PUT 正常落盘（非 413）——恰好越过 DEFAULT_LIMIT=2_097_152 边界
+    #[tokio::test]
+    async fn test_webdav_put_body_limit_above_2mb() {
+        use tower::ServiceExt as _;
+        let (state, dir) = test_state("webdavbig").await;
+        let config = state.storage.config.clone();
+        // 非 secure：webdav 根 data/default/webdav（put_file 要求父目录存在）
+        std::fs::create_dir_all(config.storage_dir().join("data/default/webdav")).unwrap();
+        let app = crate::api::router::router(config, state.storage.clone());
+
+        let body = vec![0x61u8; 2_097_153];
+        let mut req = axum::http::Request::builder()
+            .method(axum::http::Method::PUT)
+            .uri("/reader3/webdav/big.bin")
+            .header("host", "srv.example:8080")
+            .body(Body::from(body))
+            .unwrap();
+        // ConnectInfo 提取器依赖请求扩展注入（oneshot 无真实 socket）
+        req.extensions_mut().insert(ConnectInfo(
+            "127.0.0.1:12345"
+                .parse::<std::net::SocketAddr>()
+                .unwrap(),
+        ));
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        assert_ne!(status, StatusCode::PAYLOAD_TOO_LARGE, "不得 413");
+        assert_eq!(status, StatusCode::CREATED, "大文件 PUT 应正常落盘");
+        let written = state
+            .storage
+            .config
+            .storage_dir()
+            .join("data/default/webdav/big.bin");
+        assert_eq!(std::fs::metadata(&written).unwrap().len(), 2_097_153);
         cleanup(state, dir).await;
     }
 

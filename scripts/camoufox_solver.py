@@ -1052,6 +1052,14 @@ async def handle_screenshot(reader, payload):
             pass
 
 
+def _cookie_of_host(c, host):
+    """cookie 是否属于登录页主机域（domain 缺省视为属于——playwright ctx 域内 cookie）"""
+    d = str(c.get("domain") or "").lstrip(".")
+    if not d or not host:
+        return True
+    return host == d or host.endswith("." + d)
+
+
 async def handle_probe(reader, payload):
     """POST /probe：导航 → 检测验证码类型（image/slider/click/none）+ 图片截图"""
     try:
@@ -1080,8 +1088,14 @@ async def handle_probe(reader, payload):
         await asyncio.sleep(1.0)
         det = await detect_captcha(page)
         page_url = page.url
+        # 会话 cookie 回传（仅登录页主机域下——第三方域不进书源 cookie 串）
+        try:
+            cookies_out = [c for c in await ctx.cookies() if _cookie_of_host(c, host)]
+        except Exception:
+            cookies_out = []
         if not det or det.get("kind") not in ("image", "slider", "click"):
-            return 200, {"captchaType": "none", "pageUrl": page_url, "message": "未检测到验证码"}
+            return 200, {"captchaType": "none", "pageUrl": page_url,
+                         "message": "未检测到验证码", "cookies": cookies_out}
         kind = det.get("kind")
         if kind == "image":
             x = float(det.get("x") or 0)
@@ -1096,10 +1110,12 @@ async def handle_probe(reader, payload):
                     "base64": base64.b64encode(png).decode("ascii") if png else "",
                     "x": x, "y": y, "w": w, "h": h,
                 },
+                "cookies": cookies_out,
             }
         return 200, {"captchaType": kind, "pageUrl": page_url,
                      "message": "滑块验证码（请重新调用登录自动处理）" if kind == "slider"
-                     else "点选类验证码（无法自动识别）"}
+                     else "点选类验证码（无法自动识别）",
+                     "cookies": cookies_out}
     finally:
         try:
             await ctx.close()

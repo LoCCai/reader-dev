@@ -265,8 +265,9 @@ fn build_http_client(
         .map_err(|e| anyhow!("构建 HTTP client 失败: {e}"))
 }
 
-/// SSRF 校验重定向策略（fetch 与代理共享 Client 共用；逐跳校验跳转目标防 302 回内网）
-fn ssrf_redirect_policy() -> reqwest::redirect::Policy {
+/// SSRF 校验重定向策略（fetch 与代理共享 Client 共用；逐跳校验跳转目标防 302 回内网）。
+/// HttpTTS 合成的两处 Client 同样复用（tts.rs）——重定向跳内网/169.254 一律拦截
+pub(crate) fn ssrf_redirect_policy() -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(|attempt| {
         match validate_redirect_target(attempt.url().as_str()) {
             Ok(()) => attempt.follow(),

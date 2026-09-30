@@ -10,7 +10,7 @@
 //!    前端输入后重新调用 loginBookSource（captcha 参数，HTTP 流）或 submitCaptcha（浏览器流）。
 //!
 //! 点击类验证码（滑块/点选）处理策略：
-//! - 滑块：浏览器自动拖拽（2 次尝试）；失败/超时（30s）→ "需手动 Cookie" 错误
+//! - 滑块：浏览器自动拖拽（2 次尝试）；失败/超时（外层总超时，默认 90s）→ "需手动 Cookie" 错误
 //! - 点选：无法自动识别目标点 → "需手动 Cookie" 错误（请在浏览器登录后粘贴 Cookie）
 
 use std::collections::HashMap;
@@ -23,6 +23,19 @@ use serde_json::{json, Value};
 use crate::model::BookSource;
 use crate::service::{browser, crawler, search};
 use crate::storage::Storage;
+
+/// 浏览器自动登录内层 maxWaitMs（传给 camoufox /login、/login/captcha 的导航+等待上限，
+/// 与 Python 侧 LOGIN_MAX_WAIT_MS 默认值一致）
+const BROWSER_LOGIN_MAX_WAIT_MS: u64 = 60_000;
+/// 外层总超时余量：须覆盖 camoufox 冷启动健康轮询（ensure_service 最多约 20s）、
+/// SSRF 校验与内层 reqwest 超时（maxWaitMs+20s）——外层若小于内层完成时间，
+/// 慢站登录成功的结果会在 Python 侧完成后被整体丢弃
+const BROWSER_LOGIN_TIMEOUT_MARGIN_MS: u64 = 30_000;
+
+/// 浏览器登录/验证码回填的外层总超时（必须 > 内层 maxWaitMs + 冷启动 + reqwest 余量）
+fn browser_login_timeout() -> Duration {
+    Duration::from_millis(BROWSER_LOGIN_MAX_WAIT_MS + BROWSER_LOGIN_TIMEOUT_MARGIN_MS)
+}
 
 /// 登录请求参数（均可选）
 #[derive(Debug, Clone, Default)]
@@ -417,7 +430,8 @@ pub async fn login_http(
         .await?
     };
 
-    // Set-Cookie 合并存库（按用户）
+    // Set-Cookie 合并（按用户）——仅计算合并结果供 loginCheckJs 使用；是否入库
+    // 延后到登录结果判定（见下方 login_outcome_persists_cookie）
     let set_cookies: Vec<String> = resp
         .headers
         .iter()
@@ -426,24 +440,19 @@ pub async fn login_http(
         .collect();
     let existing = storage.get_cookie(ns, &source.book_source_url).await?;
     let merged = merge_cookie(existing.as_deref().unwrap_or(""), &set_cookies);
-    if !merged.is_empty() {
-        storage
-            .set_cookie(ns, &source.book_source_url, &merged)
-            .await?;
-    }
 
     // loginCheckJs
     let ok = match &source.login_check_js {
         Some(js) => check_login(js, &merged, &resp.body, &resp.url)?,
         None => true,
     };
-    if ok {
-        return Ok(LoginOutcome::Success { cookie: merged });
-    }
 
-    // 失败 → 验证码判定
-    if let Some(kind) = detect_click_captcha(&resp.body) {
-        // 点击类验证码：浏览器可用 → 自动切换浏览器流（滑块自动拖）；否则手动 Cookie
+    // 失败 → 验证码判定（先定结果，再决定是否持久化 cookie）
+    let outcome = if ok {
+        LoginOutcome::Success { cookie: merged.clone() }
+    } else if let Some(kind) = detect_click_captcha(&resp.body) {
+        // 点击类验证码：浏览器可用 → 自动切换浏览器流（滑块自动拖）；否则手动 Cookie。
+        // 切换/手动路径直接返回——本轮 HTTP 失败会话不入库（浏览器流成功时自行入库）
         if browser::is_browser_available() {
             tracing::info!(
                 "书源 [{}] 检测到{kind}验证码——切换浏览器自动登录",
@@ -452,39 +461,57 @@ pub async fn login_http(
             return login_browser(storage, ns, source, req).await;
         }
         let kind_cn = if kind == "slider" { "滑块" } else { "点选" };
-        return Ok(LoginOutcome::NeedManualCookie {
+        LoginOutcome::NeedManualCookie {
             message: format!(
                 "检测到{kind_cn}验证码：请在浏览器登录该书源后，在书源设置粘贴 Cookie（配置 camoufox 服务后可使用浏览器自动登录）"
             ),
-        });
-    }
-    // 图片验证码：页面含 captcha 图片 → captchaUrl 给前端
-    if let Some(captcha_url) = extract_image_captcha_url(&resp.body, &resp.url) {
-        let captcha_id = new_captcha_session(ns, source, "image", req);
-        return Ok(LoginOutcome::NeedImageCaptcha {
+        }
+    } else if let Some(captcha_url) = extract_image_captcha_url(&resp.body, &resp.url) {
+        LoginOutcome::NeedImageCaptcha {
             captcha_url,
-            captcha_id,
+            captcha_id: new_captcha_session(ns, source, "image", req),
             message: "需要图片验证码".to_string(),
-        });
-    }
-    // loginUrl 规则含 {captcha} 占位符且首轮未带验证码 → 同样走图片验证码流程
-    if raw_url.contains("{captcha}") && req.captcha.is_empty() {
-        let captcha_id = new_captcha_session(ns, source, "image", req);
-        return Ok(LoginOutcome::NeedImageCaptcha {
+        }
+    } else if raw_url.contains("{captcha}") && req.captcha.is_empty() {
+        // loginUrl 规则含 {captcha} 占位符且首轮未带验证码 → 同样走图片验证码流程
+        LoginOutcome::NeedImageCaptcha {
             captcha_url: extract_image_captcha_url(&resp.body, &resp.url).unwrap_or_default(),
-            captcha_id,
+            captcha_id: new_captcha_session(ns, source, "image", req),
             message: "需要图片验证码（loginUrl 含 {captcha} 占位符）".to_string(),
-        });
+        }
+    } else {
+        LoginOutcome::Failed {
+            message: "登录失败：loginCheckJs 未通过".to_string(),
+        }
+    };
+
+    // 结果判定后才入库：Success（登录态有效）与 NeedImageCaptcha（两步验证码流需要
+    // 会话延续——第二轮 submitCaptcha 走 HTTP 流时注入本会话）持久化；
+    // Failed/NeedManualCookie/浏览器切换不写库——失败会话的同名 Set-Cookie 不得
+    // 覆盖库中仍有效的登录态（站点对失败请求重发匿名 session id 是常见行为）
+    if login_outcome_persists_cookie(&outcome) && !merged.is_empty() {
+        storage
+            .set_cookie(ns, &source.book_source_url, &merged)
+            .await?;
     }
-    Ok(LoginOutcome::Failed {
-        message: "登录失败：loginCheckJs 未通过".to_string(),
-    })
+    Ok(outcome)
+}
+
+/// 登录结果 → 是否把本轮合并后的 Set-Cookie 持久化入库：
+/// Success（登录态有效）与 NeedImageCaptcha（两步验证码流需要会话延续）为 true；
+/// Failed/NeedManualCookie 为 false（失败会话不得同名覆盖库中原有登录态）
+fn login_outcome_persists_cookie(outcome: &LoginOutcome) -> bool {
+    matches!(
+        outcome,
+        LoginOutcome::Success { .. } | LoginOutcome::NeedImageCaptcha { .. }
+    )
 }
 
 // ==================== 浏览器自动登录流（camoufox /login 会话） ====================
 
 /// 浏览器自动登录（mode=browser；HTTP 流检测到点击类验证码时自动调用）。
-/// 30s 总超时；滑块/质询由 camoufox 服务端自动处理；图片验证码 → 两步流回填；
+/// 外层总超时（browser_login_timeout，默认 90s）> 内层 camoufox maxWaitMs（60s）+
+/// 冷启动/请求余量——慢站登录不会被提前掐断；滑块/质询由 camoufox 服务端自动处理；图片验证码 → 两步流回填；
 /// 点选/失败/超时 → "需手动 Cookie"。
 pub async fn login_browser(
     storage: &Storage,
@@ -500,15 +527,17 @@ pub async fn login_browser(
     let url = replace_login_placeholders(&raw_url, &req.username, &req.password, &req.captcha);
 
     let result = tokio::time::timeout(
-        Duration::from_secs(30),
+        browser_login_timeout(),
         browser_login_inner(storage, ns, source, &url, req),
     )
     .await;
     match result {
         Ok(r) => r,
         Err(_) => Ok(LoginOutcome::NeedManualCookie {
-            message: "浏览器自动登录超时（30s）——请在浏览器登录该书源后，在书源设置粘贴 Cookie"
-                .to_string(),
+            message: format!(
+                "浏览器自动登录超时（{}s）——请在浏览器登录该书源后，在书源设置粘贴 Cookie",
+                browser_login_timeout().as_secs()
+            ),
         }),
     }
 }
@@ -538,7 +567,7 @@ async fn browser_login_inner(
         &req.password,
         &cookie_pairs,
         proxy,
-        60_000,
+        BROWSER_LOGIN_MAX_WAIT_MS,
     )
     .await
     .map_err(|e| anyhow!("camoufox 登录失败（{url}）: {e:#}"))?;
@@ -653,6 +682,11 @@ pub async fn get_captcha(storage: &Storage, ns: &str, source: &BookSource) -> Re
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // probe 会话 cookie 回收入库：probe 的临时 context 即建即毁——验证码图属于该
+    // 会话，cookie 不入库则 submitCaptcha 走 HTTP 流时服务端视为新会话（会话绑定
+    // 型验证码必然对不上）。probe 已注入库中既有 cookie（会话连续），此处仅回收
+    // 页面新发/轮换的部分
+    persist_probe_cookies(storage, ns, &source.book_source_url, &cookie_str, &probe).await?;
     match kind.as_str() {
         "image" => {
             let b64 = probe
@@ -686,6 +720,37 @@ pub async fn get_captcha(storage: &Storage, ns: &str, source: &BookSource) -> Re
         })),
         _ => Ok(json!({ "captchaType": "none", "message": "未检测到验证码" })),
     }
+}
+
+/// probe 会话 cookie 回收入库（getCaptcha）：camoufox /probe 返回的 cookies 为
+/// 登录页主机域下的 {name,value}[]——probe 的临时 context 即建即毁，页面在 probe
+/// 期间新发/轮换的 Set-Cookie 只在响应里。probe 已注入库中既有 cookie（会话连续），
+/// 合并回库后 submitCaptcha 走 HTTP 流注入同一会话。探测失败（error 字段）不写库
+async fn persist_probe_cookies(
+    storage: &Storage,
+    ns: &str,
+    source_url: &str,
+    existing: &str,
+    probe: &Value,
+) -> Result<()> {
+    if probe.get("error").is_some_and(|v| !v.is_null()) {
+        return Ok(());
+    }
+    let probe_pairs = crate::service::camoufox::cookies_from_json(
+        probe.get("cookies").unwrap_or(&serde_json::Value::Null),
+    );
+    if probe_pairs.is_empty() {
+        return Ok(());
+    }
+    let set_cookies = probe_pairs
+        .iter()
+        .map(|(n, v)| format!("{n}={v}"))
+        .collect::<Vec<_>>();
+    let merged = merge_cookie(existing, &set_cookies);
+    if !merged.is_empty() && merged != existing {
+        storage.set_cookie(ns, source_url, &merged).await?;
+    }
+    Ok(())
 }
 
 /// POST /reader3/submitCaptcha：图片验证码文本回填。
@@ -722,7 +787,7 @@ pub async fn submit_captcha(
     let fut = async {
         if let Some(browser_sid) = session.browser_session.clone() {
             // 浏览器两步流：camoufox /login/captcha（会话内回填）
-            let sess = browser::login_captcha(&browser_sid, &req.captcha, 60_000)
+            let sess = browser::login_captcha(&browser_sid, &req.captcha, BROWSER_LOGIN_MAX_WAIT_MS)
                 .await
                 .map_err(|e| anyhow!("camoufox 验证码回填失败: {e:#}"))?;
             login_session_to_outcome(storage, ns, source, &req, &sess).await
@@ -731,13 +796,16 @@ pub async fn submit_captcha(
             login_http(storage, ns, source, &req).await
         }
     };
-    let result = tokio::time::timeout(Duration::from_secs(30), fut).await;
+    let result = tokio::time::timeout(browser_login_timeout(), fut).await;
     match result {
         Ok(Ok(outcome)) => Ok(outcome_to_json(outcome)),
         Ok(Err(e)) => Err(e),
         Err(_) => Ok(json!({
             "isLogin": false, "needManualCaptcha": true,
-            "message": "验证码提交超时（30s）——请在浏览器登录该书源后，在书源设置粘贴 Cookie"
+            "message": format!(
+                "验证码提交超时（{}s）——请在浏览器登录该书源后，在书源设置粘贴 Cookie",
+                browser_login_timeout().as_secs()
+            )
         })),
     }
 }
@@ -878,6 +946,40 @@ mod tests {
         assert_eq!(merge_cookie("a=1", &[]), "a=1");
     }
 
+    /// HTTP 流 cookie 持久化规则：仅 Success（登录态有效）与 NeedImageCaptcha
+    /// （两步验证码流需会话延续）入库；Failed/NeedManualCookie 不得以失败会话
+    /// 同名覆盖库中原有登录态
+    #[test]
+    fn test_login_outcome_persists_cookie() {
+        assert!(login_outcome_persists_cookie(&LoginOutcome::Success {
+            cookie: "sid=1".into()
+        }));
+        assert!(login_outcome_persists_cookie(&LoginOutcome::NeedImageCaptcha {
+            captcha_url: String::new(),
+            captcha_id: String::new(),
+            message: String::new(),
+        }));
+        assert!(!login_outcome_persists_cookie(&LoginOutcome::NeedManualCookie {
+            message: String::new()
+        }));
+        assert!(!login_outcome_persists_cookie(&LoginOutcome::Failed {
+            message: String::new()
+        }));
+    }
+
+    /// 浏览器登录外层总超时必须 ≥ 内层 maxWaitMs + camoufox 冷启动健康轮询（约 20s）
+    /// + 内层 reqwest 超时余量（camoufox.rs post_json：maxWaitMs+20s）——
+    /// 外层若先于内层触发，Python 侧完成的登录成功结果会被整体丢弃
+    #[test]
+    fn test_browser_login_timeout_covers_inner_wait() {
+        assert_eq!(BROWSER_LOGIN_MAX_WAIT_MS, 60_000, "与 Python LOGIN_MAX_WAIT_MS 一致");
+        // 内层 reqwest 超时（camoufox.rs: (maxWaitMs+20).min(120)，单位秒）= 80s
+        let inner_reqwest_timeout_ms = (BROWSER_LOGIN_MAX_WAIT_MS + 20_000).min(120_000);
+        assert!(browser_login_timeout().as_millis() >= inner_reqwest_timeout_ms as u128);
+        // 外层必须严格大于内层 maxWaitMs（否则慢站成功结果被丢弃）
+        assert!(browser_login_timeout().as_millis() > BROWSER_LOGIN_MAX_WAIT_MS as u128);
+    }
+
     #[test]
     fn test_build_login_form() {
         let src = source_with_login("https://a.com/login", "");
@@ -976,17 +1078,21 @@ mod tests {
 mod send_tests {
     use super::*;
 
-    async fn test_storage() -> Storage {
-        let dir = std::env::temp_dir().join(format!("reader-login-send-{}", std::process::id()));
+    async fn test_storage() -> (Storage, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "reader-login-send-{}",
+            uuid::Uuid::new_v4()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         let mut config = crate::AppConfig::from_env();
         config.work_dir = dir.to_string_lossy().into_owned();
-        crate::storage::init(&config).await.unwrap()
+        let storage = crate::storage::init(&config).await.unwrap();
+        (storage, dir)
     }
 
     #[tokio::test]
     async fn test_login_futures_are_send() {
-        let storage = test_storage().await;
+        let (storage, dir) = test_storage().await;
         let src = BookSource {
             book_source_url: "https://a.com".into(),
             book_source_name: "A".into(),
@@ -1004,7 +1110,63 @@ mod send_tests {
             let _ = login_browser(&s3, "default", &src3, &LoginRequest::default()).await;
         });
         storage.pool.close().await;
-        let dir = std::env::temp_dir().join(format!("reader-login-send-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// probe 会话 cookie 回收：/probe 返回的 cookies 合并入库（首轮登录入库新会话；
+    /// 既有登录态时同名覆盖/异名保留）；探测失败（error 字段）不写库
+    #[tokio::test]
+    async fn test_persist_probe_cookies() {
+        let (storage, dir) = test_storage().await;
+        let url = "https://probe.test";
+        // ① 首轮（库中无 cookie）：probe 会话 cookie 入库
+        let probe = json!({
+            "captchaType": "image",
+            "cookies": [
+                {"name": "JSESSID", "value": "probe-session-1", "domain": "probe.test"},
+                {"name": "theme", "value": "dark", "domain": "probe.test"},
+            ],
+        });
+        persist_probe_cookies(&storage, "default", url, "", &probe)
+            .await
+            .unwrap();
+        let stored = storage
+            .get_cookie("default", url)
+            .await
+            .unwrap()
+            .unwrap_or_default();
+        assert!(stored.contains("JSESSID=probe-session-1"), "{stored}");
+        assert!(stored.contains("theme=dark"), "{stored}");
+        // ② 既有会话：同名覆盖、异名保留（会话延续）
+        let probe2 = json!({
+            "cookies": [{"name": "JSESSID", "value": "probe-session-2", "domain": "probe.test"}],
+        });
+        persist_probe_cookies(&storage, "default", url, &stored, &probe2)
+            .await
+            .unwrap();
+        let stored2 = storage
+            .get_cookie("default", url)
+            .await
+            .unwrap()
+            .unwrap_or_default();
+        assert!(stored2.contains("JSESSID=probe-session-2"), "{stored2}");
+        assert!(stored2.contains("theme=dark"), "{stored2}");
+        // ③ 探测失败（error）不写库
+        let before = stored2.clone();
+        let err_probe = json!({"error": "导航失败"});
+        persist_probe_cookies(&storage, "default", url, &before, &err_probe)
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .get_cookie("default", url)
+                .await
+                .unwrap()
+                .unwrap_or_default(),
+            before,
+            "error 响应不得写库"
+        );
+        storage.pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

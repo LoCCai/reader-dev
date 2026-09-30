@@ -266,34 +266,27 @@ pub const CHUNK_MAX_CHARS: usize = 2_500;
 
 /// 微软 Edge 语音鉴权 token（固定 TrustedClientToken）
 const TRUSTED_CLIENT_TOKEN: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
-/// FILETIME 偏移：1601-01-01 → 1970-01-01 的 100ns 间隔数
-const FILETIME_EPOCH_OFFSET_TICKS: i64 = 116_444_736_000_000_000;
+/// Windows 纪元偏移（秒）：1601-01-01 → 1970-01-01（edge-tts drm.py WIN_EPOCH）
+const WIN_EPOCH_SECS: i64 = 11_644_473_600;
+/// Sec-MS-GEC 时间取整窗口（秒）——ticks 向下取整到 5 分钟（edge-tts drm.py: ticks -= ticks % 300）
+const GEC_WINDOW_SECS: i64 = 300;
+/// Sec-MS-GEC-Version（edge-tts constants.py 同款 Chromium 版本串）
+const SEC_MS_GEC_VERSION: &str = "1-130.0.2849.100006";
 /// WSS 端点
 const EDGE_WSS_URL: &str =
     "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1";
 /// 输出音频格式（MP3）
 const OUTPUT_FORMAT: &str = "audio-24khz-48kbitrate-mono-mp3";
 
-/// 生成 Sec-MS-GEC 鉴权 token（.NET FILETIME 小端十六进制；与 edge-tts 算法一致）
+/// 生成 Sec-MS-GEC 鉴权 token（edge-tts 规范算法 drm.py generate_sec_ms_gec）：
+/// ticks = (unix + WIN_EPOCH) 向下取整到 5 分钟后 ×1e7（百纳秒），
+/// Sec-MS-GEC = SHA256("{ticks}{TrustedClientToken}") 大写 hex。
 /// 返回 (Sec-MS-GEC, Sec-MS-GEC-Version)
 pub fn sec_ms_gec_at(unix_secs: i64) -> (String, String) {
-    let ticks = unix_secs * 10_000_000 + FILETIME_EPOCH_OFFSET_TICKS;
-    let stamp = ticks
-        .to_le_bytes()
-        .iter()
-        .map(|b| format!("{b:02X}"))
-        .collect::<String>();
-    // Version：次日日期整数（YYYYMMDD+1）编码为 FILETIME 样式（edge-tts 同款算法）
-    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(unix_secs, 0)
-        .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap());
-    let date_int: i64 = dt.format("%Y%m%d").to_string().parse().unwrap_or(19700101);
-    let ticks_v = (date_int + 1) * 10_000_000 + FILETIME_EPOCH_OFFSET_TICKS;
-    let stamp_v = ticks_v
-        .to_le_bytes()
-        .iter()
-        .map(|b| format!("{b:02X}"))
-        .collect::<String>();
-    (stamp, stamp_v)
+    let ticks = ((unix_secs + WIN_EPOCH_SECS) / GEC_WINDOW_SECS * GEC_WINDOW_SECS) * 10_000_000;
+    let gec = crate::util::sha256::sha256_hex(&format!("{ticks}{TRUSTED_CLIENT_TOKEN}"))
+        .to_uppercase();
+    (gec, SEC_MS_GEC_VERSION.to_string())
 }
 
 /// 当前时间生成 Sec-MS-GEC
@@ -648,9 +641,12 @@ pub async fn http_tts_synthesize(
     }
     // P1 SSRF：HttpTTS 引擎地址同样做公网校验（DNS 解析后——拒绝私网/回环/169.254 等）
     crate::service::crawler::validate_public_target(url).await?;
-    let client =
-        crate::service::crawler::http_client_builder(60, reqwest::redirect::Policy::limited(5))
-            .map_err(|e| anyhow!("HttpTTS 客户端初始化失败: {e}"))?;
+    // 逐跳校验：重定向目标同样过 SSRF 校验（302 跳内网/169.254 一律拦截——与 fetch 同策略）
+    let client = crate::service::crawler::http_client_builder(
+        60,
+        crate::service::crawler::ssrf_redirect_policy(),
+    )
+    .map_err(|e| anyhow!("HttpTTS 客户端初始化失败: {e}"))?;
 
     let has_placeholder = url.contains("{text}");
     let final_url = build_http_tts_url(url, text, voice, rate, pitch, volume);
@@ -744,9 +740,13 @@ pub async fn http_tts_api_synthesize(
         }
     }
 
-    let client =
-        crate::service::crawler::http_client_builder(60, reqwest::redirect::Policy::limited(5))
-            .map_err(|e| anyhow!("HttpTTS 客户端初始化失败: {e}"))?;
+    // 逐跳校验：重定向目标同样过 SSRF 校验（302 跳内网/169.254 一律拦截——与 fetch 同策略；
+    // 初始 URL 的公网校验在调用方 validate_public_target）
+    let client = crate::service::crawler::http_client_builder(
+        60,
+        crate::service::crawler::ssrf_redirect_policy(),
+    )
+    .map_err(|e| anyhow!("HttpTTS 客户端初始化失败: {e}"))?;
 
     // 重试 ≤5（超时/连接类错误）；其他错误一次即出
     let mut attempt = 0u32;
@@ -925,37 +925,41 @@ mod tests {
         );
     }
 
-    /// Sec-MS-GEC：已知时刻的确定性输出（16 位大写十六进制）
+    /// Sec-MS-GEC：edge-tts 规范算法（SHA256("{ticks}{token}") 大写 hex，64 位；
+    /// ticks = (unix+WIN_EPOCH) 5 分钟向下取整 ×1e7）——已知时刻标准向量
     #[test]
     fn test_sec_ms_gec() {
         let (stamp, stamp_v) = sec_ms_gec_at(0);
-        assert_eq!(stamp.len(), 16);
-        assert_eq!(stamp_v.len(), 16);
+        // 64 位大写十六进制（SHA-256）
+        assert_eq!(stamp.len(), 64);
         assert!(stamp
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()));
-        assert!(stamp_v
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()));
-        assert_eq!(sec_ms_gec_at(0), sec_ms_gec_at(0), "同一时刻输出应确定");
-        // unix=0 → FILETIME 偏移量本体
+        // unix=0 → ticks=11644473600（恰为 300 整数倍）×1e7 → 规范标准向量
         assert_eq!(
             stamp,
-            116444736000000000i64
-                .to_le_bytes()
-                .iter()
-                .map(|b| format!("{b:02X}"))
-                .collect::<String>()
+            "7ECB79D14E3AA576D2D79E6D487A1388156D91E614B1BE11C64226A29BC8DD8C"
         );
-        // Version 基于次日日期，应大于 Stamp 数值编码
-        assert_ne!(stamp, stamp_v);
+        // 同一时刻输出确定
+        assert_eq!(sec_ms_gec_at(0), sec_ms_gec_at(0), "同一时刻输出应确定");
+        // 5 分钟窗口内不同秒取整后同值（窗口对齐语义：1789123456 距窗口边界余 44s）
+        let (a, _) = sec_ms_gec_at(1789123456);
+        let (b, _) = sec_ms_gec_at(1789123456 + 43);
+        assert_eq!(a, b, "同一 5 分钟窗口内取整后输出应一致");
+        // 跨窗口参考向量（1789123456 → ticks=13433596800）
+        assert_eq!(
+            a,
+            "2CB5764BBCC619FE6F4537FEF34090C521E2C72866F081AF2B7880C880998AAA"
+        );
+        // Version：edge-tts constants.py 同款版本串
+        assert_eq!(stamp_v, "1-130.0.2849.100006");
         // WSS URL 含鉴权参数
         let url = edge_wss_url("conn-1");
         assert!(url.starts_with(
             "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?"
         ));
         assert!(url.contains("TrustedClientToken=6A5AA1D4EAFF4E9FB37E23D68491D6F4"));
-        assert!(url.contains("Sec-MS-GEC=") && url.contains("Sec-MS-GEC-Version="));
+        assert!(url.contains("Sec-MS-GEC=") && url.contains("Sec-MS-GEC-Version=1-130.0.2849.100006"));
         assert!(url.contains("ConnectionId=conn-1"));
     }
 
@@ -1092,5 +1096,39 @@ mod tests {
             assert_eq!(cached.value, static_v.value);
         }
         *VOICE_CACHE.lock().unwrap() = None;
+    }
+
+    /// P1 SSRF：HttpTTS 两处 Client（tts.rs 合成路径）复用 ssrf_redirect_policy——
+    /// 重定向 302 跳内网/链路本地地址必须被逐跳校验拦截（reqwest 返回 Err）
+    #[tokio::test]
+    async fn test_http_tts_redirect_policy_blocks_internal_hop() {
+        use std::io::{Read, Write};
+        // 本地一次性 HTTP 服务：响应 302 → http://169.254.169.254/（链路本地元数据地址）
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf);
+                let _ = sock.write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data/\r\nContent-Length: 0\r\n\r\n",
+                );
+                let _ = sock.flush();
+            }
+        });
+        // 与合成路径完全同款的 Client 构建（逐跳 SSRF 校验）
+        let client = crate::service::crawler::http_client_builder(
+            10,
+            crate::service::crawler::ssrf_redirect_policy(),
+        )
+        .unwrap();
+        let resp = client.get(format!("http://{addr}/tts")).send().await;
+        server.join().unwrap();
+        // 302 → 169.254.169.254 必须被策略拒绝（attempt.error → send() Err）
+        assert!(
+            resp.is_err(),
+            "重定向跳链路本地地址应被拦截: {:?}",
+            resp.map(|r| r.status())
+        );
     }
 }

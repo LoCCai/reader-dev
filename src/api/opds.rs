@@ -235,8 +235,9 @@ fn display_cover(book: &Book) -> Option<String> {
 /// - storage/ 文件书（legacy）→ 按路径解析（兼容 index.epub 目录形态）
 fn resolve_local_file(storage: &Storage, ns: &str, book: &Book) -> Option<PathBuf> {
     if let Some(p) = &book.local_file {
-        let pb = PathBuf::from(p);
-        if pb.is_file() {
+        // local_file 为客户端可控字段（saveBook 全量 JSON 入库）：与 bookUrl 同规格
+        // 容器校验——仅放行 storage_dir 内 / env 书仓根（GAP 170）内的普通文件
+        if let Some(pb) = safe_local_file(&storage.config.storage_dir(), p) {
             return Some(pb);
         }
     }
@@ -277,8 +278,8 @@ fn resolve_local_file_by_format(
     format: &str,
 ) -> Option<PathBuf> {
     if let Some(p) = &book.local_file {
-        let pb = PathBuf::from(p);
-        if pb.is_file() {
+        // 与 resolve_local_file 同规格：local_file 客户端可控，容器校验后才读
+        if let Some(pb) = safe_local_file(&storage.config.storage_dir(), p) {
             let ext = pb.extension().map(|e| e.to_string_lossy().to_lowercase());
             if format.is_empty() || ext.as_deref() == Some(format) || ext.as_deref().is_none() {
                 return Some(pb);
@@ -322,29 +323,172 @@ fn resolve_local_file_by_format(
     None
 }
 
-/// storage/ 文件书定位（兼容 legacy：{name}.epub/ 目录内含 index.epub 等形态）
-fn resolve_storage_file(storage_dir: &Path, book_url: &str) -> Option<PathBuf> {
-    let path = storage_dir.join(book_url.trim_start_matches("storage/"));
-    if path.is_file() {
-        return Some(path);
+/// storage_dir 根内保留名（SQLite 整库与副作用文件——users 表含全部用户凭证）：
+/// 容器校验封不住位于 storage_dir 内的 reader.db，需按根内文件名显式拒绝
+pub(crate) const RESERVED_DB_FILE_NAMES: &[&str] = &[
+    "reader.db",
+    "reader.db-wal",
+    "reader.db-shmem",
+    "reader.db-journal",
+];
+
+/// storage_dir 根内保留名文件判定（abs/root 均需为规范化路径）
+pub(crate) fn is_reserved_db_file(abs: &Path, root: &Path) -> bool {
+    abs.parent() == Some(root)
+        && abs
+            .file_name()
+            .is_some_and(|n| RESERVED_DB_FILE_NAMES.contains(&n.to_string_lossy().as_ref()))
+}
+
+/// storage 内文件安全定位（与 router::resolve_storage_path 同款容器校验）：
+/// 规范化后必须仍是 storage_dir 内的普通文件，且不得是根内保留名（reader.db 等）
+fn safe_storage_file(storage_dir: &Path, candidate: &Path) -> Option<PathBuf> {
+    let root = storage_dir
+        .canonicalize()
+        .unwrap_or_else(|_| storage_dir.to_path_buf());
+    let abs = candidate.canonicalize().ok()?;
+    if !abs.is_file() || !abs.starts_with(&root) || is_reserved_db_file(&abs, &root) {
+        return None;
     }
-    if path.is_dir() {
-        let idx = path.join("index.epub");
-        if idx.is_file() {
-            return Some(idx);
-        }
-        let rd = std::fs::read_dir(&path).ok()?;
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_file() && p.to_string_lossy().to_lowercase().ends_with(".epub") {
-                return Some(p);
+    Some(abs)
+}
+
+/// local_file 关联路径安全定位（GAP 170 双轨书仓）：
+/// - storage_dir 容器内的普通文件（data/{ns}/books/ 等同步产物）
+/// - env READER_LOCAL_BOOK_DIR 书仓根内的普通文件（容器外的合法例外）
+/// 其余（/etc/passwd 等客户端注入路径）拒绝。返回规范化后的路径。
+pub(crate) fn safe_local_file(storage_dir: &Path, p: &str) -> Option<PathBuf> {
+    let pb = PathBuf::from(p);
+    let abs = pb.canonicalize().ok()?;
+    if !abs.is_file() {
+        return None;
+    }
+    let root = storage_dir
+        .canonicalize()
+        .unwrap_or_else(|_| storage_dir.to_path_buf());
+    if abs.starts_with(&root) {
+        return Some(abs);
+    }
+    if let Ok(dir) = std::env::var("READER_LOCAL_BOOK_DIR") {
+        let dir = dir.trim();
+        if !dir.is_empty() {
+            let env_root = PathBuf::from(dir)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(dir));
+            if abs.starts_with(&env_root) {
+                return Some(abs);
             }
         }
     }
-    let parent = path.parent()?;
+    None
+}
+
+/// saveBook 本地书入库安全校验（bookUrl/local_file 均为客户端可控字段）：
+/// - local:// 上传书：opds_files 目录定位（天然容器内），放行
+/// - 书源 http URL 等：不经本地文件读取，放行
+/// - storage/ 前缀或 loc_book/受支持扩展名：硬化解析成功（容器内普通文件）放行；
+///   解析失败但目标真实存在 → 容器外/保留名路径，拒绝入库；目标不存在 → legacy
+///   悬挂书（无读取面），放行保持「迁移降级不阻断保存」的既有语义
+pub(crate) fn local_book_save_allowed(
+    storage_dir: &Path,
+    book_url: &str,
+    origin: &str,
+    local_file: Option<&str>,
+) -> bool {
+    if !book_url.starts_with("local://")
+        && (book_url.starts_with("storage/") || is_local_book(book_url, origin))
+        && resolve_storage_file(storage_dir, book_url).is_none()
+        && legacy_storage_target_exists(storage_dir, book_url)
+    {
+        return false;
+    }
+    match local_file {
+        // 悬挂 local_file（文件已删，local_file_deleted=1 的存量书）放行
+        Some(lf) if !lf.is_empty() && PathBuf::from(lf).exists() => {
+            safe_local_file(storage_dir, lf).is_some()
+        }
+        _ => true,
+    }
+}
+
+/// legacy（无容器校验）语义下是否存在可解析目标——仅用于 saveBook 校验区分
+/// 「悬挂路径」与「存在但非法路径」；正式读取一律走 resolve_storage_file（容器
+/// 校验为准），此处判定宽于硬化版（存在文件/目录或父目录兜底命中即算）
+fn legacy_storage_target_exists(storage_dir: &Path, book_url: &str) -> bool {
+    let rel = book_url.trim_start_matches("storage/");
+    if rel.is_empty() {
+        return false;
+    }
+    let candidate = storage_dir.join(rel);
+    if candidate.exists() {
+        return true;
+    }
+    let Some(parent) = candidate.parent() else {
+        return false;
+    };
+    if parent.join("index.epub").is_file() {
+        return true;
+    }
+    let Ok(rd) = std::fs::read_dir(parent) else {
+        return false;
+    };
+    rd.flatten().any(|e| {
+        e.path().is_file()
+            && e.path()
+                .to_string_lossy()
+                .to_lowercase()
+                .rsplit_once('.')
+                .is_some_and(|(_, ext)| ext == "epub" || ext == "txt")
+    })
+}
+
+/// storage/ 文件书定位（兼容 legacy：{name}.epub/ 目录内含 index.epub 等形态）。
+/// bookUrl 客户端可控（saveBook 可写入任意值）：所有候选路径规范化后必须位于
+/// storage_dir 内（绝对路径 / ../ 穿越一律拒绝），且拒绝根内保留名（reader.db 等）
+pub(crate) fn resolve_storage_file(storage_dir: &Path, book_url: &str) -> Option<PathBuf> {
+    let rel = book_url.trim_start_matches("storage/");
+    if rel.is_empty() {
+        return None;
+    }
+    let candidate = storage_dir.join(rel);
+    if candidate.is_dir() {
+        // 目录形态（{name}.epub/）：目录本身必须在容器内
+        let root = storage_dir
+            .canonicalize()
+            .unwrap_or_else(|_| storage_dir.to_path_buf());
+        let dir_abs = candidate.canonicalize().ok()?;
+        if !dir_abs.starts_with(&root) {
+            return None;
+        }
+        let idx = candidate.join("index.epub");
+        if idx.is_file() {
+            return safe_storage_file(storage_dir, &idx);
+        }
+        let rd = std::fs::read_dir(&candidate).ok()?;
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_file() && p.to_string_lossy().to_lowercase().ends_with(".epub") {
+                return safe_storage_file(storage_dir, &p);
+            }
+        }
+        return None;
+    }
+    if let Some(abs) = safe_storage_file(storage_dir, &candidate) {
+        return Some(abs);
+    }
+    // legacy 兜底：路径不存在时在父目录内找 index.epub / 首个 .epub/.txt
+    // （父目录同样必须在容器内——/etc/passwd 的父目录 /etc 必须拒绝）
+    let root = storage_dir
+        .canonicalize()
+        .unwrap_or_else(|_| storage_dir.to_path_buf());
+    let parent = candidate.parent()?;
+    let parent_abs = parent.canonicalize().ok()?;
+    if !parent_abs.starts_with(&root) {
+        return None;
+    }
     let idx = parent.join("index.epub");
     if idx.is_file() {
-        return Some(idx);
+        return safe_storage_file(storage_dir, &idx);
     }
     let rd = std::fs::read_dir(parent).ok()?;
     for e in rd.flatten() {
@@ -352,7 +496,7 @@ fn resolve_storage_file(storage_dir: &Path, book_url: &str) -> Option<PathBuf> {
         if p.is_file() {
             let lower = p.to_string_lossy().to_lowercase();
             if lower.ends_with(".epub") || lower.ends_with(".txt") {
-                return Some(p);
+                return safe_storage_file(storage_dir, &p);
             }
         }
     }
@@ -2449,5 +2593,139 @@ mod tests {
         storage.clear_opds_account().await.unwrap();
         assert!(storage.get_opds_account().await.unwrap().is_none());
         cleanup(storage, dir).await;
+    }
+
+    /// P0：resolve_storage_file 容器校验——bookUrl 客户端可控（saveBook 可写入任意值），
+    /// 绝对路径/../ 穿越不得逃逸 storage_dir；storage_dir 根内保留名（reader.db 等
+    /// 整库/凭证文件）不得作为书籍文件读出
+    #[test]
+    fn test_resolve_storage_file_container_and_reserved() {
+        let root =
+            std::env::temp_dir().join(format!("reader-opds-sec-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("books")).unwrap();
+        std::fs::write(root.join("books/a.epub"), b"epub").unwrap();
+        std::fs::write(root.join("reader.db"), b"sqlite").unwrap();
+        // 容器外的邻居目录（模拟 /etc 等）
+        let outside =
+            std::env::temp_dir().join(format!("reader-opds-out-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"top").unwrap();
+
+        // ① 容器内普通文件正常定位（返回规范化路径）
+        assert_eq!(
+            resolve_storage_file(&root, "storage/books/a.epub"),
+            Some(root.join("books/a.epub").canonicalize().unwrap())
+        );
+        // ② 绝对路径逃逸拒绝
+        assert_eq!(
+            resolve_storage_file(&root, &outside.join("secret.txt").to_string_lossy()),
+            None
+        );
+        // ③ .. 穿越到容器外拒绝
+        assert_eq!(resolve_storage_file(&root, "storage/../secret.txt"), None);
+        // ④ 容器内穿越命中根内保留名（reader.db 整库）拒绝
+        assert_eq!(resolve_storage_file(&root, "books/../reader.db"), None);
+        // ⑤ 根内保留名直读拒绝（bookUrl="reader.db" 无需穿越即可命中整库）
+        assert_eq!(resolve_storage_file(&root, "reader.db"), None);
+        // ⑥ 不存在的容器外路径：legacy 父目录兜底同样必须被容器校验拦住
+        assert_eq!(
+            resolve_storage_file(&root, &outside.join("nope").to_string_lossy()),
+            None
+        );
+        // ⑦ 目录形态（容器内）仍工作
+        std::fs::create_dir_all(root.join("mybook.epub")).unwrap();
+        std::fs::write(root.join("mybook.epub/index.epub"), b"epub").unwrap();
+        assert_eq!(
+            resolve_storage_file(&root, "storage/mybook.epub"),
+            Some(root.join("mybook.epub/index.epub").canonicalize().unwrap())
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// P0：local_file 客户端可控——仅放行 storage_dir 内 / env 书仓根内普通文件
+    #[test]
+    fn test_safe_local_file() {
+        let root =
+            std::env::temp_dir().join(format!("reader-opds-lf-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("data/default/books")).unwrap();
+        let inside = root.join("data/default/books/a.epub");
+        std::fs::write(&inside, b"epub").unwrap();
+        let outside =
+            std::env::temp_dir().join(format!("reader-opds-lf-out-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("secret.txt");
+        std::fs::write(&secret, b"top").unwrap();
+
+        // 容器内放行（规范化路径）；容器外拒绝
+        assert_eq!(
+            safe_local_file(&root, &inside.to_string_lossy()),
+            Some(inside.canonicalize().unwrap())
+        );
+        assert_eq!(safe_local_file(&root, &secret.to_string_lossy()), None);
+        // 不存在的路径拒绝
+        assert_eq!(
+            safe_local_file(&root, &root.join("data/ghost.epub").to_string_lossy()),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// P0：saveBook 入库前校验（local_book_save_allowed）——存在但容器外/保留名
+    /// 的 bookUrl/local_file 拒绝入库；悬挂路径（不存在）放行保持 legacy 降级语义
+    #[test]
+    fn test_local_book_save_allowed() {
+        let root =
+            std::env::temp_dir().join(format!("reader-opds-safe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("data/default/books")).unwrap();
+        std::fs::write(root.join("data/default/books/a.epub"), b"epub").unwrap();
+        std::fs::write(root.join("reader.db"), b"sqlite").unwrap();
+        // 容器外邻居目录（模拟 /etc 等）
+        let outside =
+            std::env::temp_dir().join(format!("reader-opds-safe-out-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"top").unwrap();
+        let outside_secret = outside.join("secret.txt").to_string_lossy().into_owned();
+
+        // 放行：local:// 上传书；容器内文件；书源 http URL；悬挂路径（不存在）
+        assert!(local_book_save_allowed(&root, "local://abc", "loc_book", None));
+        assert!(local_book_save_allowed(
+            &root,
+            "storage/data/default/books/a.epub",
+            "loc_book",
+            None
+        ));
+        assert!(local_book_save_allowed(&root, "https://a.com/book/1", "https://a.com", None));
+        assert!(local_book_save_allowed(
+            &root,
+            "/assets/default/book/ghost.epub",
+            "loc_book",
+            None
+        ));
+        // 拒绝：容器外存在的文件；根内保留名整库
+        assert!(!local_book_save_allowed(&root, &outside_secret, "loc_book", None));
+        assert!(!local_book_save_allowed(&root, "reader.db", "loc_book", None));
+        assert!(!local_book_save_allowed(
+            &root,
+            "data/default/books/../../../reader.db",
+            "loc_book",
+            None
+        ));
+        // local_file：容器内放行；容器外存在拒绝；悬挂放行
+        let inside = root.join("data/default/books/a.epub").to_string_lossy().into_owned();
+        assert!(local_book_save_allowed(&root, "local://x", "loc_book", Some(&inside)));
+        assert!(!local_book_save_allowed(&root, "local://x", "loc_book", Some(&outside_secret)));
+        assert!(local_book_save_allowed(
+            &root,
+            "local://x",
+            "loc_book",
+            Some(&outside.join("ghost.txt").to_string_lossy())
+        ));
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }

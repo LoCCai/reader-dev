@@ -156,7 +156,7 @@ async fn post_json(path: &str, payload: Value, timeout_secs: u64) -> Result<Valu
 }
 
 /// 从 {name,value}[] → Vec<(String,String)>
-fn cookies_from_json(arr: &Value) -> Vec<(String, String)> {
+pub(crate) fn cookies_from_json(arr: &Value) -> Vec<(String, String)> {
     arr.as_array()
         .map(|items| {
             items
