@@ -40,7 +40,10 @@ pub async fn fetch_articles(
 /// 从 legacy sortUrl 多段文本（&&/换行分隔，每段 `名称::地址`）取首个有效 URL
 fn first_sort_segment(sort_url: &str) -> Option<&str> {
     for seg in sort_url
-        .split(['\n', '&'])
+        // legacy 语义（RssSourceExtensions.kt）：&& 连串或换行是分隔符——单个 & 是
+        // URL 查询参数的一部分（曾按单 & 切分：含 & 参数的分类 URL 被静默截断丢参）
+        .split('\n')
+        .flat_map(|seg| seg.split("&&"))
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
@@ -367,6 +370,26 @@ fn clean_text(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #19：sortUrl 切分对齐 legacy "&&|换行" 语义——单个 & 是查询参数一部分
+    #[test]
+    fn test_first_sort_segment_preserves_query_params() {
+        assert_eq!(
+            first_sort_segment("分类::https://x/list?cat=1&page=2"),
+            Some("https://x/list?cat=1&page=2")
+        );
+        // && 分段仍生效
+        assert_eq!(
+            first_sort_segment("科幻::https://x/a&&言情::https://x/b"),
+            Some("https://x/a")
+        );
+        // 换行分段仍生效
+        assert_eq!(
+            first_sort_segment("科幻::https://x/a\n言情::https://x/b"),
+            Some("https://x/a")
+        );
+    }
+
 
     fn source() -> RssSource {
         RssSource {

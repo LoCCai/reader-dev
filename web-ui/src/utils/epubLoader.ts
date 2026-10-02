@@ -137,7 +137,23 @@ export function parseEpubBytes(bytes: Uint8Array): EpubDoc {
     spine.push({ idref, linear })
   }
 
-  return { files, manifest, spine, opfDir, blobUrls: new Map() }
+  // spine 口径对齐后端章节表（#11：前后端下标域一致——EpubIframe 用后端目录下标
+  // 直接索引 spine）：后端建章节表时跳过 manifest 缺失/非 xhtml/html/读取失败/空文本
+  // 项（local_book.rs:442-457），前端原样保留全部 itemref → raw 模式从首个被后端
+  // 跳过的页（图片封面等）起整书错一章。此处按同口径过滤。
+  // 空文本判定对齐后端 html_to_text：仅统计 p|div|h1-h3|li 内文本（其余标签不算）。
+  // 残留限制：后端 toc 骨架目录模式（toc+spin 等）下目录条目并非一一对应 spine，
+  // 前端无从对齐——该形态书籍不适用 raw 模式。
+  const alignedSpine = spine.filter((sp) => {
+    const item = manifest.get(sp.idref)
+    if (!item || !/x?html/i.test(item.mediaType)) return false
+    const data = files.get(item.href)
+    if (!data) return false
+    const html = strFromU8(data).replace(/<(style|script)\b[\s\S]*?<\/\1>/gi, '')
+    return /<(?:p|div|h[1-3]|li)\b[^>]*>[^<]*\S/i.test(html)
+  })
+
+  return { files, manifest, spine: alignedSpine, opfDir, blobUrls: new Map() }
 }
 
 /** 取资源为 blob URL（缓存复用） */

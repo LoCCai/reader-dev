@@ -773,6 +773,10 @@ pub async fn http_tts_api_synthesize(
                 let transient =
                     msg.contains("timed out") || msg.contains("timeout") || msg.contains("connect");
                 if transient && attempt <= 5 {
+                    // 线性退避（对齐 crawler::fetch）——曾立即 continue：6 连发 × 60s
+                    // 超时可挂单请求 ~6 分钟且打满并发窗口
+                    tracing::warn!("HttpTTS 瞬时错误第 {attempt}/5 次重试");
+                    tokio::time::sleep(std::time::Duration::from_millis(200 * attempt as u64)).await;
                     continue;
                 }
                 return Err(anyhow!("TTS 下载错误: {msg}"));
@@ -791,7 +795,7 @@ pub async fn http_tts_api_synthesize(
         let ct_lower = ct.as_deref().unwrap_or_default().to_ascii_lowercase();
         if ct_lower.starts_with("application/json") {
             let body_text = String::from_utf8_lossy(&bytes);
-            return Err(anyhow!("{}", &body_text[..body_text.len().min(300)]));
+            return Err(anyhow!("{}", &body_text[..body_text.floor_char_boundary(300.min(body_text.len()))]));
         }
         if let Some(expected) = tts.content_type.as_deref() {
             if !expected.trim().is_empty() {
@@ -802,7 +806,7 @@ pub async fn http_tts_api_synthesize(
                     let preview = String::from_utf8_lossy(&bytes);
                     return Err(anyhow!(
                         "TTS服务器返回错误：{}",
-                        &preview[..preview.len().min(300)]
+                        &preview[..preview.floor_char_boundary(300.min(preview.len()))]
                     ));
                 }
             }

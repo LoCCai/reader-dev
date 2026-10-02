@@ -637,8 +637,17 @@ async fn assets_proxy(
                 .as_deref()
                 .map(|ct| ct.starts_with("image/"))
                 .unwrap_or(false);
+            // 秒级 CPU（解码 + 纯 Rust WebP 编码）——spawn_blocking 避免阻塞 tokio worker
             let converted = if to_webp && is_raster {
-                crate::service::imaging::to_webp(&bytes, quality)
+                let bytes_for_webp = bytes.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::service::imaging::to_webp(&bytes_for_webp, quality)
+                })
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("WebP 转换任务失败: {e}");
+                    None
+                })
             } else {
                 None
             };
@@ -3603,13 +3612,9 @@ async fn get_book_toc(
         // legacy getChapterList：非本地书且无可用书源 → 未配置书源
         return Json(ReturnData::err("未配置书源"));
     };
-    // F8：目录回写目标书架书——url 参数或 toc_url 对应的书
-    let shelf_for_write = state
-        .storage
-        .find_book(&namespace, &url_param)
-        .await
-        .ok()
-        .flatten();
+    // F8：目录回写目标书架书——url 参数或 toc_url 对应的书。
+    // 不再二次绑定：上方 shelf_for_write 已含 url→toc_url 兜底，此前被只查 url_param
+    // 的同名绑定遮蔽——web-ui 请求从不带 url 参数，三项回写（totalChapterNum 等）全部失效
     match crate::service::book::analyze_toc(
         &namespace,
         &toc_url,
@@ -3621,11 +3626,16 @@ async fn get_book_toc(
     .await
     {
         Ok(chapters) => {
-            // F-10：抓取成功后缓存目录（book_url 未知时以 toc_url 为键）
+            // F-10：抓取成功后缓存目录。book_url 列写真值（书架书 book_url；未知时退
+            // toc_url）——配合 get_toc_cache 的 OR 反查，两侧键都可命中
             if let Ok(json) = serde_json::to_string(&chapters) {
+                let book_key = shelf_for_write
+                    .as_ref()
+                    .map(|b| b.book_url.clone())
+                    .unwrap_or_else(|| toc_url.clone());
                 let _ = state
                     .storage
-                    .cache_toc(&namespace, &toc_url, &toc_url, &json)
+                    .cache_toc(&namespace, &toc_url, &book_key, &json)
                     .await;
             }
             // F8：成功回写 latestChapterTitle/totalChapterNum/lastCheckTime，清 lastCheckError
@@ -4159,16 +4169,28 @@ async fn export_book(
         // @font-face + OEBPS/fonts/*.woff2 + 章节链接样式表）
         "epub" => {
             let cover = book_cover_bytes(&state, &namespace, &url).await;
-            let epub = crate::service::export_book::build_epub_full(
-                &title,
-                &author,
-                &crate::service::export_book::EpubMeta {
-                    cover,
-                    font,
-                    ..Default::default()
-                },
-                &export_chapters,
-            );
+            // 整书 zip Deflate 压缩为秒级 CPU——spawn_blocking 避免阻塞 tokio worker
+            let meta = crate::service::export_book::EpubMeta {
+                cover,
+                font,
+                ..Default::default()
+            };
+            let title_c = title.clone();
+            let author_c = author.clone();
+            let chapters_c = export_chapters.clone();
+            let epub = tokio::task::spawn_blocking(move || {
+                crate::service::export_book::build_epub_full(
+                    &title_c,
+                    &author_c,
+                    &meta,
+                    &chapters_c,
+                )
+            })
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("EPUB 导出任务失败: {e}");
+                Vec::new()
+            });
             (epub, "application/epub+zip".to_string(), "epub")
         }
         "html" => (
@@ -4340,12 +4362,13 @@ async fn collect_export_chapters(
         let path = resolve_export_file_path(&state.storage.config.storage_dir(), url)
             .ok_or_else(|| "本地书文件不存在".to_string())?;
         let user_rules = txt_toc_rule_regexes(state, ns).await;
-        let imported = crate::service::local_book::parse_loc_book_path(
+        let imported = crate::service::local_book::parse_loc_book_path_blocking(
             &path,
             &user_rules,
             &book.toc_url,
             book.split_long_chapter,
         )
+        .await
         .map_err(|e| format!("解析失败: {e}"))?;
         let name = if book.name.is_empty() {
             imported.meta.title.clone()
@@ -4787,18 +4810,44 @@ async fn get_book_cache_chapters(
         }
     };
     let mut selected: Vec<serde_json::Value> = Vec::new();
+    // 书源书缓存行键 = md5(chapterUrl)（60 位大整数）——前端目录标记与 from/to 范围
+    // 都按目录 0..N 位置比对，且 60 位超出 JS Number 精度，必须在此反解为目录位置。
+    // 反查表来源：toc_cache（#13 修复后按 book_url/toc_url 均可命中）
+    let mut md5_to_pos: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+    let is_local = url.starts_with("local://") || is_loc_book_file_chapter(&url);
+    if !is_local {
+        if let Ok(Some(toc_json)) = state
+            .storage
+            .get_toc_cache(&namespace, &url, TOC_CACHE_TTL_MS)
+            .await
+        {
+            if let Ok(toc) = serde_json::from_str::<Vec<serde_json::Value>>(&toc_json) {
+                for (pos, c) in toc.iter().enumerate() {
+                    if let Some(u) = c.get("url").and_then(|v| v.as_str()) {
+                        md5_to_pos.insert(crate::util::md5::chapter_url_hash(u), pos);
+                    }
+                }
+            }
+        }
+    }
     for (index, title, content) in chapters {
+        // 非本地书：md5 键 → 目录位置（映射缺失的行保留原键，由前端忽略）
+        let display_index = if is_local {
+            index
+        } else {
+            md5_to_pos.get(&index).copied().map(|p| p as i64).unwrap_or(index)
+        };
         if let Some(f) = from {
-            if index < f {
+            if display_index < f {
                 continue;
             }
         }
         if let Some(t) = to {
-            if index > t {
+            if display_index > t {
                 continue;
             }
         }
-        selected.push(json!({ "index": index, "title": title, "content": content }));
+        selected.push(json!({ "index": display_index, "title": title, "content": content }));
         if selected.len() >= MAX_CACHE_CHAPTERS_PER_FETCH {
             break;
         }
@@ -5088,12 +5137,14 @@ async fn refresh_local_book(
         match found {
             Some(path) => {
                 source_file = Some(path.clone());
-                match crate::service::local_book::parse_loc_book_path(
+                match crate::service::local_book::parse_loc_book_path_blocking(
                     &path,
                     &user_rules,
                     &book.toc_url,
                     book.split_long_chapter,
-                ) {
+                )
+                .await
+                {
                     Ok(b) => b,
                     Err(e) => return Json(ReturnData::err(format!("解析失败：{e}"))),
                 }
@@ -5106,12 +5157,14 @@ async fn refresh_local_book(
             None => return Json(ReturnData::err("本地书文件不存在")),
         };
         source_file = Some(path.clone());
-        match crate::service::local_book::parse_loc_book_path(
+        match crate::service::local_book::parse_loc_book_path_blocking(
             &path,
             &user_rules,
             &book.toc_url,
             book.split_long_chapter,
-        ) {
+        )
+        .await
+        {
             Ok(b) => b,
             Err(e) => return Json(ReturnData::err(format!("解析失败：{e}"))),
         }
@@ -5845,12 +5898,14 @@ async fn migrate_loc_book(
             skipped.push(json!({ "bookUrl": book.book_url, "error": "文件不存在" }));
             continue;
         };
-        let imported = match crate::service::local_book::parse_loc_book_path(
+        let imported = match crate::service::local_book::parse_loc_book_path_blocking(
             &path,
             &user_rules,
             &book.toc_url,
             book.split_long_chapter,
-        ) {
+        )
+        .await
+        {
             Ok(i) => i,
             Err(e) => {
                 skipped
@@ -7502,7 +7557,7 @@ async fn opds_dispatch(
                 .header("Content-Type", "text/plain; charset=utf-8")
                 .header(
                     "Content-Disposition",
-                    format!("inline; filename=\"{}\"", name),
+                    format!("inline; filename={}", urlencoding::encode(&name)),
                 )
                 .body(Body::from(bytes))
                 .unwrap(),
@@ -7525,7 +7580,7 @@ async fn opds_dispatch(
                     .header("Content-Type", ct)
                     .header(
                         "Content-Disposition",
-                        format!("attachment; filename=\"{}\"", name),
+                        format!("attachment; filename={}", urlencoding::encode(&name)),
                     )
                     .body(Body::from(bytes))
                     .unwrap(),
@@ -9164,9 +9219,16 @@ async fn import_book_preview(
     }
     // 解析（parse_loc_book_path 按扩展名分派；核心逻辑在可测的纯函数中）
     let user_rules = txt_toc_rule_regexes(&state, &namespace).await;
-    match import_preview_from_bytes(&bytes, &safe_name, &ext, &user_rules) {
-        Ok(json) => Json(ReturnData::ok(json)),
-        Err(e) => Json(ReturnData::err(format!("解析失败：{e}"))),
+    // 解析为秒级 CPU 工作（EPUB/PDF 解压解析）——spawn_blocking 避免阻塞 tokio worker
+    let preview = tokio::task::spawn_blocking(move || {
+        import_preview_from_bytes(&bytes, &safe_name, &ext, &user_rules)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("导入预览任务失败: {e}"));
+    match preview {
+        Ok(Ok(json)) => Json(ReturnData::ok(json)),
+        Ok(Err(e)) => Json(ReturnData::err(format!("解析失败：{e}"))),
+        Err(e) => Json(ReturnData::err(format!("系统错误：{e}"))),
     }
 }
 
@@ -9331,7 +9393,21 @@ async fn save_book_content(
     if content.is_empty() {
         return Json(ReturnData::err("正文不能为空"));
     }
-    let idx = crate::util::md5::chapter_url_hash(&chapter_url);
+    // 键语义分流（#12）：本地书 chapterUrl 内嵌数值下标（local://id/N、本地文件#N），
+    // 按真实下标写章节表——此前一律写 md5 幽灵行：本地书读取按 0..N 直读永不命中
+    //（编辑"保存成功"但跨设备不回读），幽灵行还会混进本地书目录列表
+    let idx = if let Some(rest) = chapter_url.strip_prefix("local://") {
+        rest.rsplit_once('/')
+            .and_then(|(_, s)| s.parse::<i64>().ok())
+            .unwrap_or_else(|| crate::util::md5::chapter_url_hash(&chapter_url))
+    } else if is_loc_book_file_chapter(&chapter_url) {
+        chapter_url
+            .rsplit_once('#')
+            .and_then(|(_, s)| s.parse::<i64>().ok())
+            .unwrap_or_else(|| crate::util::md5::chapter_url_hash(&chapter_url))
+    } else {
+        crate::util::md5::chapter_url_hash(&chapter_url)
+    };
     match state
         .storage
         .cache_chapter_content(&namespace, &book_url, idx, &title, &content)
@@ -9464,12 +9540,14 @@ async fn get_chapter_list_by_rule(
         let entries: Vec<serde_json::Value> = match &path {
             Some(p) => {
                 let user_rules = txt_toc_rule_regexes(&state, &namespace).await;
-                match crate::service::local_book::parse_loc_book_path(
+                match crate::service::local_book::parse_loc_book_path_blocking(
                     p,
                     &user_rules,
                     &bk.toc_url,
                     bk.split_long_chapter,
-                ) {
+                )
+                .await
+                {
                     Ok(imported) => imported
                         .chapters
                         .iter()
@@ -10346,12 +10424,14 @@ async fn scan_local_book_dir(
             .unwrap_or_else(|_| target.clone())
             .to_string_lossy()
             .into_owned();
-        let imported_book = match crate::service::local_book::parse_loc_book_path(
+        let imported_book = match crate::service::local_book::parse_loc_book_path_blocking(
             &target,
             &user_rules,
             crate::service::local_book::DEFAULT_EPUB_TOC_MODE,
             false,
-        ) {
+        )
+        .await
+        {
             Ok(b) => b,
             Err(e) => {
                 failed += 1;
@@ -10802,12 +10882,14 @@ async fn get_book_toc_loc_book(
     } else {
         book.toc_url.as_str()
     };
-    let imported = match crate::service::local_book::parse_loc_book_path(
+    let imported = match crate::service::local_book::parse_loc_book_path_blocking(
         &path,
         &[],
         toc_mode,
         book.split_long_chapter,
-    ) {
+    )
+    .await
+    {
         Ok(b) => b,
         Err(e) => {
             tracing::debug!("loc_book toc: 解析失败 [{path_lower}] {e}");
@@ -10855,7 +10937,8 @@ async fn get_book_toc_file(state: &AppState, ns: &str, book_url: &str) -> Option
         .unwrap_or(false);
     let user_rules = txt_toc_rule_regexes(state, ns).await;
     let imported =
-        crate::service::local_book::parse_loc_book_path(&path, &user_rules, &toc_mode, split_long)
+        crate::service::local_book::parse_loc_book_path_blocking(&path, &user_rules, &toc_mode, split_long)
+            .await
             .ok()?;
     let list: Vec<serde_json::Value> = imported
         .chapters
@@ -10941,7 +11024,8 @@ async fn get_book_content_file(
         .unwrap_or(false);
     let user_rules = txt_toc_rule_regexes(state, ns).await;
     let imported =
-        crate::service::local_book::parse_loc_book_path(&path, &user_rules, &toc_mode, split_long)
+        crate::service::local_book::parse_loc_book_path_blocking(&path, &user_rules, &toc_mode, split_long)
+            .await
             .ok()?;
     let content = imported.chapters.get(index as usize)?.content.clone();
     let content = if is_epub {

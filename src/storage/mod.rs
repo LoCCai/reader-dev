@@ -2594,8 +2594,11 @@ impl Storage {
         max_age_ms: i64,
     ) -> Result<Option<String>> {
         let cutoff = chrono::Utc::now().timestamp_millis() - max_age_ms;
+        // OR 反查：getBookToc 写缓存时 book_url 列存的是 toc_url（书源书 tocUrl≠bookUrl 占多数），
+        // 而进度反查/JS 上下文/越界校验等 4 个调用点传的是 book_url——只按 toc_url 列过滤
+        // 时这些调用全部 miss（实测 39/92 本在架书受影响）
         let r: Option<(String,)> = sqlx::query_as(
-            "SELECT chapters_json FROM toc_cache WHERE toc_url = ?1 AND updated_at >= ?2 AND user_namespace = ?3",
+            "SELECT chapters_json FROM toc_cache WHERE (toc_url = ?1 OR book_url = ?1) AND updated_at >= ?2 AND user_namespace = ?3",
         )
         .bind(toc_url)
         .bind(cutoff)
@@ -5736,6 +5739,26 @@ mod tests {
             custom_order: 1,
             ..Default::default()
         }
+    }
+
+    /// #13：get_toc_cache OR 反查——book_url 列与 toc_url 列任一命中
+    #[tokio::test]
+    async fn test_get_toc_cache_matches_both_keys() {
+        let storage = test_storage("toc-or").await;
+        // getBookToc 写入形态：book_url 列存的是 toc_url
+        storage
+            .cache_toc("default", "https://t.example/toc", "https://t.example/toc", r#"[{"url":"u1"}]"#)
+            .await
+            .unwrap();
+        // setBookSource 写入形态：两列分别为 new_url / toc_url
+        storage
+            .cache_toc("default", "https://new.example/b", "https://t2.example/toc", r#"[{"url":"u2"}]"#)
+            .await
+            .unwrap();
+        assert!(storage.get_toc_cache("default", "https://t.example/toc", 60_000).await.unwrap().is_some());
+        assert!(storage.get_toc_cache("default", "https://new.example/b", 60_000).await.unwrap().is_some());
+        assert!(storage.get_toc_cache("default", "https://t2.example/toc", 60_000).await.unwrap().is_some());
+        assert!(storage.get_toc_cache("default", "https://none.example/x", 60_000).await.unwrap().is_none());
     }
 
     /// prune_book_vars_cache：TTL 过期删除 + 超限按 updated_at 从新到旧裁剪

@@ -294,7 +294,7 @@ fn proxy_http_client(proxy_url: &str) -> Result<reqwest::Client> {
     {
         return Ok(c.clone()); // Client 内部 Arc，clone 廉价
     }
-    let client = build_http_client(0, ssrf_redirect_policy(), Some(&key))?;
+    let client = build_http_client(0, reqwest::redirect::Policy::none(), Some(&key))?;
     let mut m = PROXY_CLIENTS.lock().unwrap_or_else(|e| e.into_inner());
     if m.len() >= PROXY_CLIENT_CACHE_MAX {
         m.clear();
@@ -467,7 +467,9 @@ pub async fn fetch(
             tracing::debug!("http_fetch 走书源级代理 {p} {method} {url}");
             proxy_http_client(p)?
         }
-        None => http_client_builder(timeout_secs, ssrf_redirect_policy())?,
+        // Policy::none：重定向由 fetch_once 手动逐跳处理（每跳异步 SSRF 校验）——
+        // 曾用 ssrf_redirect_policy()：闭包内同步 getaddrinfo 阻塞 tokio worker
+        None => http_client_builder(timeout_secs, reqwest::redirect::Policy::none())?,
     };
     let retries = http_retry_count();
     let mut last_err: Option<anyhow::Error> = None;
@@ -491,7 +493,23 @@ pub async fn fetch(
     Err(last_err.unwrap_or_else(|| anyhow!("http_fetch 重试耗尽")))
 }
 
+/// 响应体大小上限（MB，env 可调）——默认 20MB：正文 HTML <5MB、反爬字体 0.1-10MB，
+/// 思源级全量 OTF（>20MB）会被拒（可 env 放开）。曾无上限：resp.bytes() 整读内存，
+/// 失控源可在超时窗口内推入任意体积（对照 fetch_image 双防护先例）
+fn http_body_max_bytes() -> u64 {
+    std::env::var("READER_HTTP_BODY_MAX_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(20)
+        .max(1)
+        * 1024
+        * 1024
+}
+
 /// 单次 HTTP 请求（不含重试；供 [`fetch`] 循环调用）。
+/// 重定向手动逐跳处理（Policy::none + 每跳 validate_public_target 异步校验——
+/// 曾用 Policy::custom 闭包：闭包内同步 getaddrinfo 阻塞 tokio worker 数秒）。
+/// 307/308 保留方法与请求体；跨主机剥离 Cookie/Authorization（对齐 reqwest 语义）。
 /// timeout_secs 在请求级限定（代理共享 Client 无全局超时；直连 Client 的全局超时同值被覆盖，语义不变）
 async fn fetch_once(
     client: &reqwest::Client,
@@ -502,34 +520,89 @@ async fn fetch_once(
     charset: Option<&str>,
     timeout_secs: u64,
 ) -> Result<FetchResponse> {
-    let method = if method.eq_ignore_ascii_case("POST") {
+    const MAX_HOPS: usize = 10;
+    let mut method_cur = if method.eq_ignore_ascii_case("POST") {
         reqwest::Method::POST
     } else {
         reqwest::Method::GET
     };
-    let mut req = client
-        .request(method, url)
-        .timeout(Duration::from_secs(timeout_secs.max(1)));
-    for (k, v) in headers {
-        req = req.header(k, v);
+    let mut current = url.to_string();
+    let mut body_cur = body.map(|s| s.to_string());
+    let mut hop_headers = headers.clone();
+    let mut prev_host: Option<String> = url::Url::parse(url).ok().and_then(|u| u.host_str().map(String::from));
+    let mut status = 200u16;
+    let mut final_url = url.to_string();
+    let mut resp_headers: Vec<(String, String)> = Vec::new();
+    let mut bytes: Vec<u8> = Vec::new();
+    for hop in 0..=MAX_HOPS {
+        // 每跳公网校验（DNS 解析后——拒绝私网/回环/169.254 等；曾由 redirect 闭包同步做）
+        validate_public_target(&current).await?;
+        let mut req = client
+            .request(method_cur.clone(), &current)
+            .timeout(Duration::from_secs(timeout_secs.max(1)));
+        for (k, v) in &hop_headers {
+            req = req.header(k, v);
+        }
+        if let Some(b) = &body_cur {
+            req = req.body(b.clone());
+        }
+        let resp = req.send().await?;
+        status = resp.status().as_u16();
+        final_url = resp.url().to_string();
+        if resp.status().is_redirection() {
+            if hop == MAX_HOPS {
+                anyhow::bail!("重定向次数超过 {MAX_HOPS}");
+            }
+            let loc = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .map(String::from)
+                .unwrap_or_default();
+            let next = url::Url::parse(&final_url)?.join(&loc)?.to_string();
+            if !(status == 307 || status == 308) {
+                method_cur = reqwest::Method::GET;
+                body_cur = None;
+            }
+            let next_host = url::Url::parse(&next).ok().and_then(|u| u.host_str().map(String::from));
+            if next_host != prev_host {
+                // 跨主机：剥离凭据头（对齐 reqwest 重定向语义）
+                hop_headers.retain(|k, _| {
+                    !k.eq_ignore_ascii_case("cookie") && !k.eq_ignore_ascii_case("authorization")
+                });
+            }
+            prev_host = next_host;
+            current = next;
+            continue;
+        }
+        resp_headers = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str().to_lowercase(),
+                    v.to_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        // 响应体双防护：Content-Length 预检 + 流式累计上限（对齐 fetch_image）
+        let max_bytes = http_body_max_bytes();
+        if resp.content_length().is_some_and(|cl| cl > max_bytes) {
+            anyhow::bail!("响应体超过大小上限（{}MB）", max_bytes / 1024 / 1024);
+        }
+        {
+            use futures::StreamExt;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                if bytes.len().saturating_add(chunk.len()) > max_bytes as usize {
+                    anyhow::bail!("响应体超过大小上限（{}MB）", max_bytes / 1024 / 1024);
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+        }
+        break;
     }
-    if let Some(b) = body {
-        req = req.body(b.to_string());
-    }
-    let resp = req.send().await?;
-    let status = resp.status().as_u16();
-    let final_url = resp.url().to_string();
-    let resp_headers: Vec<(String, String)> = resp
-        .headers()
-        .iter()
-        .map(|(k, v)| {
-            (
-                k.as_str().to_lowercase(),
-                v.to_str().unwrap_or_default().to_string(),
-            )
-        })
-        .collect();
-    let bytes = resp.bytes().await?;
     // charset 优先级：URL 后缀显式 charset > HTTP Content-Type > HTML meta/自动探测
     let charset = match charset {
         Some(c) => Some(c.to_string()),

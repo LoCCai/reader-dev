@@ -159,12 +159,13 @@ async fn run_job(
     if is_file_book {
         let path = crate::api::router::resolve_export_file_path(&storage.config.storage_dir(), url)
             .ok_or_else(|| anyhow!("本地书文件不存在"))?;
-        let imported = crate::service::local_book::parse_loc_book_path(
+        let imported = crate::service::local_book::parse_loc_book_path_blocking(
             &path,
             &[],
             &book.toc_url,
             book.split_long_chapter,
-        )?;
+        )
+        .await?;
         let pairs: Vec<(String, String)> = imported
             .chapters
             .iter()
@@ -241,11 +242,16 @@ async fn run_job(
     }
 
     let mut cached = 0usize;
-    for h in handles {
-        // 取消检查（逐任务粒度）
+    let mut handles_iter = handles.into_iter();
+    while let Some(h) = handles_iter.next() {
+        // 取消检查（逐任务粒度）；取消时 abort 全部残余任务——JoinHandle drop 是
+        // detach 语义不取消任务，曾导致取消后剩余章节仍按并发 3 继续抓源站
         {
             let mut p = progress.lock().unwrap_or_else(|e| e.into_inner());
             if p.cancelled {
+                for rest in handles_iter.by_ref() {
+                    rest.abort();
+                }
                 break;
             }
             p.cached = cached;

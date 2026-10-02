@@ -1766,13 +1766,27 @@ fn sp_apply(
     Ok(JsValue::undefined())
 }
 
+/// P1-3 同款上限（防书源脚本无界写入）：单 pref 最多 1000 条 / 总 1MB，超限静默拒写
+pub const APP_PREFS_MAX_ENTRIES: usize = 1000;
+pub const APP_PREFS_MAX_BYTES: usize = 1024 * 1024;
+
 fn app_prefs_insert(inner: &JsBridgeInner, pref: String, key: String, value: JsonValue) {
-    APP_PREFS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    let mut prefs = APP_PREFS.lock().unwrap_or_else(|e| e.into_inner());
+    let table = prefs
         .entry(app_prefs_key(&inner.ns, &pref))
-        .or_default()
-        .insert(key, value);
+        .or_default();
+    let new_key = !table.contains_key(&key);
+    if new_key && table.len() >= APP_PREFS_MAX_ENTRIES {
+        tracing::warn!("getSharedPreferences [{pref}] 条数达上限，拒绝写入 {key}");
+        return;
+    }
+    let value_bytes = serde_json::to_string(&value).map(|v| v.len()).unwrap_or(0);
+    let total: usize = table.values().map(|v| serde_json::to_string(v).map(|s| s.len()).unwrap_or(0)).sum();
+    if total + value_bytes > APP_PREFS_MAX_BYTES {
+        tracing::warn!("getSharedPreferences [{pref}] 总量达上限，拒绝写入 {key}");
+        return;
+    }
+    table.insert(key, value);
 }
 
 fn json_to_js_value(value: JsonValue, _context: &mut Context) -> JsValue {
@@ -5671,15 +5685,27 @@ fn parse_ttf(bytes: &[u8]) -> Option<TtfShim> {
 
 static TTF_REGISTRY: LazyLock<Mutex<HashMap<u64, Arc<TtfShim>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static TTF_ORDER: LazyLock<Mutex<std::collections::VecDeque<u64>>> =
+    LazyLock::new(|| Mutex::new(std::collections::VecDeque::new()));
+/// TTF 字体对象容量（FIFO 驱逐）——单个 CJK 字体解析后可达数十 MB，字体反爬书源
+/// 逐章换字体时曾无界累积；驱逐后 JS 侧与未知 id 同语义（inLimit=false 优雅降级）
+const TTF_REGISTRY_MAX: usize = 8;
 
 static TTF_NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 fn register_ttf(shim: TtfShim) -> u64 {
     let id = TTF_NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    TTF_REGISTRY
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(id, Arc::new(shim));
+    {
+        let mut reg = TTF_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+        let mut order = TTF_ORDER.lock().unwrap_or_else(|e| e.into_inner());
+        if order.len() >= TTF_REGISTRY_MAX {
+            if let Some(old) = order.pop_front() {
+                reg.remove(&old);
+            }
+        }
+        order.push_back(id);
+        reg.insert(id, Arc::new(shim));
+    }
     id
 }
 
@@ -7016,6 +7042,29 @@ pub(crate) fn attach_source_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #21：getSharedPreferences 写入上限（1000 条）——超限静默拒绝
+    #[test]
+    fn test_app_prefs_insert_capped() {
+        let inner_arc = JsBridge::new("", "测试源").with_namespace("prefs-cap").inner;
+        for i in 0..APP_PREFS_MAX_ENTRIES + 10 {
+            app_prefs_insert(&inner_arc, "test_pref".into(), format!("k{i}"), JsonValue::from(i));
+        }
+        let table = APP_PREFS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&app_prefs_key("prefs-cap", "test_pref"))
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(table.len(), APP_PREFS_MAX_ENTRIES, "超限条目应被拒绝");
+        assert!(table.contains_key("k0"), "先写入的应保留");
+        assert!(!table.contains_key(&format!("k{}", APP_PREFS_MAX_ENTRIES + 5)));
+        APP_PREFS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&app_prefs_key("prefs-cap", "test_pref"));
+    }
+
 
     /// cache.putFile/getFile 文件缓存回环：文件落盘 + 表存哨兵 + 清内存后读穿透解析
     #[tokio::test]

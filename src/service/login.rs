@@ -598,6 +598,13 @@ async fn login_session_to_outcome(
                         .set_cookie(ns, &source.book_source_url, &cookie_str)
                         .await?;
                 }
+                // 浏览器实际 UA 随会话记录——UA 绑定型站点校验 cookie 时也校验 UA
+                // （对齐 crawler::store_solution_session；book_source_cookies 已有列）
+                if !sess.user_agent.is_empty() {
+                    storage
+                        .set_cookie_user_agent(ns, &source.book_source_url, &sess.user_agent)
+                        .await?;
+                }
                 tracing::info!("书源 [{}] 浏览器自动登录成功", source.book_source_name);
                 return Ok(LoginOutcome::Success { cookie: cookie_str });
             }

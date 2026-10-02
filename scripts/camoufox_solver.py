@@ -353,14 +353,22 @@ def browser_alive(b) -> bool:
         return False
 
 
+_browser_lock = asyncio.Lock()
+
+
 async def get_browser():
-    """惰性启动常驻 camoufox 浏览器（进程生命周期内复用；并发请求经锁排队）。
+    """惰性启动常驻 camoufox 浏览器（进程生命周期内复用；并发请求经锁排队——
+    此前 docstring 声称有锁实际无锁：冷启动数秒窗口内并发请求会双启动浏览器，
+    后完成者覆盖 _browser，先启动的泄漏为孤儿进程）。
     验活：浏览器进程死亡（崩溃/OOM-kill）时 _browser 对象仍残留——只判 None 会
     永远返回僵死对象，请求静默失败且 /health 误报 ready；死亡则关闭残壳并重启。
+    双检：持锁后再次探活（等锁期间可能已被其他请求重启）。
     """
     global _browser, _browser_ready
-    dead = _browser is not None and not browser_alive(_browser)
-    if _browser is None or dead:
+    async with _browser_lock:
+        if _browser is not None and browser_alive(_browser):
+            return _browser
+        dead = _browser is not None
         if dead:
             try:
                 await _browser.close()
@@ -370,7 +378,7 @@ async def get_browser():
             _browser_ready = False
         _browser = await AsyncCamoufox(headless=True, humanize=True).__aenter__()
         _browser_ready = True
-    return _browser
+        return _browser
 
 
 def cookies_for_host(cookies, host):
