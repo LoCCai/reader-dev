@@ -1,0 +1,1 @@
+import{r as t}from"./request-DbTetk2t.js";function r(){return t.get("/getSystemInfo").then(e=>e.data)}function n(){return t.get("/exportBookSources",{responseType:"blob",timeout:6e4}).then(e=>e.data)}export{n as e,r as g};

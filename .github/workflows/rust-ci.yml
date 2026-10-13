@@ -1,0 +1,104 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+# 拆分原则：fmt / clippy / test 三 job 并行——互不阻塞（test 失败不拖 clippy 反馈，
+# 反之亦然）。前端构建仅 test 需要（rust-embed 编译期嵌入）。
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt 检查
+        run: cargo fmt --all -- --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-embed 编译期嵌入 web-ui/dist——目录缺失时 derive 不生成 get() 必然报错
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: 前端构建（rust-embed 前置依赖）
+        working-directory: web-ui
+        run: npm ci && npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with: { key: clippy }
+      - name: cargo clippy（正确性 lint 严格，风格放宽）
+        run: cargo clippy --all-targets -- -A warnings -D clippy::correctness
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node（前端构建 + node:test 单测）
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: 前端单测
+        working-directory: web-ui
+        run: |
+          npm ci
+          node --test "src/utils/*.test.ts"
+
+      - name: 前端构建（rust-embed 编译期嵌入 web-ui/dist）
+        working-directory: web-ui
+        run: npm run build
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+
+      # 注意：不用 --all-features——gui feature 需要 GTK/webkit2gtk 系统库，
+      # 由 gui-smoke job 专职覆盖（continue-on-error 兜底）
+      - name: cargo test（lib 单元 + tests/ E2E 全量，默认 features）
+        run: cargo test
+
+      - name: musl 链接器
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+
+      - name: cargo check (musl 静态目标)
+        run: cargo check --target x86_64-unknown-linux-musl
+
+  # GUI feature 编译冒烟（Linux webkit2gtk 路径；Windows 由发版流水线覆盖）
+  gui-smoke:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: webkit2gtk 系统依赖（含 libxdo——tao 链接期依赖，check 不暴露）
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: 前端构建（rust-embed 前置依赖）
+        working-directory: web-ui
+        run: npm ci && npm run build
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { key: gui-smoke }
+      # build 而非 check——暴露链接期缺库问题（libxdo 教训）
+      - name: cargo build --features gui（含链接）
+        run: cargo build --features gui

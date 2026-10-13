@@ -1,0 +1,1 @@
+import{g as o,p as e}from"./request-DbTetk2t.js";function T(){return o("/getTxtTocRules")}function s(t){return e("/saveTxtTocRule",t)}function r(t){return e("/deleteTxtTocRule",{id:t})}function c(){return e("/importDefaultTxtTocRules")}export{r as d,T as g,c as i,s};

@@ -1,0 +1,38 @@
+name: Frontend CI
+
+on:
+  push:
+    branches: [master]
+    paths: ["web-ui/**", ".github/workflows/frontend-ci.yml"]
+  pull_request:
+    branches: [master]
+    paths: ["web-ui/**", ".github/workflows/frontend-ci.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web-ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          # node:test 原生运行 .ts 测试需要 type-stripping（Node >=23 默认启用）
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web-ui/package-lock.json
+
+      - name: npm ci
+        run: npm ci
+
+      - name: 前端单元测试（node --test 直跑 .ts）
+        run: node --test "src/utils/*.test.ts"
+
+      - name: 前端构建（vue-tsc 类型检查 + vite）
+        run: npm run build

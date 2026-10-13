@@ -1,0 +1,403 @@
+name: Release All (CLI + GUI, all platforms)
+
+# 发版拓扑（零阻塞原则）：
+# - prepare-release：建「正式」Release（非 draft）+ 版本一致性校验——资产陆续追加，先到先可见
+# - 各平台/变体 job 全并行，needs 仅 prepare-release；任一慢任务不影响其他
+#   （长尾目标标 continue-on-error——失败不阻塞整体发版）
+# - 产物命名：
+#     CLI: reader-dev-cli-{os}-{arch}[.exe|.zip]     无头服务端（musl 静态/glibc）
+#     GUI: reader-dev-gui-{os}-{arch}(.zip)          双击开窗口（关窗收托盘）
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-all
+  cancel-in-progress: true
+
+jobs:
+  # ================= Release 占位 + 版本校验（不被任何构建依赖阻塞后续可见性） =================
+  prepare-release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 版本一致性校验（tag ↔ Cargo.toml ↔ package.json）
+        if: startsWith(github.ref, 'refs/tags/')
+        run: python3 scripts/check_version.py "${{ github.ref_name }}"
+
+      - name: 创建/复写正式 Release（非 draft——资产先到先可见）
+        run: |
+          if [ -n "$GITHUB_REF_NAME" ]; then
+            if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+              gh release edit "$GITHUB_REF_NAME" --draft=false --generate-notes || true
+            else
+              gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+            fi
+          fi
+
+  # ================= CLI：Linux x64 musl 静态 =================
+  cli-linux-x64:
+    runs-on: ubuntu-latest
+    needs: prepare-release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: 构建前端（rust-embed 嵌入）
+        working-directory: web-ui
+        run: npm ci && npm run build
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: x86_64-unknown-linux-musl }
+      - name: musl-gcc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - uses: Swatinem/rust-cache@v2
+        with: { key: cli-lx64 }
+      - name: build
+        run: cargo build --release --target x86_64-unknown-linux-musl
+      - name: 打包
+        run: |
+          mkdir -p dist dist-pkg/web-ui
+          cp target/x86_64-unknown-linux-musl/release/reader-dev dist-pkg/reader-dev-cli-linux-x64
+          chmod +x dist-pkg/reader-dev-cli-linux-x64
+          cp -r web-ui/dist dist-pkg/web-ui/dist
+          cd dist-pkg && zip -qr ../dist/reader-dev-cli-linux-x64.zip . && cd ..
+          cp dist-pkg/reader-dev-cli-linux-x64 dist/
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            dist/reader-dev-cli-linux-x64.zip
+            dist/reader-dev-cli-linux-x64
+
+  # ================= CLI：Linux arm64 musl =================
+  cli-linux-arm64:
+    runs-on: ubuntu-latest
+    needs: prepare-release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: 构建前端
+        working-directory: web-ui
+        run: npm ci && npm run build
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: aarch64-unknown-linux-musl }
+      - name: zig + cargo-zigbuild（C 依赖交叉编译）
+        run: pip install ziglang && cargo install cargo-zigbuild --locked
+      - uses: Swatinem/rust-cache@v2
+        with: { key: cli-la64 }
+      - name: build
+        run: cargo zigbuild --release --target aarch64-unknown-linux-musl
+      - name: 打包
+        run: |
+          mkdir -p dist dist-pkg/web-ui
+          cp target/aarch64-unknown-linux-musl/release/reader-dev dist-pkg/reader-dev-cli-linux-arm64
+          chmod +x dist-pkg/reader-dev-cli-linux-arm64
+          cp -r web-ui/dist dist-pkg/web-ui/dist
+          cd dist-pkg && zip -qr ../dist/reader-dev-cli-linux-arm64.zip . && cd ..
+          cp dist-pkg/reader-dev-cli-linux-arm64 dist/
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            dist/reader-dev-cli-linux-arm64.zip
+            dist/reader-dev-cli-linux-arm64
+
+  # ================= CLI：Windows x64 =================
+  cli-windows-x64:
+    runs-on: windows-latest
+    needs: prepare-release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: 构建前端
+        working-directory: web-ui
+        run: npm ci; npm run build
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { key: cli-wx64 }
+      - name: build
+        run: cargo build --release
+      - name: 改名（cli 命名约定）
+        shell: pwsh
+        run: Copy-Item target\release\reader-dev.exe reader-dev-cli-windows-x64.exe
+      - name: 上传
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: reader-dev-cli-windows-x64.exe
+
+  # ================= CLI：Windows arm64 =================
+  cli-windows-arm64:
+    runs-on: windows-latest
+    needs: prepare-release
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: 构建前端
+        working-directory: web-ui
+        run: npm ci; npm run build
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: aarch64-pc-windows-msvc }
+      - uses: Swatinem/rust-cache@v2
+        with: { key: cli-wa64 }
+      - name: build
+        run: cargo build --release --target aarch64-pc-windows-msvc
+      - name: 改名（cli 命名约定）
+        shell: pwsh
+        run: Copy-Item target\aarch64-pc-windows-msvc\release\reader-dev.exe reader-dev-cli-windows-arm64.exe
+      - name: 上传
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: reader-dev-cli-windows-arm64.exe
+
+  # ================= GUI：Windows x64（双击开窗口，关窗收托盘） =================
+  gui-windows-x64:
+    runs-on: windows-latest
+    needs: prepare-release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: 构建前端
+        working-directory: web-ui
+        run: npm ci; npm run build
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { key: gui-wx64 }
+      - name: build (--features gui)
+        run: cargo build --release --features gui
+      - name: 改名（gui 命名约定）
+        shell: pwsh
+        run: Copy-Item target\release\reader-dev.exe reader-dev-gui-windows-x64.exe
+      - name: 上传（gui 单文件——服务同进程内嵌）
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: reader-dev-gui-windows-x64.exe
+
+  # ================= GUI：Linux x64（glibc 动态——webkit2gtk 系统依赖） =================
+  gui-linux-x64:
+    runs-on: ubuntu-latest
+    needs: prepare-release
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: 构建前端
+        working-directory: web-ui
+        run: npm ci && npm run build
+      - name: webkit2gtk 系统依赖（wry Linux 后端）
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { key: gui-lx64 }
+      - name: build (--features gui)
+        run: cargo build --release --features gui
+      - name: 打包 zip（附运行提示）
+        run: |
+          mkdir -p dist
+          cp target/release/reader-dev dist/reader-dev-gui-linux-x64
+          chmod +x dist/reader-dev-gui-linux-x64
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: dist/reader-dev-gui-linux-x64
+
+  # ================= CLI：Linux x64 glibc 动态（GUI 同款运行时兜底） =================
+  # 说明：gui-linux 与本 job 共享 webkit 运行时需求差异仅在前者；此处提供纯 CLI glibc 版
+  # 以覆盖无法运行 musl 静态二进制的极老环境（实际罕见，continue-on-error 兜底）
+
+  # ================= CLI：macOS x64 / arm64（WKWebView 无关——纯服务端） =================
+  cli-macos-x64:
+    runs-on: macos-13
+    needs: prepare-release
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: 构建前端
+        working-directory: web-ui
+        run: npm ci && npm run build
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: x86_64-apple-darwin }
+      - uses: Swatinem/rust-cache@v2
+        with: { key: cli-mx64 }
+      - name: build
+        run: cargo build --release --target x86_64-apple-darwin
+      - name: 打包 zip（内含 web-ui/dist）
+        run: |
+          mkdir -p dist dist-pkg/web-ui
+          cp target/x86_64-apple-darwin/release/reader-dev dist-pkg/reader-dev-cli-macos-x64
+          chmod +x dist-pkg/reader-dev-cli-macos-x64
+          cp -r web-ui/dist dist-pkg/web-ui/dist
+          cd dist-pkg && zip -qr ../dist/reader-dev-cli-macos-x64.zip . && cd ..
+          cp dist-pkg/reader-dev-cli-macos-x64 dist/
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            dist/reader-dev-cli-macos-x64.zip
+            dist/reader-dev-cli-macos-x64
+
+  cli-macos-arm64:
+    runs-on: macos-latest
+    needs: prepare-release
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: 构建前端
+        working-directory: web-ui
+        run: npm ci && npm run build
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: aarch64-apple-darwin }
+      - uses: Swatinem/rust-cache@v2
+        with: { key: cli-ma64 }
+      - name: build
+        run: cargo build --release --target aarch64-apple-darwin
+      - name: 打包 zip
+        run: |
+          mkdir -p dist dist-pkg/web-ui
+          cp target/aarch64-apple-darwin/release/reader-dev dist-pkg/reader-dev-cli-macos-arm64
+          chmod +x dist-pkg/reader-dev-cli-macos-arm64
+          cp -r web-ui/dist dist-pkg/web-ui/dist
+          cd dist-pkg && zip -qr ../dist/reader-dev-cli-macos-arm64.zip . && cd ..
+          cp dist-pkg/reader-dev-cli-macos-arm64 dist/
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            dist/reader-dev-cli-macos-arm64.zip
+            dist/reader-dev-cli-macos-arm64
+
+  # ================= GUI：Windows arm64（WebView2 原生支持 ARM64） =================
+  gui-windows-arm64:
+    runs-on: windows-latest
+    needs: prepare-release
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: 构建前端
+        working-directory: web-ui
+        run: npm ci; npm run build
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: aarch64-pc-windows-msvc }
+      - uses: Swatinem/rust-cache@v2
+        with: { key: gui-wa64 }
+      - name: build (--features gui)
+        run: cargo build --release --features gui --target aarch64-pc-windows-msvc
+      - name: 改名
+        shell: pwsh
+        run: Copy-Item target\aarch64-pc-windows-msvc\release\reader-dev.exe reader-dev-gui-windows-arm64.exe
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: reader-dev-gui-windows-arm64.exe
+
+  # ================= GUI：Linux arm64（原生 ARM runner + webkit2gtk） =================
+  gui-linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    needs: prepare-release
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: 构建前端
+        working-directory: web-ui
+        run: npm ci && npm run build
+      - name: webkit2gtk 系统依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { key: gui-la64 }
+      - name: build (--features gui)
+        run: cargo build --release --features gui
+      - name: 打包
+        run: |
+          mkdir -p dist
+          cp target/release/reader-dev dist/reader-dev-gui-linux-arm64
+          chmod +x dist/reader-dev-gui-linux-arm64
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: dist/reader-dev-gui-linux-arm64
+
+  # ================= GUI：macOS arm64（Apple Silicon，系统 WKWebView 零依赖） =================
+  gui-macos-arm64:
+    runs-on: macos-latest
+    needs: prepare-release
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: 构建前端
+        working-directory: web-ui
+        run: npm ci && npm run build
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { key: gui-ma64 }
+      - name: build (--features gui)
+        run: cargo build --release --features gui
+      - name: 打包 zip（无签名——首开需右键→打开）
+        run: |
+          mkdir -p dist
+          cp target/release/reader-dev dist/reader-dev-gui-macos-arm64
+          chmod +x dist/reader-dev-gui-macos-arm64
+          ditto -c -k --keepParent dist/reader-dev-gui-macos-arm64 dist/reader-dev-gui-macos-arm64.zip || zip -qj dist/reader-dev-gui-macos-arm64.zip dist/reader-dev-gui-macos-arm64
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: dist/reader-dev-gui-macos-arm64.zip
+
+  # ================= GUI：macOS x64（Intel Mac） =================
+  gui-macos-x64:
+    runs-on: macos-13
+    needs: prepare-release
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: 构建前端
+        working-directory: web-ui
+        run: npm ci && npm run build
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { key: gui-mx64 }
+      - name: build (--features gui)
+        run: cargo build --release --features gui
+      - name: 打包 zip
+        run: |
+          mkdir -p dist
+          cp target/release/reader-dev dist/reader-dev-gui-macos-x64
+          chmod +x dist/reader-dev-gui-macos-x64
+          zip -qj dist/reader-dev-gui-macos-x64.zip dist/reader-dev-gui-macos-x64
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: dist/reader-dev-gui-macos-x64.zip

@@ -1,0 +1,1 @@
+const t="reader_image_proxy";function r(){try{return localStorage.getItem(t)==="1"}catch{return!1}}function a(e){try{localStorage.setItem(t,e?"1":"0")}catch{}}function n(e){return!e||!/^https?:\/\//i.test(e)||!r()?e:`/assets/proxy?url=${encodeURIComponent(e)}`}export{r as i,n as p,a as s};

@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RSS - Reader</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-size:20px; line-height:1.6; color:#222; background:#f7f5f0;
+         font-family:"STSong","SimSun","Noto Serif CJK SC",serif; }
+  #wrap { max-width:640px; margin:0 auto; padding:10px; }
+  h1 { font-size:26px; padding:8px 2px; }
+  nav a { display:inline-block; font-size:20px; padding:10px 16px; margin:4px 6px 4px 0;
+          background:#333; color:#fff; text-decoration:none; border-radius:6px; }
+  #status { margin:8px 2px; color:#666; font-size:18px; min-height:26px; }
+  ul { list-style:none; }
+  ul li { margin:8px 0; }
+  ul li a { display:block; background:#fff; border:1px solid #ccc; border-radius:8px;
+            padding:14px 12px; text-decoration:none; color:#222; }
+  .t { font-size:21px; font-weight:bold; }
+  .m { font-size:15px; color:#777; margin-top:4px; }
+  .unread { color:#a33; font-size:15px; margin-top:4px; }
+  button { font-size:20px; padding:10px 16px; margin:6px 6px 6px 0; background:#356;
+           color:#fff; border:none; border-radius:6px; }
+  .cats { margin:6px 0; }
+  .cats button { font-size:17px; padding:8px 10px; margin:2px 3px 2px 0; background:#333; }
+  .cats button.on { background:#356; }
+  .morebtn { font-size:18px; width:100%; padding:12px; }
+  #articleTitle { font-size:23px; font-weight:bold; padding:10px 2px; }
+  #articleBody { font-size:20px; white-space:pre-wrap; word-break:break-word; padding:4px 2px 20px; }
+  .back { display:inline-block; font-size:18px; padding:8px 12px; margin:4px 6px 4px 0;
+          background:#333; color:#fff; text-decoration:none; border-radius:6px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>RSS</h1>
+  <nav>
+    <a href="index.html?accessToken=__TOKEN__">书架</a>
+    <a href="search.html?accessToken=__TOKEN__">搜索</a>
+    <a href="rss.html?accessToken=__TOKEN__">RSS</a>
+  </nav>
+  <div id="status">加载中…</div>
+  <div id="cats" class="cats"></div>
+  <div id="view">
+    <ul id="list"></ul>
+    <button id="loadMore" class="morebtn" style="display:none">加载更多</button>
+  </div>
+  <div id="articleView" style="display:none"></div>
+</div>
+<script>
+(function () {
+  var QS = {};
+  location.search.replace(/^\?/, "").split("&").forEach(function (p) {
+    var kv = p.split("=");
+    if (kv[0]) QS[decodeURIComponent(kv[0])] = decodeURIComponent(kv[1] || "");
+  });
+  var TOKEN = QS.accessToken || "";
+  var links = document.getElementsByTagName("a");
+  for (var i = 0; i < links.length; i++) {
+    var h = links[i].getAttribute("href") || "";
+    if (h.indexOf("__TOKEN__") >= 0) {
+      links[i].setAttribute("href", h.split("__TOKEN__").join(encodeURIComponent(TOKEN)));
+    }
+  }
+  var status = document.getElementById("status");
+  var list = document.getElementById("list");
+  var view = document.getElementById("view");
+  var articleView = document.getElementById("articleView");
+  var cats = document.getElementById("cats");
+  var loadMore = document.getElementById("loadMore");
+  var currentSource = "";
+  var currentSort = "";
+  var currentPage = 1;
+  var loadingList = false;
+  var articleUrls = {};
+  var sourceCache = {};
+
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+  function apiUrl(path, extra) {
+    var parts = [];
+    if (TOKEN) parts.push("accessToken=" + encodeURIComponent(TOKEN));
+    for (var k in extra) parts.push(encodeURIComponent(k) + "=" + encodeURIComponent(extra[k]));
+    return path + "?" + parts.join("&");
+  }
+  function getJSON(url, ok, err) {
+    fetch(url).then(function (r) { return r.json(); })
+      .then(function (j) { if (j && j.isSuccess === false) err(j.errorMsg || "请求失败"); else ok(j); })
+      .catch(function (e) { err(e.message || e); });
+  }
+  function fmtTime(ms) {
+    if (!ms) return "";
+    var d = new Date(ms);
+    function p(n) { return n < 10 ? "0" + n : "" + n; }
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) +
+           " " + p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+  // feed 正文是 HTML——转纯文本展示（textContent 剥离标签，安全）
+  function toText(html) {
+    if (!html) return "";
+    var d = document.createElement("div");
+    d.innerHTML = html;
+    return (d.textContent || d.innerText || "").replace(/\s+/g, " ").trim();
+  }
+
+  // —— 视图 1：RSS 源列表 ——
+  function showSources() {
+    currentSource = "";
+    currentSort = "";
+    cats.innerHTML = "";
+    loadMore.style.display = "none";
+    status.innerHTML = "加载中…";
+    getJSON(apiUrl("/reader3/getRssSources", {}),
+      function (j) {
+        var arr = j.data || [];
+        if (!arr.length) { status.innerHTML = "暂无 RSS 源"; list.innerHTML = ""; return; }
+        status.innerHTML = "共 " + arr.length + " 个源";
+        arr.forEach(function (s) {
+          sourceCache[s.sourceUrl || s.rssSourceUrl || ""] = s;
+        });
+        var html = "";
+        for (var i = 0; i < arr.length; i++) {
+          var s = arr[i];
+          html += "<li><a href='javascript:void(0)' data-url='" +
+                  encodeURIComponent(s.sourceUrl || s.rssSourceUrl || "") + "'>" +
+                  "<div class='t'>" + esc(s.sourceName || s.rssSourceName || s.sourceUrl) + "</div>" +
+                  "<div class='m'>" + (s.enabled ? "启用" : "停用") + "</div></a></li>";
+        }
+        list.innerHTML = html;
+        var as = list.getElementsByTagName("a");
+        for (var i = 0; i < as.length; i++) {
+          (function (a) {
+            a.addEventListener("click", function () {
+              showArticles(decodeURIComponent(a.getAttribute("data-url")));
+            });
+          })(as[i]);
+        }
+      },
+      function (msg) { status.innerHTML = "加载失败：" + esc(msg); });
+  }
+
+  // legacy sortUrl 多段（&&/换行分隔，每段 名称::地址）→ 分类 tab
+  function renderCats(sourceUrl, source) {
+    cats.innerHTML = "";
+    if (!source) return;
+    var raw = String(source.sortUrl || "");
+    var tabs = [];
+    raw.split(/[\n&]/).forEach(function (seg) {
+      var i = seg.indexOf("::");
+      if (i > 0 && seg.slice(i + 2).trim()) {
+        tabs.push({ name: seg.slice(0, i).trim() || seg.slice(i + 2).trim(),
+                    url: seg.slice(i + 2).trim() });
+      }
+    });
+    if (!tabs.length) return;
+    tabs.forEach(function (tab) {
+      var b = document.createElement("button");
+      b.textContent = tab.name;
+      b.className = tab.url === currentSort ? "on" : "";
+      b.addEventListener("click", function () {
+        showArticles(sourceUrl, tab.url);
+      });
+      cats.appendChild(b);
+    });
+  }
+
+  // —— 视图 2：文章列表（分类 + 分页） ——
+  function showArticles(sourceUrl, sortUrl) {
+    currentSource = sourceUrl;
+    currentSort = sortUrl || "";
+    currentPage = 1;
+    articleUrls = {};
+    list.innerHTML = "";
+    loadMore.style.display = "none";
+    renderCats(sourceUrl, sourceCache[sourceUrl]);
+    loadArticlePage(1);
+  }
+
+  function loadArticlePage(page) {
+    if (loadingList) return;
+    loadingList = true;
+    status.innerHTML = "加载文章…";
+    var extra = { rssSourceUrl: currentSource, page: page };
+    if (currentSort) extra.sortUrl = currentSort;
+    getJSON(apiUrl("/reader3/getRssArticles", extra),
+      function (j) {
+        loadingList = false;
+        var arr = j.data || [];
+        var added = 0;
+        var html = "";
+        for (var i = 0; i < arr.length; i++) {
+          var a = arr[i];
+          if (articleUrls[a.url]) continue;
+          articleUrls[a.url] = 1;
+          added++;
+          html += "<li><a href='javascript:void(0)' data-url='" +
+                  encodeURIComponent(a.url) + "'>" +
+                  "<div class='t'>" + esc(a.title || "(无标题)") + "</div>" +
+                  "<div class='m'>" + fmtTime(a.time) + (a.author ? " · " + esc(a.author) : "") + "</div>" +
+                  (a.hasRead ? "" : "<div class='unread'>未读</div>") +
+                  "</a></li>";
+        }
+        if (page === 1) list.innerHTML = html;
+        else {
+          var tmp = document.createElement("div");
+          tmp.innerHTML = html;
+          while (tmp.firstChild) list.appendChild(tmp.firstChild);
+        }
+        currentPage = page;
+        var total = list.getElementsByTagName("li").length;
+        if (!total) {
+          status.innerHTML = "暂无文章";
+          loadMore.style.display = "none";
+          return;
+        }
+        status.innerHTML = added === 0
+          ? "没有更多文章（已显示 " + total + " 篇）"
+          : "共 " + total + " 篇";
+        loadMore.style.display = added > 0 ? "block" : "none";
+        var as = list.getElementsByTagName("a");
+        for (var i = 0; i < as.length; i++) {
+          (function (a) {
+            a.addEventListener("click", function () {
+              showArticle(decodeURIComponent(a.getAttribute("data-url")));
+            });
+          })(as[i]);
+        }
+      },
+      function (msg) {
+        loadingList = false;
+        status.innerHTML = "加载失败：" + esc(msg);
+      });
+  }
+
+  // —— 视图 3：文章正文（独立容器，返回不销毁列表 DOM） ——
+  function showArticle(url) {
+    status.innerHTML = "加载正文…";
+    getJSON(apiUrl("/reader3/getRssArticle", { url: url }),
+      function (j) {
+        var a = j.data || {};
+        view.style.display = "none";
+        articleView.style.display = "block";
+        articleView.innerHTML = "<a class='back' href='javascript:void(0)' id='backBtn'>← 返回列表</a>" +
+          "<div id='articleTitle'>" + esc(a.title || "") + "</div>" +
+          "<div id='articleBody'></div>";
+        document.getElementById("articleBody").textContent = toText(a.content || "(无正文)");
+        document.getElementById("backBtn").addEventListener("click", function () {
+          articleView.style.display = "none";
+          view.style.display = "block";
+          if (currentSource) showArticles(currentSource, currentSort);
+          else showSources();
+        });
+        status.innerHTML = "";
+        // 标记已读（尽力而为）
+        try {
+          fetch(apiUrl("/reader3/markRssArticleRead", {}), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ articleUrl: url })
+          }).catch(function () {});
+        } catch (e) {}
+      },
+      function (msg) { status.innerHTML = "加载失败：" + esc(msg); });
+  }
+
+  loadMore.addEventListener("click", function () { loadArticlePage(currentPage + 1); });
+  showSources();
+})();
+</script>
+</body>
+</html>
