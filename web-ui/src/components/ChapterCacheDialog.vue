@@ -50,6 +50,13 @@ const msg = ref('')
 const msgError = ref(false)
 let sseHandle: { close: () => void } | null = null
 let cancelLocal = false
+/** 最近一次服务端缓存任务标识（taskId 优先，缺省回退 bookUrl）——SSE 断线后重订阅用 */
+let lastTaskKey = ''
+let lastTaskKeyIsId = false
+/** 断线重订阅时的进度范围快照（done 事件回传用） */
+let lastRange: { f: number; t: number } | null = null
+/** 进度连接中断（任务仍在服务端后台跑）：显示「重新连接进度」入口 */
+const streamDropped = ref(false)
 
 const chapterCount = computed(() => props.chapters.length)
 const title = computed(() => props.bookName || '本书')
@@ -88,6 +95,10 @@ function reset() {
   msg.value = ''
   msgError.value = false
   cancelLocal = false
+  lastTaskKey = ''
+  lastTaskKeyIsId = false
+  lastRange = null
+  streamDropped.value = false
 }
 
 function close() {
@@ -128,6 +139,7 @@ function start() {
   finished.value = false
   msg.value = ''
   msgError.value = false
+  streamDropped.value = false
   const f = from.value
   const t = to.value
   if (direction.value === 'server') void startServer(f, t)
@@ -142,37 +154,70 @@ async function startServer(f: number, t: number) {
     cached.value = start?.cached ?? 0
     total.value = start?.total ?? t - f + 1
     const taskId = start?.taskId
-    const handle = await cacheBookSSE(taskId || props.bookUrl, {
-      onProgress: (p) => {
-        if (typeof p.cached === 'number') cached.value = p.cached
-        if (typeof p.total === 'number') total.value = p.total
-        if (p.cancelled) {
-          busy.value = false
-          msg.value = '缓存已取消'
-        } else if (p.error) {
-          fail(`缓存失败：${p.error}`)
-        } else if (p.finished) {
-          busy.value = false
-          finished.value = true
-          msg.value = `已缓存到服务器（${cached.value}/${total.value} 章）`
-          emit('done', { direction: 'server', from: f, to: t, saved: cached.value })
-        }
-      },
-      onEnd: () => {
-        if (busy.value && !msg.value) {
-          busy.value = false
-          finished.value = true
-          msg.value = `已缓存到服务器（${cached.value}/${total.value} 章）`
-          emit('done', { direction: 'server', from: f, to: t, saved: cached.value })
-        }
-      },
-      onStreamError: (m) => {
-        if (busy.value) fail(`缓存进度中断：${m}`)
-      },
-    }, !!taskId)
-    sseHandle = handle
+    lastTaskKey = taskId || props.bookUrl
+    lastTaskKeyIsId = !!taskId
+    lastRange = { f, t }
+    sseHandle = await subscribeProgress(lastTaskKey, lastTaskKeyIsId)
   } catch (err) {
     fail(`缓存失败：${err instanceof Error ? err.message : '请稍后重试'}`)
+  }
+}
+
+/** 订阅服务端进度流（启动与断线重订阅共用；cacheBookSSE 支持 taskId 精确订阅） */
+async function subscribeProgress(
+  key: string,
+  isTaskId: boolean,
+): Promise<{ close: () => void }> {
+  const f = lastRange?.f ?? from.value
+  const t = lastRange?.t ?? to.value
+  return cacheBookSSE(key, {
+    onProgress: (p) => {
+      // 收到进度帧即视为连接恢复
+      streamDropped.value = false
+      if (typeof p.cached === 'number') cached.value = p.cached
+      if (typeof p.total === 'number') total.value = p.total
+      if (p.cancelled) {
+        busy.value = false
+        msg.value = '缓存已取消'
+      } else if (p.error) {
+        fail(`缓存失败：${p.error}`)
+      } else if (p.finished) {
+        busy.value = false
+        finished.value = true
+        msg.value = `已缓存到服务器（${cached.value}/${total.value} 章）`
+        emit('done', { direction: 'server', from: f, to: t, saved: cached.value })
+      }
+    },
+    onEnd: () => {
+      streamDropped.value = false
+      if (busy.value && !msg.value) {
+        busy.value = false
+        finished.value = true
+        msg.value = `已缓存到服务器（${cached.value}/${total.value} 章）`
+        emit('done', { direction: 'server', from: f, to: t, saved: cached.value })
+      }
+    },
+    onStreamError: (m) => {
+      // SSE 断线 ≠ 缓存失败：任务仍在服务端后台运行——中性提示并提供 taskId 重订阅入口
+      if (!busy.value) return
+      msg.value = `进度连接中断（${m}），任务仍在后台运行`
+      msgError.value = false
+      streamDropped.value = true
+    },
+  }, isTaskId)
+}
+
+/** 断线后重新订阅进度（key=taskId 优先，cacheBook.ts 契约） */
+async function resubscribeProgress() {
+  if (!lastTaskKey || !busy.value) return
+  msg.value = '正在重新连接进度…'
+  msgError.value = false
+  try {
+    sseHandle?.close()
+    sseHandle = await subscribeProgress(lastTaskKey, lastTaskKeyIsId)
+  } catch {
+    // 重连失败：任务仍在后台，保留重试入口
+    msg.value = '重连进度失败，任务仍在后台运行，可再试'
   }
 }
 
@@ -355,7 +400,13 @@ function cancel() {
           <p v-if="msg" class="search-msg" :class="{ error: msgError }">{{ msg }}</p>
 
           <div class="dlg-actions">
-            <button v-if="busy" class="ghost-btn" type="button" @click="cancel">取消</button>
+            <template v-if="busy">
+              <!-- SSE 断线但任务仍在后台：用 taskId 重新订阅进度 -->
+              <button v-if="streamDropped" class="ghost-btn" type="button" @click="resubscribeProgress">
+                重新连接进度
+              </button>
+              <button class="ghost-btn" type="button" @click="cancel">取消</button>
+            </template>
             <template v-else>
               <button class="ghost-btn" type="button" @click="close">关闭</button>
               <button

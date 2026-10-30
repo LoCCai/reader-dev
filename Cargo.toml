@@ -38,7 +38,7 @@ sxd-xpath = "0.4"         # XPath 求值
 boa_engine = "0.19"       # JS 引擎（纯 Rust，书源 JS 规则）
 
 # RSS
-feed-rs = "1"
+feed-rs = "2"
 
 # Edge TTS（微软语音 WebSocket 合成）
 tokio-tungstenite = "0.24"

@@ -5,6 +5,7 @@
 //!   响应命中 Cloudflare 质询特征时自动转 FlareSolverr 解（见 `flaresolverr` 模块说明）。
 //! - `fetch`/`fetch_get`：原始抓取（不带 cookie/FS 逻辑），供 RSS/TTS 等非书源场景。
 
+use crate::model::BookSource;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -264,8 +265,9 @@ fn build_http_client(
         .map_err(|e| anyhow!("构建 HTTP client 失败: {e}"))
 }
 
-/// SSRF 校验重定向策略（fetch 与代理共享 Client 共用；逐跳校验跳转目标防 302 回内网）
-fn ssrf_redirect_policy() -> reqwest::redirect::Policy {
+/// SSRF 校验重定向策略（fetch 与代理共享 Client 共用；逐跳校验跳转目标防 302 回内网）。
+/// HttpTTS 合成的两处 Client 同样复用（tts.rs）——重定向跳内网/169.254 一律拦截
+pub(crate) fn ssrf_redirect_policy() -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(|attempt| {
         match validate_redirect_target(attempt.url().as_str()) {
             Ok(()) => attempt.follow(),
@@ -292,7 +294,7 @@ fn proxy_http_client(proxy_url: &str) -> Result<reqwest::Client> {
     {
         return Ok(c.clone()); // Client 内部 Arc，clone 廉价
     }
-    let client = build_http_client(0, ssrf_redirect_policy(), Some(&key))?;
+    let client = build_http_client(0, reqwest::redirect::Policy::none(), Some(&key))?;
     let mut m = PROXY_CLIENTS.lock().unwrap_or_else(|e| e.into_inner());
     if m.len() >= PROXY_CLIENT_CACHE_MAX {
         m.clear();
@@ -465,7 +467,9 @@ pub async fn fetch(
             tracing::debug!("http_fetch 走书源级代理 {p} {method} {url}");
             proxy_http_client(p)?
         }
-        None => http_client_builder(timeout_secs, ssrf_redirect_policy())?,
+        // Policy::none：重定向由 fetch_once 手动逐跳处理（每跳异步 SSRF 校验）——
+        // 曾用 ssrf_redirect_policy()：闭包内同步 getaddrinfo 阻塞 tokio worker
+        None => http_client_builder(timeout_secs, reqwest::redirect::Policy::none())?,
     };
     let retries = http_retry_count();
     let mut last_err: Option<anyhow::Error> = None;
@@ -489,7 +493,47 @@ pub async fn fetch(
     Err(last_err.unwrap_or_else(|| anyhow!("http_fetch 重试耗尽")))
 }
 
+/// 响应体大小上限（MB，env 可调）——默认 20MB：正文 HTML <5MB、反爬字体 0.1-10MB，
+/// 思源级全量 OTF（>20MB）会被拒（可 env 放开）。曾无上限：resp.bytes() 整读内存，
+/// 失控源可在超时窗口内推入任意体积（对照 fetch_image 双防护先例）
+fn http_body_max_bytes() -> u64 {
+    std::env::var("READER_HTTP_BODY_MAX_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(20)
+        .max(1)
+        * 1024
+        * 1024
+}
+
+/// 响应体双防护读取（Content-Length 预检 + 流式累计上限，超限 bail）——
+/// fetch_once 与 HttpTTS 合成（tts.rs）等外部响应体整读场景共用：
+/// `resp.bytes()` 无上限整读内存，恶意/失控源可在超时窗口内推入任意体积直至 OOM
+pub(crate) async fn read_body_capped(resp: reqwest::Response) -> Result<Vec<u8>> {
+    let max_bytes = http_body_max_bytes();
+    if resp.content_length().is_some_and(|cl| cl > max_bytes) {
+        anyhow::bail!("响应体超过大小上限（{}MB）", max_bytes / 1024 / 1024);
+    }
+    use futures::StreamExt;
+    let mut stream = resp.bytes_stream();
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if bytes.len().saturating_add(chunk.len()) > max_bytes as usize {
+            anyhow::bail!("响应体超过大小上限（{}MB）", max_bytes / 1024 / 1024);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 /// 单次 HTTP 请求（不含重试；供 [`fetch`] 循环调用）。
+/// 重定向手动逐跳处理（Policy::none + 每跳 validate_public_target 异步校验——
+/// 曾用 Policy::custom 闭包：闭包内同步 getaddrinfo 阻塞 tokio worker 数秒）。
+/// 307/308 保留方法与请求体；跳转语义对齐 reqwest 自动重定向：
+/// 跨主机（host+port）剥离 cookie/authorization/cookie2/proxy-authorization/
+/// www-authenticate 五头、逐跳重写 Referer（make_referer）、无 Location 的 3xx
+/// 原样透传（此前三处均偏离，详见跳转分支注释）。
 /// timeout_secs 在请求级限定（代理共享 Client 无全局超时；直连 Client 的全局超时同值被覆盖，语义不变）
 async fn fetch_once(
     client: &reqwest::Client,
@@ -500,34 +544,118 @@ async fn fetch_once(
     charset: Option<&str>,
     timeout_secs: u64,
 ) -> Result<FetchResponse> {
-    let method = if method.eq_ignore_ascii_case("POST") {
+    const MAX_HOPS: usize = 10;
+    let mut method_cur = if method.eq_ignore_ascii_case("POST") {
         reqwest::Method::POST
     } else {
         reqwest::Method::GET
     };
-    let mut req = client
-        .request(method, url)
-        .timeout(Duration::from_secs(timeout_secs.max(1)));
-    for (k, v) in headers {
-        req = req.header(k, v);
+    let mut current = url.to_string();
+    let mut body_cur = body.map(|s| s.to_string());
+    let mut hop_headers = headers.clone();
+    let mut status = 200u16;
+    let mut final_url = url.to_string();
+    let mut resp_headers: Vec<(String, String)> = Vec::new();
+    let mut bytes: Vec<u8> = Vec::new();
+    for hop in 0..=MAX_HOPS {
+        // 每跳公网校验（DNS 解析后——拒绝私网/回环/169.254 等；曾由 redirect 闭包同步做）
+        validate_public_target(&current).await?;
+        let mut req = client
+            .request(method_cur.clone(), &current)
+            .timeout(Duration::from_secs(timeout_secs.max(1)));
+        for (k, v) in &hop_headers {
+            req = req.header(k, v);
+        }
+        if let Some(b) = &body_cur {
+            req = req.body(b.clone());
+        }
+        let resp = req.send().await?;
+        status = resp.status().as_u16();
+        final_url = resp.url().to_string();
+        if resp.status().is_redirection() {
+            if hop == MAX_HOPS {
+                anyhow::bail!("重定向次数超过 {MAX_HOPS}");
+            }
+            // Location 缺失/非法 → 当前 3xx 响应原样透传（对齐 reqwest 实际走的
+            // tower-http follow_redirect：无有效 Location 直接返回响应——
+            // 曾 join("") 解析回自身，原地重发 11 跳后报「重定向次数超过」，
+            // 对上游放大 11 倍请求且与自动重定向语义相悖）
+            let next_url = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .filter(|v| !v.trim().is_empty())
+                .and_then(|loc| url::Url::parse(&final_url).ok()?.join(loc).ok());
+            let Some(next_url) = next_url else {
+                resp_headers = resp
+                    .headers()
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.as_str().to_lowercase(),
+                            v.to_str().unwrap_or_default().to_string(),
+                        )
+                    })
+                    .collect();
+                bytes = read_body_capped(resp).await?;
+                break;
+            };
+            let next = next_url.to_string();
+            if !(status == 307 || status == 308) {
+                method_cur = reqwest::Method::GET;
+                body_cur = None;
+            }
+            // 跨主机判定 + 凭据头剥离对齐 reqwest remove_sensitive_headers：
+            // host_str 或 port_or_known_default 任一变化即跨主机（曾只比 host——
+            // 同主机换端口保留 Cookie 与自动重定向语义不符）；剥离
+            // cookie/authorization/cookie2/proxy-authorization/www-authenticate 五头
+            let cross_host = match url::Url::parse(&current) {
+                Ok(prev) => {
+                    next_url.host_str() != prev.host_str()
+                        || next_url.port_or_known_default() != prev.port_or_known_default()
+                }
+                Err(_) => false,
+            };
+            if cross_host {
+                hop_headers.retain(|k, _| {
+                    !k.eq_ignore_ascii_case("cookie")
+                        && !k.eq_ignore_ascii_case("authorization")
+                        && !k.eq_ignore_ascii_case("cookie2")
+                        && !k.eq_ignore_ascii_case("proxy-authorization")
+                        && !k.eq_ignore_ascii_case("www-authenticate")
+                });
+            }
+            // 每跳重写 Referer（reqwest make_referer 语义，referer 默认开启）：
+            // 上一跳 URL 去用户信息/fragment；https→http 降级不插入（保持原值，
+            // 与 reqwest None→不 insert 行为一致）。曾完全缺失——书源带 Referer
+            // 防盗链时逐跳全部丢失
+            if let Ok(prev) = url::Url::parse(&current) {
+                if !(next_url.scheme() == "http" && prev.scheme() == "https") {
+                    let mut referer = prev;
+                    let _ = referer.set_username("");
+                    let _ = referer.set_password(None);
+                    referer.set_fragment(None);
+                    hop_headers.retain(|k, _| !k.eq_ignore_ascii_case("referer"));
+                    hop_headers.insert("Referer".to_string(), referer.to_string());
+                }
+            }
+            current = next;
+            continue;
+        }
+        resp_headers = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str().to_lowercase(),
+                    v.to_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        // 响应体双防护：Content-Length 预检 + 流式累计上限（read_body_capped——TTS 共用）
+        bytes = read_body_capped(resp).await?;
+        break;
     }
-    if let Some(b) = body {
-        req = req.body(b.to_string());
-    }
-    let resp = req.send().await?;
-    let status = resp.status().as_u16();
-    let final_url = resp.url().to_string();
-    let resp_headers: Vec<(String, String)> = resp
-        .headers()
-        .iter()
-        .map(|(k, v)| {
-            (
-                k.as_str().to_lowercase(),
-                v.to_str().unwrap_or_default().to_string(),
-            )
-        })
-        .collect();
-    let bytes = resp.bytes().await?;
     // charset 优先级：URL 后缀显式 charset > HTTP Content-Type > HTML meta/自动探测
     let charset = match charset {
         Some(c) => Some(c.to_string()),
@@ -1159,8 +1287,12 @@ async fn http_fetch(
     // JSON（含 `{`）body 保持无 CT 原样发送；显式声明过 CT 的书源不覆盖。
     if !force_form_content_type
         && method.eq_ignore_ascii_case("POST")
-        && headers.keys().all(|k| !k.eq_ignore_ascii_case("Content-Type"))
-        && body.as_ref().is_some_and(|b| b.contains('&') && b.contains('=') && !b.contains('{'))
+        && headers
+            .keys()
+            .all(|k| !k.eq_ignore_ascii_case("Content-Type"))
+        && body
+            .as_ref()
+            .is_some_and(|b| b.contains('&') && b.contains('=') && !b.contains('{'))
     {
         force_form_content_type = true;
     }
@@ -1853,6 +1985,11 @@ async fn solve_cf_builtin(
     user_cookie: &str,
     proxy: Option<&str>,
 ) -> Result<(FetchResponse, Option<String>, String)> {
+    // P1 SSRF：浏览器兜底链路此前完全无目标校验（HTTP 路径有 validate_public_target，
+    // webView/兜底把 URL 直接送浏览器，可被书源指向内网/宿主网段）——与 HTTP 路径同口径拦截
+    if let Err(e) = validate_public_target(url).await {
+        return Err(anyhow!("浏览器兜底目标校验失败（{url}）: {e}"));
+    }
     let cookies = parse_cookie_string(user_cookie);
     let solution =
         crate::service::browser::solve_cf_challenge(ns, url, &cookies, CF_SOLVE_MAX_WAIT_MS, proxy)
@@ -2005,8 +2142,24 @@ pub fn merge_turnstile_token(cookie_str: &str, token: &str) -> String {
         .join("; ")
 }
 
-/// 解析书源 header 字段（legacy：`<js>` 模板先执行（返回 JSON）→ JSON 字符串或 key=value 行）
+/// 解析书源 header 字段（legacy：`<js>` 模板先执行（返回 JSON）→ JSON 字符串或 key=value 行）。
+/// 无书源上下文版：jsLib 恒空（测试/health/无 source 场景）
 pub fn parse_header(header: &str) -> HashMap<String, String> {
+    parse_header_impl(header, None, "")
+}
+
+/// 带书源上下文版：header `<js>` 求值注入 jsLib（书源 js_lib/loginUrl 定义的
+/// sign/gethd/GetUL 等函数）——曾用空 bridge：真实书源 header JS 集中报
+/// ReferenceError（12+/全源搜索轮），且失败模板原文被原样拼进请求 URL
+pub fn parse_header_for(header: &str, source: &BookSource, ns: &str) -> HashMap<String, String> {
+    parse_header_impl(header, Some(source), ns)
+}
+
+fn parse_header_impl(
+    header: &str,
+    source: Option<&BookSource>,
+    ns: &str,
+) -> HashMap<String, String> {
     let mut map = HashMap::new();
     let mut header = header.trim().to_string();
     if header.is_empty() {
@@ -2028,7 +2181,14 @@ pub fn parse_header(header: &str) -> HashMap<String, String> {
             ("result".to_string(), String::new()),
             ("headerMap".to_string(), "{}".to_string()),
         ]);
-        match crate::parser::js::eval_js(&code, &vars) {
+        let eval_result = match source {
+            Some(src) => {
+                let bridge = crate::parser::js::JsBridge::from_source(src, ns);
+                crate::parser::js::eval_js_with_bridge(&code, &vars, &bridge)
+            }
+            None => crate::parser::js::eval_js(&code, &vars),
+        };
+        match eval_result {
             Ok(json) => header = json,
             Err(e) => {
                 tracing::warn!("书源 header JS 执行失败: {e}");
@@ -2104,15 +2264,18 @@ mod tests {
         // 顶层 Display 无传输关键词（reqwest 形态：细节在 cause 链）——{e:#} 全链才命中
         let chained = anyhow::anyhow!("Connection reset by peer (os error 104)")
             .context("error sending request for url (https://fqbook.cc/ranking.php?t=click)");
-        assert!(https_downgrade_candidate(&chained), "cause 链中的 reset 应命中");
-        assert!(yes("client error (Connect): received fatal alert: HandshakeFailure"));
+        assert!(
+            https_downgrade_candidate(&chained),
+            "cause 链中的 reset 应命中"
+        );
+        assert!(yes(
+            "client error (Connect): received fatal alert: HandshakeFailure"
+        ));
         assert!(yes("connection closed before message completed"));
         assert!(yes("operation timed out"));
         assert!(yes("Client error (Connect): unexpected EOF"));
         // 证书错误 → 不降级（第十六轮「证书错误不重试」语义）
-        assert!(!yes(
-            "invalid peer certificate: UnknownIssuer"
-        ));
+        assert!(!yes("invalid peer certificate: UnknownIssuer"));
         assert!(!yes("certificate verify failed"));
         // DNS / 业务层 → 不降级（与 scheme 无关）
         assert!(!yes("error sending request: dns error: failed to lookup"));
@@ -2396,6 +2559,180 @@ mod tests {
         .unwrap();
         assert_eq!(resp.status, 200);
         assert_eq!(resp.body, "ok", "重试后应返回成功响应");
+    }
+
+    /// read_body_capped 双防护：小响应体正常读回；Content-Length 预检与流式累计
+    /// 超限一律 bail（TTS 合成等共用——resp.bytes() 无上限整读曾可被失控源撑爆内存）
+    #[tokio::test]
+    async fn test_read_body_capped_limit() {
+        let _ssrf = ssrf_allow_private_guard(true);
+        let prev = std::env::var("READER_HTTP_BODY_MAX_MB").ok();
+        std::env::set_var("READER_HTTP_BODY_MAX_MB", "1");
+        let client = reqwest::Client::new();
+
+        // ① 正常小响应体原样读回
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let resp = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello";
+            let _ = sock.write_all(resp.as_bytes()).await;
+        });
+        let resp = client
+            .get(format!("http://{addr}/ok"))
+            .send()
+            .await
+            .unwrap();
+        let bytes = read_body_capped(resp).await.unwrap();
+        assert_eq!(bytes, b"hello");
+
+        // ② Content-Length 预检：2MB 声明 > 1MB 上限 → 不读体直接 bail
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                2 * 1024 * 1024
+            );
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(&vec![b'x'; 2 * 1024 * 1024]).await;
+        });
+        let resp = client
+            .get(format!("http://{addr}/big-cl"))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            read_body_capped(resp).await.is_err(),
+            "Content-Length 预检应拒绝超限响应体"
+        );
+
+        // ③ 流式累计上限：无 Content-Length（Connection: close 界定）的 2MB 流 → 累计超限 bail
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                .await;
+            let _ = sock.write_all(&vec![b'y'; 2 * 1024 * 1024]).await;
+        });
+        let resp = client
+            .get(format!("http://{addr}/big-stream"))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            read_body_capped(resp).await.is_err(),
+            "流式累计应拒绝无 Content-Length 的超限响应体"
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("READER_HTTP_BODY_MAX_MB", v),
+            None => std::env::remove_var("READER_HTTP_BODY_MAX_MB"),
+        }
+    }
+
+    /// 手动重定向对齐 reqwest 自动重定向语义：跨主机（含端口变化）剥离凭据头
+    /// 五头 + 逐跳重写 Referer（make_referer：上一跳 URL 去用户信息/fragment）
+    #[tokio::test]
+    async fn test_fetch_once_redirect_cross_host_port_strip_and_referer() {
+        let _ssrf = ssrf_allow_private_guard(true);
+        // 第二跳服务（不同端口 → 跨主机）：断言凭据头已剥离 + Referer 重写
+        let l2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr2 = l2.local_addr().unwrap();
+        let h2 = tokio::spawn(async move {
+            let (mut sock, _) = l2.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = [0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+            assert!(!req.contains("cookie:"), "跨主机跳转应剥离 Cookie: {req}");
+            assert!(
+                !req.contains("authorization:"),
+                "跨主机跳转应剥离 Authorization: {req}"
+            );
+            assert!(
+                req.contains("referer: http://127.0.0.1"),
+                "逐跳应重写 Referer 为上一跳 URL: {req}"
+            );
+            let resp = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nDONE";
+            sock.write_all(resp.as_bytes()).await.unwrap();
+        });
+        let l1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr1 = l1.local_addr().unwrap();
+        let h1 = tokio::spawn(async move {
+            let (mut sock, _) = l1.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = [0u8; 8192];
+            let _ = sock.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{addr2}/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+        });
+        let client = http_client_builder(10, reqwest::redirect::Policy::none()).unwrap();
+        let mut headers = HashMap::new();
+        headers.insert("Cookie".to_string(), "sid=secret".to_string());
+        headers.insert("Authorization".to_string(), "Bearer tok".to_string());
+        let resp = fetch_once(
+            &client,
+            &format!("http://{addr1}/start"),
+            &headers,
+            "GET",
+            None,
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+        h1.await.unwrap();
+        h2.await.unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, "DONE");
+    }
+
+    /// 无 Location 的 3xx：响应原样透传（对齐 tower-http follow_redirect——
+    /// 曾 join("") 解析回自身，原地重发 11 跳后报「重定向次数超过」）
+    #[tokio::test]
+    async fn test_fetch_once_redirect_without_location_passthrough() {
+        let _ssrf = ssrf_allow_private_guard(true);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            // 仅接受 1 次连接——修复前同一 URL 会重发多跳
+            let (mut sock, _) = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = [0u8; 8192];
+            let _ = sock.read(&mut buf).await;
+            let resp =
+                "HTTP/1.1 302 Found\r\nContent-Length: 7\r\nConnection: close\r\n\r\njump-to";
+            sock.write_all(resp.as_bytes()).await.unwrap();
+        });
+        let client = http_client_builder(10, reqwest::redirect::Policy::none()).unwrap();
+        let resp = fetch_once(
+            &client,
+            &format!("http://{addr}/noloc"),
+            &HashMap::new(),
+            "GET",
+            None,
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status, 302, "无 Location 的 3xx 应原样透传");
+        assert_eq!(resp.body, "jump-to");
     }
 
     /// 可重试错误识别：超时/连接中断/TLS 等传输层错误重试，HTTP 状态错误不重试

@@ -28,13 +28,25 @@ pub struct BookSource {
     #[serde(rename = "customOrder")]
     #[sqlx(rename = "custom_order")]
     pub custom_order: i64,
-    #[serde(default, rename = "enabled", deserialize_with = "crate::util::serde_bool::deserialize")]
+    #[serde(
+        default,
+        rename = "enabled",
+        deserialize_with = "crate::util::serde_bool::deserialize"
+    )]
     #[sqlx(rename = "enabled")]
     pub enabled: bool,
-    #[serde(default, rename = "enabledExplore", deserialize_with = "crate::util::serde_bool::deserialize")]
+    #[serde(
+        default,
+        rename = "enabledExplore",
+        deserialize_with = "crate::util::serde_bool::deserialize"
+    )]
     #[sqlx(rename = "enabled_explore")]
     pub enabled_explore: bool,
-    #[serde(default, rename = "enabledCookieJar", deserialize_with = "crate::util::serde_bool::deserialize_option")]
+    #[serde(
+        default,
+        rename = "enabledCookieJar",
+        deserialize_with = "crate::util::serde_bool::deserialize_option"
+    )]
     #[sqlx(rename = "enabled_cookie_jar")]
     pub enabled_cookie_jar: Option<bool>,
     #[serde(rename = "concurrentRate")]
@@ -45,7 +57,10 @@ pub struct BookSource {
     #[sqlx(rename = "js_lib")]
     pub js_lib: Option<String>,
     /// 真实书源 header 常为 JSON 对象（{"User-Agent":...}）→ 规范为紧凑 JSON 字符串
-    #[serde(default, deserialize_with = "crate::util::json_text::deserialize_option")]
+    #[serde(
+        default,
+        deserialize_with = "crate::util::json_text::deserialize_option"
+    )]
     pub header: Option<String>,
     /// 书源级代理（如 socks5://127.0.0.1:1080）——CF 质询/Turnstile 求解时透传
     /// camoufox 代理（浏览器流量走代理；书源直连抓取不受影响）。
@@ -57,7 +72,11 @@ pub struct BookSource {
     #[sqlx(rename = "login_url")]
     pub login_url: Option<String>,
     /// loginUi 真实数据可为控件数组 → 规范为紧凑 JSON 字符串
-    #[serde(default, rename = "loginUi", deserialize_with = "crate::util::json_text::deserialize_option")]
+    #[serde(
+        default,
+        rename = "loginUi",
+        deserialize_with = "crate::util::json_text::deserialize_option"
+    )]
     #[sqlx(rename = "login_ui")]
     pub login_ui: Option<String>,
     #[serde(rename = "loginCheckJs")]
@@ -88,7 +107,11 @@ pub struct BookSource {
     #[sqlx(rename = "use_ts")]
     pub use_ts: i64,
     /// 真实书源 exploreUrl 常为分类数组（[{title,url,style}]）→ 规范为紧凑 JSON 字符串
-    #[serde(default, rename = "exploreUrl", deserialize_with = "crate::util::json_text::deserialize_option")]
+    #[serde(
+        default,
+        rename = "exploreUrl",
+        deserialize_with = "crate::util::json_text::deserialize_option"
+    )]
     #[sqlx(rename = "explore_url")]
     pub explore_url: Option<String>,
     #[serde(rename = "searchUrl")]

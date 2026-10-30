@@ -14,11 +14,11 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/reader3': {
-        target: 'http://localhost:8084',
+        target: 'http://localhost:8080',
         changeOrigin: true,
       },
       '/assets': {
-        target: 'http://localhost:8084',
+        target: 'http://localhost:8080',
         changeOrigin: true,
       },
     },

@@ -34,6 +34,13 @@ fn cache_policy(path: &str) -> Option<&'static str> {
     if path.starts_with("/reader3") || path.starts_with("/opds") || path == "/health" {
         return None;
     }
+    // /book-assets、/epub（章节 HTML，含注入 __API_ROOT__ 的动态响应）：html 后缀
+    // 曾落进"带扩展名 → 1 天"分支被浏览器缓存——章节更新后读到旧章
+    if (path.starts_with("/book-assets/") || path.starts_with("/epub/"))
+        && (path.ends_with(".html") || path.ends_with(".xhtml"))
+    {
+        return Some(NO_CACHE);
+    }
     if path.starts_with("/static/") || path.starts_with("/fonts/") {
         return Some(CACHE_30D_IMMUTABLE);
     }

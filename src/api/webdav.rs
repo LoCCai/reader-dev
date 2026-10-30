@@ -35,6 +35,17 @@ pub async fn handle(
             // MS-Author-Via：告知 Office 等客户端本服务支持 DAV 写入语义
             .header("MS-Author-Via", "DAV")
             .header("Access-Control-Allow-Origin", "*")
+            // CORS 预检补全：仅 Origin:* 不足以让浏览器放行后续实际请求——
+            // 预检响应需声明允许的方法与请求头（Authorization=Basic 认证、
+            // Destination/Overwrite=MOVE/COPY、Depth=PROPFIND、Content-Type=PUT）
+            .header(
+                "Access-Control-Allow-Methods",
+                "OPTIONS,GET,HEAD,PUT,DELETE,PROPFIND,MKCOL,MOVE,COPY,LOCK,UNLOCK",
+            )
+            .header(
+                "Access-Control-Allow-Headers",
+                "Authorization,Depth,Destination,Overwrite,Timeout,Lock-Token,Content-Type",
+            )
             .body(Body::empty())
             .unwrap();
     }
@@ -83,31 +94,56 @@ pub(crate) async fn authenticate(
             .join("webdav");
         return Some(("default".into(), "default".into(), home));
     }
-    let auth = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())?
-        .strip_prefix("Basic ")?;
+    let Some(auth) = headers.get("authorization").and_then(|v| v.to_str().ok()) else {
+        tracing::warn!("WebDAV 认证失败 [{client_ip}]：缺少 Authorization 头");
+        return None;
+    };
+    let Some(auth) = auth.strip_prefix("Basic ") else {
+        tracing::warn!("WebDAV 认证失败 [{client_ip}]：Authorization 非 Basic 方案");
+        return None;
+    };
     let decoded = String::from_utf8(base64_decode(auth)).ok()?;
-    let (username, password) = decoded.split_once(':')?;
-    // P1-1：锁定中直接拒绝（不泄露锁定状态，统一 401）
-    if crate::util::login_limit::check_allowed(username, client_ip).is_err() {
+    let Some((username, password)) = decoded.split_once(':') else {
+        tracing::warn!("WebDAV 认证失败 [{client_ip}]：Basic 凭证缺用户名/密码分隔符");
+        return None;
+    };
+    // P1-1：锁定中直接拒绝（不泄露锁定状态，统一 401）——scope=webdav 独立计数
+    if crate::util::login_limit::check_allowed(
+        crate::util::login_limit::SCOPE_WEBDAV,
+        username,
+        client_ip,
+    )
+    .is_err()
+    {
+        tracing::warn!("WebDAV 认证被限流拒绝 [{username}@{client_ip}]");
         return None;
     }
     let Some(user) = storage.find_user(username).await.ok().flatten() else {
         // 账号不存在 → 计入失败（与 /reader3/login 一致）
-        crate::util::login_limit::record_failure(username, client_ip);
+        tracing::warn!("WebDAV 认证失败 [{username}@{client_ip}]：账号不存在");
+        crate::util::login_limit::record_failure(
+            crate::util::login_limit::SCOPE_WEBDAV,
+            username,
+            client_ip,
+        );
         return None;
     };
     if !user.enable_webdav {
         // 未开启 WebDAV 权限：账号有效但被拒——不累计密码失败，避免误锁
+        tracing::warn!("WebDAV 认证失败 [{username}@{client_ip}]：未开启 WebDAV 权限");
         return None;
     }
     // 统一密码校验：argon2id（PHC）优先，legacy 双 MD5 兼容；MD5 通过时自动升级为 argon2id
     if !crate::util::password::verify_password(storage, &user, password).await {
-        crate::util::login_limit::record_failure(username, client_ip);
+        tracing::warn!("WebDAV 认证失败 [{username}@{client_ip}]：密码错误");
+        crate::util::login_limit::record_failure(
+            crate::util::login_limit::SCOPE_WEBDAV,
+            username,
+            client_ip,
+        );
         return None;
     }
-    crate::util::login_limit::reset(username, client_ip);
+    crate::util::login_limit::reset(crate::util::login_limit::SCOPE_WEBDAV, username, client_ip);
     let home = storage
         .config
         .storage_dir()

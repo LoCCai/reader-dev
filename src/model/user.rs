@@ -80,7 +80,10 @@ pub fn token_map_valid(token_map: &Option<serde_json::Value>, token: &str, now_m
 
 /// 追加 token（去重；带过期时间戳；清理已过期项；超出上限丢最旧），
 /// 返回新 token_map JSON 字符串（legacy 对象形态 Map<token, expire_ms>）。
-/// expire_ms 为登录时生成的过期时间戳（ttl<=0 永不过期 → i64::MAX）。
+/// expire_ms 为登录时生成的过期时间戳（ttl<=0 永不过期 → i64::MAX）；
+/// 校验路径的滑动续期（storage::touch_user_token）会把活跃 token 的 expire
+/// 刷新为「最近使用 + ttl」——故下方的上限淘汰（丢 expire 最早）即丢弃
+/// 最久未使用的会话（LRU 语义，活跃会话不会被后登录者挤出）。
 pub fn token_map_push(
     token_map: &Option<serde_json::Value>,
     token: &str,
@@ -147,6 +150,56 @@ pub fn token_map_remove(token_map: &Option<serde_json::Value>, token: &str) -> (
     let json = serde_json::to_string(&serde_json::Value::Object(map))
         .unwrap_or_else(|_| serde_json::json!({}).to_string());
     (json, removed)
+}
+
+/// 滑动续期节流判断（storage::touch_user_token 与调用方前置判断共用）：
+/// - token 在对象形态 token_map 中 → 其 expire 已进入后半程（剩余不足 ttl/2）才需续期；
+/// - 不在其中（主 token legacy 场景 / 数组形态旧数据）→ 距整体活跃（last_login_at）
+///   超过 ttl/2 才需续期（该场景的过期机制即 GAP 118 整体判定）。
+/// 按 token 自身 expire 而非共享 last_login_at 节流：多设备各自独立——
+/// 其他设备刚登录不会阻止本设备的旧 token 续期。
+pub fn token_needs_renewal(
+    token_map: &Option<serde_json::Value>,
+    token: &str,
+    last_login_at: i64,
+    now_ms: i64,
+    ttl_ms: i64,
+) -> bool {
+    let cur_expire = match token_map.as_ref() {
+        Some(serde_json::Value::Object(m)) => m.get(token).and_then(|x| x.as_i64()),
+        _ => None,
+    };
+    match cur_expire {
+        Some(exp) => now_ms.saturating_add(ttl_ms / 2) >= exp,
+        None => now_ms.saturating_sub(last_login_at) > ttl_ms / 2,
+    }
+}
+
+/// 后台清理：移除 token_map 中已过期（expire <= now_ms）的条目，
+/// 返回 (清理后 token_map JSON, 清理条数)。数组形态（旧数据，无过期信息）不动。
+/// drop_all=true 时全清（GAP 118 整体判定过期的用户——30 天未活跃，token 全部失效）。
+pub fn token_map_prune_expired(
+    token_map: &Option<serde_json::Value>,
+    now_ms: i64,
+    drop_all: bool,
+) -> (String, usize) {
+    let Some(serde_json::Value::Object(m)) = token_map else {
+        return (serde_json::json!({}).to_string(), 0); // None / 数组形态：无 JSON 可写
+    };
+    let before = m.len();
+    let entries: Vec<(String, i64)> = m
+        .iter()
+        .filter_map(|(k, v)| v.as_i64().map(|exp| (k.clone(), exp)))
+        .filter(|(_, exp)| !drop_all && *exp > now_ms)
+        .collect();
+    let pruned = before - entries.len();
+    let map: serde_json::Map<String, serde_json::Value> = entries
+        .into_iter()
+        .map(|(k, exp)| (k, serde_json::json!(exp)))
+        .collect();
+    let json = serde_json::to_string(&serde_json::Value::Object(map))
+        .unwrap_or_else(|_| serde_json::json!({}).to_string());
+    (json, pruned)
 }
 
 #[cfg(test)]
@@ -236,5 +289,49 @@ mod tests {
         .unwrap();
         let list = token_map_list(&Some(m2));
         assert_eq!(list, vec!["fresh", "new_tok"], "过期项被清理");
+    }
+
+    #[test]
+    fn test_token_needs_renewal() {
+        let now = 1_700_000_000_000i64;
+        let ttl = 30 * 86_400_000i64;
+        let m = Some(json!({
+            // 剩余 29 天（前半程）→ 不需续期
+            "early": now + 29 * 86_400_000,
+            // 剩余 10 天（后半程）→ 需续期
+            "late": now + 10 * 86_400_000,
+        }));
+        assert!(!token_needs_renewal(&m, "early", now, now, ttl));
+        assert!(token_needs_renewal(&m, "late", now, now, ttl));
+        // 不在对象 map 中（主 token legacy / 数组形态）→ 按整体活跃（last_login_at）判断
+        assert!(
+            !token_needs_renewal(&m, "ghost", now, now, ttl),
+            "整体活跃在窗口内"
+        );
+        assert!(
+            token_needs_renewal(&m, "ghost", now - 20 * 86_400_000, now, ttl),
+            "距上次活跃超 ttl/2 → 需续期"
+        );
+        // 数组形态（旧数据）：同样按整体活跃判断
+        let arr = Some(json!(["t1"]));
+        assert!(token_needs_renewal(&arr, "t1", 0, now, ttl));
+    }
+
+    #[test]
+    fn test_token_map_prune_expired() {
+        let now = 1_700_000_000_000i64;
+        let m = Some(json!({"stale": now - 1, "fresh": now + 1000, "no_exp": "x"}));
+        let (json, pruned) = token_map_prune_expired(&m, now, false);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(token_map_list(&Some(v)), vec!["fresh"], "仅过期项被清");
+        assert_eq!(pruned, 2, "stale 与非数字值均计为清理");
+        // drop_all（GAP 118 整体过期用户）→ 全清
+        let (json, pruned) = token_map_prune_expired(&m, now, true);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(token_map_list(&Some(v)).is_empty(), "整体过期全清");
+        assert_eq!(pruned, 3);
+        // 数组形态（旧数据）不动 → 0 条（不写库）
+        let (_, pruned) = token_map_prune_expired(&Some(json!(["t1"])), now, true);
+        assert_eq!(pruned, 0);
     }
 }

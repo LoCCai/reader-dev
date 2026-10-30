@@ -106,10 +106,7 @@ async fn spawn_app() -> (SocketAddr, String, String) {
     let css = css_source(port);
     let jsonsrc = json_source(port);
 
-    let dir = std::env::temp_dir().join(format!(
-        "reader-e2e-sse-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("reader-e2e-sse-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let mut config = reader_dev::AppConfig::from_env();
     config.work_dir = dir.to_string_lossy().into_owned();

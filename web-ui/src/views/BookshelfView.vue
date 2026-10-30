@@ -1401,12 +1401,15 @@ watch([keyword, activeGroup, sortMode], () => {
   window.scrollTo({ top: Math.max(0, wrap.getBoundingClientRect().top + window.scrollY - 96) })
 })
 
-async function load(silent = false) {
+/** 书架加载：silent=静默(转圈不整屏)、refresh=触发服务端 getBookshelf?refresh=1
+ *  （回写 can_update=1 的书最新章/总数）——两者解耦：静默重载(操作后同步)不应触发
+ *  服务端 refresh，仅用户显式刷新(下拉/重连/刷新按钮/快捷键 r)传 refresh=true */
+async function load(silent = false, refresh = false) {
   if (!silent) loading.value = true
   else refreshing.value = true
   try {
     const [res, gRes] = await Promise.all([
-      getBookshelf(silent),
+      getBookshelf(refresh),
       getBookGroups().catch(() => ({ isSuccess: false, errorMsg: '', data: [] as BookGroup[] })),
     ])
     books.value = res.data ?? []
@@ -1774,7 +1777,7 @@ function onPullTouchEnd() {
   if (pullReady.value) {
     pullDist.value = 0
     pullReady.value = false
-    void load(true)
+    void load(true, true) // 下拉刷新：显式触发服务端 refresh
   } else {
     pullDist.value = 0
     pullReady.value = false
@@ -1803,7 +1806,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
       break
     case 'r':
       e.preventDefault()
-      void load(true)
+      void load(true, true) // 快捷键 r：用户显式刷新，触发服务端 refresh
       break
   }
 }
@@ -2211,7 +2214,7 @@ onMounted(() => {
     <Transition name="pull">
       <div v-if="offlineShelf" class="offline-shelf-banner">
         <span>离线书架缓存（服务端暂不可用）</span>
-        <button type="button" title="重新连接服务器" @click="load(true)">重试</button>
+        <button type="button" title="重新连接服务器" @click="load(true, true)">重试</button>
       </div>
     </Transition>
 
@@ -2303,7 +2306,7 @@ onMounted(() => {
           type="button"
           title="刷新书架"
           :class="{ spinning: refreshing }"
-          @click="load(true)"
+          @click="load(true, true)"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 12a9 9 0 1 1-2.64-6.36" />

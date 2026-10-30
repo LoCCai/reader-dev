@@ -20,11 +20,16 @@ pub struct CacheProgress {
     pub title: String,
     /// 是否结束（成功或失败）
     pub finished: bool,
+    /// 结束时间（毫秒时间戳；0 = 未结束）——finished 条目回收判据
+    pub finished_ms: i64,
     /// 是否被取消
     pub cancelled: bool,
     /// 错误信息（失败时）
     pub error: Option<String>,
 }
+
+/// finished 条目保留时长（结束后 1h 内仍可轮询；start/cancel 时顺带回收更旧的）
+const FINISHED_RETENTION_MS: i64 = 3600_000;
 
 /// 内存任务表（url → 进度句柄）
 static CACHE_TASKS: LazyLock<Mutex<HashMap<String, Arc<Mutex<CacheProgress>>>>> =
@@ -49,9 +54,20 @@ pub fn cancel(url: &str) -> bool {
     cancel_key(url)
 }
 
+/// 顺带清理：finished 且超 1h 的任务条目（任务表此前只增不减——常年运行进程
+/// 缓慢积累；运行中与近期完成任务不受影响）
+fn reap_finished(map: &mut HashMap<String, Arc<Mutex<CacheProgress>>>) {
+    let now = chrono::Utc::now().timestamp_millis();
+    map.retain(|_, p| {
+        let g = p.lock().unwrap_or_else(|e| e.into_inner());
+        !(g.finished && g.finished_ms > 0 && now - g.finished_ms > FINISHED_RETENTION_MS)
+    });
+}
+
 /// 取消任务（taskId 精确键）
 pub fn cancel_key(task_id: &str) -> bool {
     let mut map = CACHE_TASKS.lock().unwrap_or_else(|e| e.into_inner());
+    reap_finished(&mut map);
     match map.remove(task_id) {
         Some(p) => {
             if let Ok(mut p) = p.lock() {
@@ -94,7 +110,8 @@ pub fn start_range(
         None => url.to_string(),
     };
     {
-        let map = CACHE_TASKS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = CACHE_TASKS.lock().unwrap_or_else(|e| e.into_inner());
+        reap_finished(&mut map);
         if let Some(existing) = map.get(&task_id) {
             let p = existing.lock().unwrap_or_else(|e| e.into_inner());
             if !p.finished {
@@ -117,6 +134,7 @@ pub fn start_range(
         let result = run_job(&ns, &url, range, storage, &progress_for_task).await;
         let mut p = progress_for_task.lock().unwrap_or_else(|e| e.into_inner());
         p.finished = true;
+        p.finished_ms = chrono::Utc::now().timestamp_millis();
         match result {
             Ok((title, total, cached)) => {
                 p.title = title;
@@ -159,12 +177,13 @@ async fn run_job(
     if is_file_book {
         let path = crate::api::router::resolve_export_file_path(&storage.config.storage_dir(), url)
             .ok_or_else(|| anyhow!("本地书文件不存在"))?;
-        let imported = crate::service::local_book::parse_loc_book_path(
+        let imported = crate::service::local_book::parse_loc_book_path_blocking(
             &path,
             &[],
             &book.toc_url,
             book.split_long_chapter,
-        )?;
+        )
+        .await?;
         let pairs: Vec<(String, String)> = imported
             .chapters
             .iter()
@@ -241,11 +260,16 @@ async fn run_job(
     }
 
     let mut cached = 0usize;
-    for h in handles {
-        // 取消检查（逐任务粒度）
+    let mut handles_iter = handles.into_iter();
+    while let Some(h) = handles_iter.next() {
+        // 取消检查（逐任务粒度）；取消时 abort 全部残余任务——JoinHandle drop 是
+        // detach 语义不取消任务，曾导致取消后剩余章节仍按并发 3 继续抓源站
         {
             let mut p = progress.lock().unwrap_or_else(|e| e.into_inner());
             if p.cancelled {
+                for rest in handles_iter.by_ref() {
+                    rest.abort();
+                }
                 break;
             }
             p.cached = cached;
@@ -306,5 +330,52 @@ mod tests {
         assert!(slice_range(items.clone(), Some((3, 3))).is_err());
         assert!(slice_range(items.clone(), Some((2, 3))).is_err());
         assert!(slice_range(items.clone(), Some((2, 1))).is_err());
+    }
+
+    /// finished 条目回收：超 1h 的已完成任务在 start/cancel 时被顺带清理，
+    /// 运行中与近期完成任务不受影响
+    #[test]
+    fn finished_tasks_are_reaped_after_retention() {
+        let tag = std::process::id();
+        let key_old = format!("https://reap.test/old-{tag}");
+        let key_fresh = format!("https://reap.test/fresh-{tag}");
+        let key_running = format!("https://reap.test/running-{tag}");
+        let now = chrono::Utc::now().timestamp_millis();
+        {
+            let mut map = CACHE_TASKS.lock().unwrap_or_else(|e| e.into_inner());
+            map.insert(
+                key_old.clone(),
+                Arc::new(Mutex::new(CacheProgress {
+                    finished: true,
+                    finished_ms: now - 2 * FINISHED_RETENTION_MS,
+                    ..Default::default()
+                })),
+            );
+            map.insert(
+                key_fresh.clone(),
+                Arc::new(Mutex::new(CacheProgress {
+                    finished: true,
+                    finished_ms: now,
+                    ..Default::default()
+                })),
+            );
+            map.insert(
+                key_running.clone(),
+                Arc::new(Mutex::new(CacheProgress {
+                    finished: false,
+                    finished_ms: now - 2 * FINISHED_RETENTION_MS, // 未结束——finished_ms 不生效
+                    ..Default::default()
+                })),
+            );
+        }
+        // cancel 不存在的 key 返回 false，但已触发回收
+        assert!(!cancel_key(&format!("https://reap.test/none-{tag}")));
+        assert!(progress_of_key(&key_old).is_none(), "超时 finished 条目应被回收");
+        assert!(progress_of_key(&key_fresh).is_some(), "近期 finished 条目保留");
+        assert!(progress_of_key(&key_running).is_some(), "运行中条目不受影响");
+        // 清理测试残留
+        let mut map = CACHE_TASKS.lock().unwrap_or_else(|e| e.into_inner());
+        map.remove(&key_fresh);
+        map.remove(&key_running);
     }
 }

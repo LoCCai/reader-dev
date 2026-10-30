@@ -266,34 +266,27 @@ pub const CHUNK_MAX_CHARS: usize = 2_500;
 
 /// 微软 Edge 语音鉴权 token（固定 TrustedClientToken）
 const TRUSTED_CLIENT_TOKEN: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
-/// FILETIME 偏移：1601-01-01 → 1970-01-01 的 100ns 间隔数
-const FILETIME_EPOCH_OFFSET_TICKS: i64 = 116_444_736_000_000_000;
+/// Windows 纪元偏移（秒）：1601-01-01 → 1970-01-01（edge-tts drm.py WIN_EPOCH）
+const WIN_EPOCH_SECS: i64 = 11_644_473_600;
+/// Sec-MS-GEC 时间取整窗口（秒）——ticks 向下取整到 5 分钟（edge-tts drm.py: ticks -= ticks % 300）
+const GEC_WINDOW_SECS: i64 = 300;
+/// Sec-MS-GEC-Version（edge-tts constants.py 同款 Chromium 版本串）
+const SEC_MS_GEC_VERSION: &str = "1-130.0.2849.100006";
 /// WSS 端点
 const EDGE_WSS_URL: &str =
     "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1";
 /// 输出音频格式（MP3）
 const OUTPUT_FORMAT: &str = "audio-24khz-48kbitrate-mono-mp3";
 
-/// 生成 Sec-MS-GEC 鉴权 token（.NET FILETIME 小端十六进制；与 edge-tts 算法一致）
+/// 生成 Sec-MS-GEC 鉴权 token（edge-tts 规范算法 drm.py generate_sec_ms_gec）：
+/// ticks = (unix + WIN_EPOCH) 向下取整到 5 分钟后 ×1e7（百纳秒），
+/// Sec-MS-GEC = SHA256("{ticks}{TrustedClientToken}") 大写 hex。
 /// 返回 (Sec-MS-GEC, Sec-MS-GEC-Version)
 pub fn sec_ms_gec_at(unix_secs: i64) -> (String, String) {
-    let ticks = unix_secs * 10_000_000 + FILETIME_EPOCH_OFFSET_TICKS;
-    let stamp = ticks
-        .to_le_bytes()
-        .iter()
-        .map(|b| format!("{b:02X}"))
-        .collect::<String>();
-    // Version：次日日期整数（YYYYMMDD+1）编码为 FILETIME 样式（edge-tts 同款算法）
-    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(unix_secs, 0)
-        .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap());
-    let date_int: i64 = dt.format("%Y%m%d").to_string().parse().unwrap_or(19700101);
-    let ticks_v = (date_int + 1) * 10_000_000 + FILETIME_EPOCH_OFFSET_TICKS;
-    let stamp_v = ticks_v
-        .to_le_bytes()
-        .iter()
-        .map(|b| format!("{b:02X}"))
-        .collect::<String>();
-    (stamp, stamp_v)
+    let ticks = ((unix_secs + WIN_EPOCH_SECS) / GEC_WINDOW_SECS * GEC_WINDOW_SECS) * 10_000_000;
+    let gec =
+        crate::util::sha256::sha256_hex(&format!("{ticks}{TRUSTED_CLIENT_TOKEN}")).to_uppercase();
+    (gec, SEC_MS_GEC_VERSION.to_string())
 }
 
 /// 当前时间生成 Sec-MS-GEC
@@ -648,8 +641,9 @@ pub async fn http_tts_synthesize(
     }
     // P1 SSRF：HttpTTS 引擎地址同样做公网校验（DNS 解析后——拒绝私网/回环/169.254 等）
     crate::service::crawler::validate_public_target(url).await?;
+    // 逐跳校验：重定向目标同样过 SSRF 校验（302 跳内网/169.254 一律拦截——与 fetch 同策略）
     let client =
-        crate::service::crawler::http_client_builder(60, reqwest::redirect::Policy::limited(5))
+        crate::service::crawler::http_client_builder(60, reqwest::redirect::Policy::none())
             .map_err(|e| anyhow!("HttpTTS 客户端初始化失败: {e}"))?;
 
     let has_placeholder = url.contains("{text}");
@@ -669,27 +663,25 @@ pub async fn http_tts_synthesize(
         if let Some(v) = volume {
             form.push(("volume", v.to_string()));
         }
-        client
-            .post(url)
-            .form(&form)
-            .send()
+        let req = client.post(url).form(&form);
+        tts_send_follow(&client, req)
             .await
             .map_err(|e| anyhow!("HttpTTS 请求失败: {e}"))?
     } else {
-        client
-            .get(&final_url)
-            .send()
+        let req = client.get(&final_url);
+        tts_send_follow(&client, req)
             .await
             .map_err(|e| anyhow!("HttpTTS 请求失败: {e}"))?
     };
-    let bytes = resp
-        .bytes()
+    // 响应体双防护读取（Content-Length 预检 + 流式累计上限）：resp.bytes() 无上限
+    // 整读内存，恶意公网 TTS 源可在 60s 超时窗口内推入任意体积直至 OOM
+    let bytes = crate::service::crawler::read_body_capped(resp)
         .await
         .map_err(|e| anyhow!("HttpTTS 读取响应失败: {e}"))?;
     if bytes.is_empty() {
         return Err(anyhow!("HttpTTS 未返回音频数据"));
     }
-    Ok(bytes.to_vec())
+    Ok(bytes)
 }
 
 /// F4：HttpTTS API 引擎合成（legacy getSpeakStream 对齐——type=api 时按名解析的
@@ -744,8 +736,10 @@ pub async fn http_tts_api_synthesize(
         }
     }
 
+    // 逐跳校验：重定向目标同样过 SSRF 校验（302 跳内网/169.254 一律拦截——与 fetch 同策略；
+    // 初始 URL 的公网校验在调用方 validate_public_target）
     let client =
-        crate::service::crawler::http_client_builder(60, reqwest::redirect::Policy::limited(5))
+        crate::service::crawler::http_client_builder(60, reqwest::redirect::Policy::none())
             .map_err(|e| anyhow!("HttpTTS 客户端初始化失败: {e}"))?;
 
     // 重试 ≤5（超时/连接类错误）；其他错误一次即出
@@ -765,7 +759,7 @@ pub async fn http_tts_api_synthesize(
         if let Some(b) = &body {
             req = req.body(b.clone());
         }
-        let send = req.send().await;
+        let send = tts_send_follow(&client, req).await;
         let resp = match send {
             Ok(r) => r,
             Err(e) => {
@@ -773,6 +767,11 @@ pub async fn http_tts_api_synthesize(
                 let transient =
                     msg.contains("timed out") || msg.contains("timeout") || msg.contains("connect");
                 if transient && attempt <= 5 {
+                    // 线性退避（对齐 crawler::fetch）——曾立即 continue：6 连发 × 60s
+                    // 超时可挂单请求 ~6 分钟且打满并发窗口
+                    tracing::warn!("HttpTTS 瞬时错误第 {attempt}/5 次重试");
+                    tokio::time::sleep(std::time::Duration::from_millis(200 * attempt as u64))
+                        .await;
                     continue;
                 }
                 return Err(anyhow!("TTS 下载错误: {msg}"));
@@ -783,15 +782,18 @@ pub async fn http_tts_api_synthesize(
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(|v| v.to_string());
-        let bytes = resp
-            .bytes()
+        // 响应体双防护读取（Content-Length 预检 + 流式累计上限）：resp.bytes() 无上限
+        // 整读内存，恶意公网 TTS 源可在 60s 超时窗口内推入任意体积直至 OOM
+        let bytes = crate::service::crawler::read_body_capped(resp)
             .await
-            .map_err(|e| anyhow!("TTS 读取响应失败: {e}"))?
-            .to_vec();
+            .map_err(|e| anyhow!("TTS 读取响应失败: {e}"))?;
         let ct_lower = ct.as_deref().unwrap_or_default().to_ascii_lowercase();
         if ct_lower.starts_with("application/json") {
             let body_text = String::from_utf8_lossy(&bytes);
-            return Err(anyhow!("{}", &body_text[..body_text.len().min(300)]));
+            return Err(anyhow!(
+                "{}",
+                &body_text[..body_text.floor_char_boundary(300.min(body_text.len()))]
+            ));
         }
         if let Some(expected) = tts.content_type.as_deref() {
             if !expected.trim().is_empty() {
@@ -802,7 +804,7 @@ pub async fn http_tts_api_synthesize(
                     let preview = String::from_utf8_lossy(&bytes);
                     return Err(anyhow!(
                         "TTS服务器返回错误：{}",
-                        &preview[..preview.len().min(300)]
+                        &preview[..preview.floor_char_boundary(300.min(preview.len()))]
                     ));
                 }
             }
@@ -828,6 +830,38 @@ fn form_urlencoded(s: &str) -> String {
     }
     out
 }
+
+/// HttpTTS 请求发送：对 3xx 手动单跳跟随（最多 3 跳），每跳 validate_public_target
+/// 异步校验。曾用 ssrf_redirect_policy()（Policy::custom 闭包内同步 getaddrinfo）——
+/// 阻塞 tokio worker，与 crawler::fetch 已重写的同款缺陷
+async fn tts_send_follow(
+    client: &reqwest::Client,
+    req: reqwest::RequestBuilder,
+) -> anyhow::Result<reqwest::Response> {
+    let mut current_req = req;
+    for _hop in 0..3 {
+        let resp = current_req.send().await?;
+        if !resp.status().is_redirection() {
+            return Ok(resp);
+        }
+        let loc = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map(String::from)
+            .unwrap_or_default();
+        if loc.is_empty() {
+            return Ok(resp); // 无 Location 的 3xx：原样返回交由调用方按状态处理
+        }
+        let next = resp.url().join(&loc)?.to_string();
+        crate::service::crawler::validate_public_target(&next).await?;
+        // 302/303 语义转 GET（TTS 音频跟随场景无保方法需求）
+        current_req = client.get(&next);
+    }
+    anyhow::bail!("HttpTTS 重定向次数过多")
+}
+
+/// P1 SSRF：HttpTTS 初始 URL 公网校验（供调用方前置使用）
 
 #[cfg(test)]
 mod tests {
@@ -925,37 +959,43 @@ mod tests {
         );
     }
 
-    /// Sec-MS-GEC：已知时刻的确定性输出（16 位大写十六进制）
+    /// Sec-MS-GEC：edge-tts 规范算法（SHA256("{ticks}{token}") 大写 hex，64 位；
+    /// ticks = (unix+WIN_EPOCH) 5 分钟向下取整 ×1e7）——已知时刻标准向量
     #[test]
     fn test_sec_ms_gec() {
         let (stamp, stamp_v) = sec_ms_gec_at(0);
-        assert_eq!(stamp.len(), 16);
-        assert_eq!(stamp_v.len(), 16);
+        // 64 位大写十六进制（SHA-256）
+        assert_eq!(stamp.len(), 64);
         assert!(stamp
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()));
-        assert!(stamp_v
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()));
-        assert_eq!(sec_ms_gec_at(0), sec_ms_gec_at(0), "同一时刻输出应确定");
-        // unix=0 → FILETIME 偏移量本体
+        // unix=0 → ticks=11644473600（恰为 300 整数倍）×1e7 → 规范标准向量
         assert_eq!(
             stamp,
-            116444736000000000i64
-                .to_le_bytes()
-                .iter()
-                .map(|b| format!("{b:02X}"))
-                .collect::<String>()
+            "7ECB79D14E3AA576D2D79E6D487A1388156D91E614B1BE11C64226A29BC8DD8C"
         );
-        // Version 基于次日日期，应大于 Stamp 数值编码
-        assert_ne!(stamp, stamp_v);
+        // 同一时刻输出确定
+        assert_eq!(sec_ms_gec_at(0), sec_ms_gec_at(0), "同一时刻输出应确定");
+        // 5 分钟窗口内不同秒取整后同值（窗口对齐语义：1789123456 距窗口边界余 44s）
+        let (a, _) = sec_ms_gec_at(1789123456);
+        let (b, _) = sec_ms_gec_at(1789123456 + 43);
+        assert_eq!(a, b, "同一 5 分钟窗口内取整后输出应一致");
+        // 跨窗口参考向量（1789123456 → ticks=13433596800）
+        assert_eq!(
+            a,
+            "2CB5764BBCC619FE6F4537FEF34090C521E2C72866F081AF2B7880C880998AAA"
+        );
+        // Version：edge-tts constants.py 同款版本串
+        assert_eq!(stamp_v, "1-130.0.2849.100006");
         // WSS URL 含鉴权参数
         let url = edge_wss_url("conn-1");
         assert!(url.starts_with(
             "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?"
         ));
         assert!(url.contains("TrustedClientToken=6A5AA1D4EAFF4E9FB37E23D68491D6F4"));
-        assert!(url.contains("Sec-MS-GEC=") && url.contains("Sec-MS-GEC-Version="));
+        assert!(
+            url.contains("Sec-MS-GEC=") && url.contains("Sec-MS-GEC-Version=1-130.0.2849.100006")
+        );
         assert!(url.contains("ConnectionId=conn-1"));
     }
 
@@ -1092,5 +1132,38 @@ mod tests {
             assert_eq!(cached.value, static_v.value);
         }
         *VOICE_CACHE.lock().unwrap() = None;
+    }
+
+    /// P1 SSRF：HttpTTS 两处 Client（tts.rs 合成路径）复用 ssrf_redirect_policy——
+    /// 重定向 302 跳内网/链路本地地址必须被逐跳校验拦截（reqwest 返回 Err）
+    #[tokio::test]
+    async fn test_http_tts_redirect_policy_blocks_internal_hop() {
+        use std::io::{Read, Write};
+        // 本地一次性 HTTP 服务：响应 302 → http://169.254.169.254/（链路本地元数据地址）
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf);
+                let _ = sock.write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data/\r\nContent-Length: 0\r\n\r\n",
+                );
+                let _ = sock.flush();
+            }
+        });
+        // 与合成路径完全同款：Policy::none + tts_send_follow 手动逐跳（异步 SSRF 校验）
+        let client =
+            crate::service::crawler::http_client_builder(10, reqwest::redirect::Policy::none())
+                .unwrap();
+        let req = client.get(format!("http://{addr}/tts"));
+        let result = tts_send_follow(&client, req).await;
+        server.join().unwrap();
+        // 302 → 169.254.169.254 必须被逐跳校验拒绝（跟随链路 Err）
+        assert!(
+            result.is_err(),
+            "重定向跳链路本地地址应被拦截: {:?}",
+            result.ok().map(|r| r.status())
+        );
     }
 }

@@ -1968,6 +1968,11 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.clearTimeout(groupLongPressTimer)
   groupLongPressTimer = undefined
+  // #16：带弹窗离开时恢复全局滚动（11 处 open* 设 overflow:hidden 仅各自 close 恢复），
+  // 并断开运行中的书源调试 SSE（对照 ReaderView 同款修复）
+  document.body.style.overflow = ''
+  debugHandle?.close()
+  debugHandle = null
 })
 </script>
 

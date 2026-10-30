@@ -248,14 +248,15 @@ async fn migrate_admin_default_personal_data_back(pool: &SqlitePool) -> Result<u
         return Ok(0);
     };
 
-    // (表名, 业务冲突键)：仅个人数据表；配置类表不自动回迁
+    // (表名, 业务冲突键)：仅个人数据表；配置类表不自动回迁——
+    // user_config 曾被误列于此：每次启动把 default 公用配置（系统级）改写到管理员
+    // 个人命名空间，与管理员已有键冲突的 default 行还被 DELETE（系统配置层静默丢失）
     const PERSONAL_TABLES: &[(&str, &[&str])] = &[
         ("books", &["book_url"]),
         ("book_source_cookies", &["source_url"]),
         ("bookmarks", &["book_url", "title"]),
         ("reading_stats", &["book_url", "date"]),
         ("rss_articles", &["url"]),
-        ("user_config", &["ns"]),
     ];
 
     let mut tx = pool.begin().await?;

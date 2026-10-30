@@ -14,6 +14,7 @@ use std::io::Write;
 use futures::StreamExt as _; // buffer_unordered（GAP 104b 并发抓章）
 
 /// 导出章节（标题 + 正文）
+#[derive(Clone)]
 pub struct ExportChapter {
     pub title: String,
     pub content: String,

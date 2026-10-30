@@ -153,7 +153,9 @@ fn cache_get_value(ns: &str, key: &str) -> Option<String> {
     let storage = js_cache_registered()?;
     let db_ns = cache_db_ns(ns).to_string();
     let db_key = key.to_string();
-    let fut = async move { storage.get_js_cache(&db_ns, &db_key).await };
+    let storage_for_fut = storage.clone();
+    let db_ns_for_fut = db_ns.clone();
+    let fut = async move { storage_for_fut.get_js_cache(&db_ns_for_fut, &db_key).await };
     let (v, exp) = match block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "cache.get") {
         Ok(Some(hit)) => hit,
         Ok(None) => return None,
@@ -165,12 +167,117 @@ fn cache_get_value(ns: &str, key: &str) -> Option<String> {
     if exp > 0 && exp <= cache_now_ms() {
         return None;
     }
+    // putFile 哨兵行 → 回源读文件（值本体在磁盘，表里只存路径标记）
+    let v = match resolve_file_sentinel(&storage, &db_ns, &v) {
+        Some(content) => content,
+        None => return None, // 文件丢失按未命中（下次 putFile 重建）
+    };
     CACHE_STORE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(k, (v.clone(), exp));
     Some(v)
 }
+
+/// js_cache 文件缓存：目录名（data/{ns}/ 下）与哨兵前缀。
+/// legado jsHelp putFile 语义——大值（图片/长文本/二进制）落文件不落库，
+/// 是 cache.put 256KB 落库上限的正当出口
+const JS_CACHE_FILE_DIR: &str = "js_cache_files";
+const JS_CACHE_FILE_SENTINEL: &str = "file:";
+
+fn js_cache_file_path(
+    storage: &crate::storage::Storage,
+    db_ns: &str,
+    key: &str,
+) -> std::path::PathBuf {
+    storage
+        .config
+        .storage_dir()
+        .join("data")
+        .join(db_ns)
+        .join(JS_CACHE_FILE_DIR)
+        .join(format!(
+            "{}.bin",
+            crate::util::md5::md5_encode(&format!("{db_ns}\u{1}{key}"))
+        ))
+}
+
+/// 哨兵值 → 文件内容（None = 非哨兵值原样返回 Some(v)；文件丢失返回 None）
+fn resolve_file_sentinel(
+    storage: &crate::storage::Storage,
+    db_ns: &str,
+    v: &str,
+) -> Option<String> {
+    let Some(rel) = v.strip_prefix(JS_CACHE_FILE_SENTINEL) else {
+        return Some(v.to_string());
+    };
+    if rel.contains("..") {
+        return None; // 路径穿越防护（哨兵由本服务写入，防御性校验）
+    }
+    let path = storage
+        .config
+        .storage_dir()
+        .join("data")
+        .join(db_ns)
+        .join(rel);
+    std::fs::read(&path)
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
+/// cache.putFile / putFileAsBase64 核心：值写文件、表存哨兵（不受 256KB 落库上限约束）。
+/// 无持久层（测试/降级）→ 仅内存存内容字符串
+fn cache_put_file_value(ns: &str, key: &str, bytes: Vec<u8>, save_time_secs: i64) {
+    let k = cache_store_key(ns, key);
+    let exp = if save_time_secs > 0 {
+        cache_now_ms() + save_time_secs * 1000
+    } else {
+        0
+    };
+    // 内存存内容字符串（getFile 语义为字符串读取）
+    CACHE_STORE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(k, (String::from_utf8_lossy(&bytes).into_owned(), exp));
+    let Some(storage) = js_cache_registered() else {
+        return;
+    };
+    let db_ns = cache_db_ns(ns).to_string();
+    let path = js_cache_file_path(&storage, &db_ns, key);
+    let written = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")))
+        .is_ok()
+        && std::fs::write(&path, &bytes).is_ok();
+    let db_value = if written {
+        // 哨兵：相对 data/{ns}/ 的路径
+        format!(
+            "{JS_CACHE_FILE_SENTINEL}{JS_CACHE_FILE_DIR}/{}",
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        )
+    } else {
+        tracing::warn!(
+            "cache.putFile 文件写入失败 [{}]，退回常规落库（大值将被拒）",
+            key
+        );
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let key_owned = key.to_string();
+    let fut = async move {
+        storage
+            .put_js_cache(&db_ns, &key_owned, &db_value, exp)
+            .await
+    };
+    if let Err(e) = block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "cache.putFile") {
+        tracing::warn!("cache.putFile 哨兵落库失败（本次仅内存）: {e}");
+    }
+}
+
+/// E11-2：cache.put 单值落库上限——超大值（如整页 HTML）只进内存不落库，
+/// 防 js_cache 表被书源脚本撑爆（对齐 book_vars src 剔除的同类治理）
+pub const JS_CACHE_VALUE_MAX_BYTES: usize = 256 * 1024;
+/// CACHE_STORE 内存惰性上限：超过后先清过期，仍超则整体清空（纯缓存语义，安全）
+const CACHE_STORE_MAX_ENTRIES: usize = 50_000;
 
 fn cache_put_value(ns: &str, key: &str, value: String, save_time_secs: i64) {
     let k = cache_store_key(ns, key);
@@ -179,10 +286,32 @@ fn cache_put_value(ns: &str, key: &str, value: String, save_time_secs: i64) {
     } else {
         0
     };
-    CACHE_STORE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(k, (value.clone(), exp));
+    {
+        let mut m = CACHE_STORE.lock().unwrap_or_else(|e| e.into_inner());
+        m.insert(k, (value.clone(), exp));
+        // 惰性上限：动态 key 的书源可无限增长——先清过期，仍超则整体清空
+        if m.len() > CACHE_STORE_MAX_ENTRIES {
+            let now = cache_now_ms();
+            m.retain(|_, (_, e)| *e == 0 || *e > now);
+            if m.len() > CACHE_STORE_MAX_ENTRIES {
+                tracing::warn!(
+                    "CACHE_STORE 超 {} 条（清过期后仍超），整体清空重建",
+                    CACHE_STORE_MAX_ENTRIES
+                );
+                m.clear();
+            }
+        }
+    }
+    // 超大值只进内存（不落库）——js_cache 表无界膨胀防护
+    if value.len() > JS_CACHE_VALUE_MAX_BYTES {
+        tracing::debug!(
+            "cache.put [{}] 值 {}B 超 {}B 上限，仅内存不落库",
+            if ns.is_empty() { "default" } else { ns },
+            value.len(),
+            JS_CACHE_VALUE_MAX_BYTES
+        );
+        return;
+    }
     // EG4 同步落库（INSERT OR REPLACE）：失败仅告警不抛错——legacy cache.put 无返回值，
     // 静默降级为内存模式，不影响书源规则继续执行
     if let Some(storage) = js_cache_registered() {
@@ -222,7 +351,7 @@ pub struct JsBridge {
     inner: Arc<JsBridgeInner>,
 }
 
-struct JsBridgeInner {
+pub(crate) struct JsBridgeInner {
     /// 书源 key（URL），`source.getKey()` 返回
     source_key: String,
     /// 书源名称，`source.getName()` 返回
@@ -1649,13 +1778,28 @@ fn sp_apply(
     Ok(JsValue::undefined())
 }
 
+/// P1-3 同款上限（防书源脚本无界写入）：单 pref 最多 1000 条 / 总 1MB，超限静默拒写
+pub const APP_PREFS_MAX_ENTRIES: usize = 1000;
+pub const APP_PREFS_MAX_BYTES: usize = 1024 * 1024;
+
 fn app_prefs_insert(inner: &JsBridgeInner, pref: String, key: String, value: JsonValue) {
-    APP_PREFS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .entry(app_prefs_key(&inner.ns, &pref))
-        .or_default()
-        .insert(key, value);
+    let mut prefs = APP_PREFS.lock().unwrap_or_else(|e| e.into_inner());
+    let table = prefs.entry(app_prefs_key(&inner.ns, &pref)).or_default();
+    let new_key = !table.contains_key(&key);
+    if new_key && table.len() >= APP_PREFS_MAX_ENTRIES {
+        tracing::warn!("getSharedPreferences [{pref}] 条数达上限，拒绝写入 {key}");
+        return;
+    }
+    let value_bytes = serde_json::to_string(&value).map(|v| v.len()).unwrap_or(0);
+    let total: usize = table
+        .values()
+        .map(|v| serde_json::to_string(v).map(|s| s.len()).unwrap_or(0))
+        .sum();
+    if total + value_bytes > APP_PREFS_MAX_BYTES {
+        tracing::warn!("getSharedPreferences [{pref}] 总量达上限，拒绝写入 {key}");
+        return;
+    }
+    table.insert(key, value);
 }
 
 fn json_to_js_value(value: JsonValue, _context: &mut Context) -> JsValue {
@@ -1902,7 +2046,26 @@ fn install_globals(context: &mut Context, bridge: &JsBridge) -> Result<()> {
     // header/搜索/正文 JS 直接引用不报 ReferenceError）。书源变量顶层键也注入全局
     // （同名被后续 vars 覆盖，语义与 legado bindings 覆盖 prototype 一致）。
     let js_lib = bridge.inner.js_lib.clone();
-    if !js_lib.trim().is_empty() {
+    // jsLib 第二种官方形态（docs/legado-ref/ruleHelp.md）：`{"名字":"远程js URL"}` 映射
+    // JSON——曾被原样当 JS eval 产生 SyntaxError 且 map_err 上抛，该书源所有
+    // eval_js_with_bridge 全灭。识别后不 eval（远程拉取需 async，低频形态记 warn 降级）
+    let js_lib_is_remote_map =
+        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(js_lib.trim())
+            .ok()
+            .filter(|m| {
+                !m.is_empty()
+                    && m.values().all(|v| {
+                        v.as_str()
+                            .map(|s| s.starts_with("http://") || s.starts_with("https://"))
+                            .unwrap_or(false)
+                    })
+            })
+            .is_some();
+    if js_lib_is_remote_map {
+        tracing::warn!(
+            "jsLib 为远程 JS 映射 JSON（legado jsLib 第二形态），暂不支持远程拉取——本次求值不含 jsLib"
+        );
+    } else if !js_lib.trim().is_empty() {
         context
             .eval(Source::from_bytes(js_lib.as_bytes()))
             .map_err(map_js_error)?;
@@ -2023,7 +2186,22 @@ fn install_globals(context: &mut Context, bridge: &JsBridge) -> Result<()> {
             JsString::from("getFromMemory"),
             1,
         )
-        .function(bind(bridge, cache_js_put), JsString::from("putToMemory"), 2)
+        .function(
+            bind(bridge, cache_js_put_memory),
+            JsString::from("putToMemory"),
+            2,
+        )
+        .function(
+            bind(bridge, cache_js_put_file),
+            JsString::from("putFile"),
+            3,
+        )
+        .function(
+            bind(bridge, cache_js_put_file_b64),
+            JsString::from("putFileAsBase64"),
+            3,
+        )
+        .function(bind(bridge, cache_js_get), JsString::from("getFile"), 1)
         .function(
             bind(bridge, cache_js_delete),
             JsString::from("deleteMemory"),
@@ -2136,6 +2314,60 @@ fn cache_js_put(
         .map(|n| n as i64)
         .unwrap_or(0);
     cache_put_value(&inner.ns, &key, value, save_time);
+    Ok(JsValue::undefined())
+}
+
+/// cache.putFile(key, value, saveTime)：值写文件、表存哨兵（legado jsHelp 大值语义）
+fn cache_js_put_file(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let key = js_value_to_string(args.get_or_undefined(0), _context);
+    let value = js_value_to_string(args.get_or_undefined(1), _context);
+    let save_time = args
+        .get(2)
+        .and_then(|v| v.as_number())
+        .map(|n| n as i64)
+        .unwrap_or(0);
+    cache_put_file_value(&inner.ns, &key, value.into_bytes(), save_time);
+    Ok(JsValue::undefined())
+}
+
+/// cache.putFileAsBase64(key, valueBase64, saveTime)：base64 解码后写二进制文件
+fn cache_js_put_file_b64(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    use base64::Engine;
+    let key = js_value_to_string(args.get_or_undefined(0), _context);
+    let b64 = js_value_to_string(args.get_or_undefined(1), _context);
+    let save_time = args
+        .get(2)
+        .and_then(|v| v.as_number())
+        .map(|n| n as i64)
+        .unwrap_or(0);
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .unwrap_or_else(|_| b64.into_bytes());
+    cache_put_file_value(&inner.ns, &key, bytes, save_time);
+    Ok(JsValue::undefined())
+}
+
+/// cache.putToMemory：legado 语义为纯内存（不落盘）——此前误绑落库版
+fn cache_js_put_memory(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let key = js_value_to_string(args.get_or_undefined(0), _context);
+    let value = js_value_to_string(args.get_or_undefined(1), _context);
+    let k = cache_store_key(&inner.ns, &key);
+    CACHE_STORE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(k, (value, 0));
     Ok(JsValue::undefined())
 }
 
@@ -2913,7 +3145,11 @@ fn build_bridge_objects(bridge: &JsBridge, context: &mut Context) -> Result<(JsO
         .function(bind(bridge, source_get_name), JsString::from("getName"), 0)
         // 别名方法（legado AnalyzerUrl/书源脚本两种调用形态并存——实测漫画站探索脚本
         // 以 `{{source.getBookSourceUrl()}}` 模板引用，缺方法调用即断链）
-        .function(bind(bridge, source_get_key), JsString::from("getBookSourceUrl"), 0)
+        .function(
+            bind(bridge, source_get_key),
+            JsString::from("getBookSourceUrl"),
+            0,
+        )
         .function(
             bind(bridge, source_get_name),
             JsString::from("getBookSourceName"),
@@ -3052,15 +3288,18 @@ fn java_time_format(
 }
 
 /// java.timeFormatUTC(time, format, sh)：按指定格式 + 时区毫秒偏移格式化
-/// （legado SimpleTimeZone(sh, "UTC")——sh 为毫秒，如 28800000 = UTC+8）
+/// （legado SimpleTimeZone(sh, "UTC")——sh 为毫秒，如 28800000 = UTC+8）。
+/// 偏移钳制 ±24h：书源可传任意数值，超大/极小值会使 chrono Duration 加法
+/// 溢出 panic；真实时区偏移 ≤ ±14h，±24h 是宽松上界。
 fn java_time_format_utc(
     _inner: &JsBridgeInner,
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
+    const MAX_UTC_OFFSET_MS: i64 = 24 * 3600 * 1000;
     let t = js_value_to_i64(args.get_or_undefined(0), context);
     let format = js_value_to_string(args.get_or_undefined(1), context);
-    let sh = js_value_to_i64(args.get_or_undefined(2), context);
+    let sh = js_value_to_i64(args.get_or_undefined(2), context).clamp(-MAX_UTC_OFFSET_MS, MAX_UTC_OFFSET_MS);
     Ok(JsValue::from(JsString::from(format_time_millis(
         t, &format, sh,
     ))))
@@ -3164,6 +3403,9 @@ pub(crate) fn block_on_task<T: Send + 'static>(
     let (tx, rx) = std::sync::mpsc::channel::<Result<T>>();
     std::thread::Builder::new()
         .name(format!("reader-js-{what}"))
+        // 16MB 栈：boa 无解析深度限制 API，深嵌套书源 JS 在默认 2MB 栈上解析/执行
+        // 易栈溢出 abort 整个进程——加大栈是治标缓解（残余风险：更深嵌套仍可能溢出）
+        .stack_size(16 * 1024 * 1024)
         .spawn(move || {
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -5493,15 +5735,27 @@ fn parse_ttf(bytes: &[u8]) -> Option<TtfShim> {
 
 static TTF_REGISTRY: LazyLock<Mutex<HashMap<u64, Arc<TtfShim>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static TTF_ORDER: LazyLock<Mutex<std::collections::VecDeque<u64>>> =
+    LazyLock::new(|| Mutex::new(std::collections::VecDeque::new()));
+/// TTF 字体对象容量（FIFO 驱逐）——单个 CJK 字体解析后可达数十 MB，字体反爬书源
+/// 逐章换字体时曾无界累积；驱逐后 JS 侧与未知 id 同语义（inLimit=false 优雅降级）
+const TTF_REGISTRY_MAX: usize = 8;
 
 static TTF_NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 fn register_ttf(shim: TtfShim) -> u64 {
     let id = TTF_NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    TTF_REGISTRY
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(id, Arc::new(shim));
+    {
+        let mut reg = TTF_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+        let mut order = TTF_ORDER.lock().unwrap_or_else(|e| e.into_inner());
+        if order.len() >= TTF_REGISTRY_MAX {
+            if let Some(old) = order.pop_front() {
+                reg.remove(&old);
+            }
+        }
+        order.push_back(id);
+        reg.insert(id, Arc::new(shim));
+    }
     id
 }
 
@@ -5808,17 +6062,17 @@ fn http_response_object(
                     // - headers(name) → 该名下值数组
                     // - headers() → 全部响应头的 Map 对象（支持 .get(name)，城堡小说等源
                     //   以 `cs.headers().get("set-cookie")` 消费）
-                    if args.first().map_or(true, |v| v.is_undefined() || v.is_null()) {
+                    if args
+                        .first()
+                        .map_or(true, |v| v.is_undefined() || v.is_null())
+                    {
                         let headers = Arc::clone(&headers_arc);
                         let mut map = ObjectInitializer::new(ctx);
                         map.function(
                             unsafe {
                                 NativeFunction::from_closure(move |_t, args, ctx| {
-                                    let name = js_value_to_string(
-                                        args.get_or_undefined(0),
-                                        ctx,
-                                    )
-                                    .to_lowercase();
+                                    let name = js_value_to_string(args.get_or_undefined(0), ctx)
+                                        .to_lowercase();
                                     let hit = headers
                                         .iter()
                                         .find(|(k, _)| k.to_lowercase() == name)
@@ -5961,9 +6215,7 @@ struct JsoupConnectState {
 
 fn jsoup_connect_factory(inner: std::sync::Arc<JsBridgeInner>) -> NativeFunction {
     unsafe {
-        NativeFunction::from_closure(move |_this, args, ctx| {
-            jsoup_connect(&inner, args, ctx)
-        })
+        NativeFunction::from_closure(move |_this, args, ctx| jsoup_connect(&inner, args, ctx))
     }
 }
 
@@ -6017,15 +6269,25 @@ fn jsoup_connect(
         st.borrow_mut().headers.insert(k, v);
     });
     chain_store!("headers", |st: &Rc<RefCell<JsoupConnectState>>,
-                            args: &[JsValue],
-                            ctx: &mut Context| {
+                             args: &[JsValue],
+                             ctx: &mut Context| {
+        // 无参/undefined/null 不走 to_json——boa JsValue::to_json 对 Undefined 是
+        // todo!() 直接 panic（此前 headers() 空调即崩）：空操作，不设置任何头
+        let empty_arg = args
+            .first()
+            .map(|v| v.is_undefined() || v.is_null())
+            .unwrap_or(true);
+        if empty_arg {
+            return;
+        }
         if let Ok(json) = args.get_or_undefined(0).to_json(ctx) {
             if let Some(map) = json.as_object() {
                 for (k, v) in map {
                     let v = match v {
                         serde_json::Value::String(s) => s.clone(),
                         other => other.to_string(),
-                    };                    st.borrow_mut().headers.insert(k.clone(), v);
+                    };
+                    st.borrow_mut().headers.insert(k.clone(), v);
                 }
             }
         }
@@ -6033,25 +6295,23 @@ fn jsoup_connect(
     chain_store!(
         "requestBody",
         |st: &Rc<RefCell<JsoupConnectState>>, args: &[JsValue], ctx: &mut Context| {
-            st.borrow_mut().body_override =
-                Some(js_value_to_string(args.get_or_undefined(0), ctx));
+            st.borrow_mut().body_override = Some(js_value_to_string(args.get_or_undefined(0), ctx));
         }
     );
     // timeout/ignoreContentType/method：记录语义、无需处理
     chain_store!("timeout", |_: &Rc<RefCell<JsoupConnectState>>,
-                            _: &[JsValue],
-                            _: &mut Context| {});
+                             _: &[JsValue],
+                             _: &mut Context| {});
     chain_store!(
         "ignoreContentType",
         |_: &Rc<RefCell<JsoupConnectState>>, _: &[JsValue], _: &mut Context| {}
     );
-    chain_store!(
-        "method",
-        |st: &Rc<RefCell<JsoupConnectState>>, args: &[JsValue], ctx: &mut Context| {
-            let m = js_value_to_string(args.get_or_undefined(0), ctx);
-            st.borrow_mut().method_post = m.to_ascii_uppercase().contains("POST");
-        }
-    );
+    chain_store!("method", |st: &Rc<RefCell<JsoupConnectState>>,
+                            args: &[JsValue],
+                            ctx: &mut Context| {
+        let m = js_value_to_string(args.get_or_undefined(0), ctx);
+        st.borrow_mut().method_post = m.to_ascii_uppercase().contains("POST");
+    });
 
     // get()/post()：执行抓取
     for name in ["get", "post"] {
@@ -6074,11 +6334,7 @@ fn jsoup_connect(
                                 .data
                                 .iter()
                                 .map(|(k, v)| {
-                                    format!(
-                                        "{}={}",
-                                        urlencoding::encode(k),
-                                        urlencoding::encode(v)
-                                    )
+                                    format!("{}={}", urlencoding::encode(k), urlencoding::encode(v))
                                 })
                                 .collect::<Vec<_>>()
                                 .join("&");
@@ -6086,21 +6342,19 @@ fn jsoup_connect(
                             url.push_str(&q);
                         }
                         let body = if method == "POST" {
-                            Some(
-                                body_override.clone().unwrap_or_else(|| {
-                                    st.data
-                                        .iter()
-                                        .map(|(k, v)| {
-                                            format!(
-                                                "{}={}",
-                                                urlencoding::encode(k),
-                                                urlencoding::encode(v)
-                                            )
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join("&")
-                                }),
-                            )
+                            Some(body_override.clone().unwrap_or_else(|| {
+                                st.data
+                                    .iter()
+                                    .map(|(k, v)| {
+                                        format!(
+                                            "{}={}",
+                                            urlencoding::encode(k),
+                                            urlencoding::encode(v)
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("&")
+                            }))
                         } else {
                             body_override.clone()
                         };
@@ -6113,7 +6367,11 @@ fn jsoup_connect(
                         )
                     };
                     let _ = data;
-                    let method = if forced_post && name == "get" { "POST" } else { method };
+                    let method = if forced_post && name == "get" {
+                        "POST"
+                    } else {
+                        method
+                    };
                     match java_ajax_fetch(
                         &inner,
                         &url,
@@ -6737,8 +6995,28 @@ fn js_result_to_string(v: &JsValue, context: &mut Context) -> String {
 ///
 /// 背景：boa ToString 对数组输出元素 Join（对象元素为 "[object Object]"），
 /// 经 JSON.parse 必然解析为空。此处对齐 JSON.stringify 语义（Undefined/BigInt/
-/// Symbol → null，不 panic——区别于 boa `JsValue::to_json` 对 Undefined 的 todo!）。
+/// Symbol → null，不 panic——区别于 boa `JsValue::to_json` 对 Undefined 的 todo!()）。
+///
+/// 防护（hostile 书源规则可构造病态结构）：
+/// - 递归深度上限 [`JS_TO_JSON_MAX_DEPTH`]：深嵌套对象无上限递归会打爆原生栈
+///   直接 abort 进程，超限返回错误而非继续递归；
+/// - 数组预分配封顶 [`JS_TO_JSON_MAX_PREALLOC`]：`a.length = 4294967295` 会使按
+///   length 的 with_capacity 一次性预分配 ~137GB 内存 abort。
 pub fn js_value_to_json(v: &JsValue, context: &mut Context) -> JsResult<JsonValue> {
+    js_value_to_json_depth(v, context, 0)
+}
+
+/// js_value_to_json 递归深度上限（层）
+const JS_TO_JSON_MAX_DEPTH: usize = 128;
+/// js_value_to_json 数组预分配容量上限（元素槽位；超出部分由 Vec 按需增长）
+const JS_TO_JSON_MAX_PREALLOC: u32 = 4096;
+
+fn js_value_to_json_depth(v: &JsValue, context: &mut Context, depth: usize) -> JsResult<JsonValue> {
+    if depth >= JS_TO_JSON_MAX_DEPTH {
+        return Err(js_native_error(&format!(
+            "JS 对象嵌套超限（>{JS_TO_JSON_MAX_DEPTH} 层），拒绝转换"
+        )));
+    }
     match v {
         JsValue::Null | JsValue::Undefined => Ok(JsonValue::Null),
         JsValue::Boolean(b) => Ok(JsonValue::Bool(*b)),
@@ -6753,10 +7031,10 @@ pub fn js_value_to_json(v: &JsValue, context: &mut Context) -> JsResult<JsonValu
                 let len = obj
                     .get(JsString::from("length"), context)?
                     .to_u32(context)?;
-                let mut arr = Vec::with_capacity(len as usize);
+                let mut arr = Vec::with_capacity(json_array_prealloc(len));
                 for k in 0..len {
                     let val = obj.get(k, context)?;
-                    arr.push(js_value_to_json(&val, context)?);
+                    arr.push(js_value_to_json_depth(&val, context, depth + 1)?);
                 }
                 Ok(JsonValue::Array(arr))
             } else {
@@ -6769,12 +7047,17 @@ pub fn js_value_to_json(v: &JsValue, context: &mut Context) -> JsResult<JsonValu
                         PropertyKey::Symbol(_) => continue,
                     };
                     let val = obj.get(key, context)?;
-                    map.insert(k, js_value_to_json(&val, context)?);
+                    map.insert(k, js_value_to_json_depth(&val, context, depth + 1)?);
                 }
                 Ok(JsonValue::Object(map))
             }
         }
     }
+}
+
+/// 数组转换预分配容量（封顶 [`JS_TO_JSON_MAX_PREALLOC`]）
+fn json_array_prealloc(len: u32) -> usize {
+    len.min(JS_TO_JSON_MAX_PREALLOC) as usize
 }
 
 /// java.aesBase64DecodeToString(data, key, mode, iv)：AES/CBC/PKCS5 解密（书源加密 URL 常见）
@@ -6819,9 +7102,140 @@ fn aes_base64_decode_to_string(data: &str, key: &str, iv: &str) -> String {
     }
 }
 
+/// 测试/内部：从共享 inner 重建桥接（RuleVars.bridge 携带 → eval_rule_js 使用）
+pub(crate) fn js_bridge_from_inner(inner: Arc<JsBridgeInner>) -> JsBridge {
+    JsBridge { inner }
+}
+
+/// 分析入口注入：把书源 JS 上下文（jsLib/loginUrl/书源变量/java.* 桥）挂到 RuleVars——
+/// 规则引擎内所有 @js:/<js>/{{js}} 段求值即可使用书源定义的函数
+/// （曾缺失：规则级 JS 调 js_lib 的 sign/GetUL/AES_KEY 等全部 ReferenceError）
+pub(crate) fn attach_source_context(
+    vars: &mut crate::parser::rule::RuleVars,
+    source: &crate::model::BookSource,
+    ns: &str,
+) {
+    vars.bridge = Some(JsBridge::from_source(source, ns).inner);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #21：getSharedPreferences 写入上限（1000 条）——超限静默拒绝
+    #[test]
+    fn test_app_prefs_insert_capped() {
+        let inner_arc = JsBridge::new("", "测试源")
+            .with_namespace("prefs-cap")
+            .inner;
+        for i in 0..APP_PREFS_MAX_ENTRIES + 10 {
+            app_prefs_insert(
+                &inner_arc,
+                "test_pref".into(),
+                format!("k{i}"),
+                JsonValue::from(i),
+            );
+        }
+        let table = APP_PREFS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&app_prefs_key("prefs-cap", "test_pref"))
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(table.len(), APP_PREFS_MAX_ENTRIES, "超限条目应被拒绝");
+        assert!(table.contains_key("k0"), "先写入的应保留");
+        assert!(!table.contains_key(&format!("k{}", APP_PREFS_MAX_ENTRIES + 5)));
+        APP_PREFS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&app_prefs_key("prefs-cap", "test_pref"));
+    }
+
+    /// cache.putFile/getFile 文件缓存回环：文件落盘 + 表存哨兵 + 清内存后读穿透解析
+    #[tokio::test]
+    async fn test_cache_put_file_roundtrip() {
+        // 临时 Storage（镜像 storage::tests::test_storage 模式）
+        let dir = std::env::temp_dir().join(format!("js-cache-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut config = crate::AppConfig::from_env();
+        config.work_dir = dir.to_string_lossy().into_owned();
+        let storage = crate::storage::init(&config)
+            .await
+            .expect("测试存储初始化失败");
+        register_js_cache_storage(storage.clone());
+
+        let big = "A".repeat(600 * 1024); // > 256KB 落库上限——putFile 的存在意义
+        cache_put_file_value("ns1", "bigkey", big.clone().into_bytes(), 0);
+
+        // 文件在盘上、表里是哨兵
+        let db_ns = cache_db_ns("ns1");
+        let path = js_cache_file_path(&storage, db_ns, "bigkey");
+        assert!(path.exists(), "值文件应落盘: {}", path.display());
+        assert!(std::fs::read(&path).unwrap().len() == 600 * 1024);
+        let (row, _) = storage
+            .get_js_cache(db_ns, "bigkey")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(row.starts_with(JS_CACHE_FILE_SENTINEL), "表应存哨兵: {row}");
+
+        // 清内存 → 读穿透解析哨兵取回内容
+        CACHE_STORE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&cache_store_key("ns1", "bigkey"));
+        assert_eq!(
+            cache_get_value("ns1", "bigkey").as_deref(),
+            Some(big.as_str())
+        );
+
+        // putFileAsBase64：base64 写二进制
+        cache_put_file_value("ns1", "bink", b"bin-data".to_vec(), 0);
+        let (row2, _) = storage.get_js_cache(db_ns, "bink").await.unwrap().unwrap();
+        assert!(row2.starts_with(JS_CACHE_FILE_SENTINEL));
+        assert_eq!(
+            std::fs::read(js_cache_file_path(&storage, db_ns, "bink")).unwrap(),
+            b"bin-data"
+        );
+
+        // 文件丢失 → 按未命中
+        std::fs::remove_file(&path).unwrap();
+        CACHE_STORE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&cache_store_key("ns1", "bigkey"));
+        assert!(
+            cache_get_value("ns1", "bigkey").is_none(),
+            "文件丢失应按未命中"
+        );
+
+        clear_js_cache_storage();
+        CACHE_STORE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        storage.pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 无持久层（未注册）时 putFile 降级为纯内存
+    #[test]
+    fn test_cache_put_file_memory_fallback() {
+        let saved = JS_CACHE_STORAGE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+        clear_js_cache_storage();
+        cache_put_file_value("ns-mem", "k", b"v".to_vec(), 0);
+        assert_eq!(cache_get_value("ns-mem", "k").as_deref(), Some("v"));
+        CACHE_STORE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&cache_store_key("ns-mem", "k"));
+        if saved {
+            // 并行测试可能已注册——不恢复（各测试用独立 ns 键隔离）
+        }
+    }
 
     /// M6：block_on_task 超时后立即返回错误（不再无限等待）——永不完成的任务在短超时内返回
     #[test]
@@ -8116,6 +8530,87 @@ mod tests {
         assert_eq!(format_time_millis(i64::MAX, "yyyy", 0), "");
     }
 
+    /// timeFormatUTC 偏移钳制 ±24h：巨偏移不 panic，钳到 +24h 正常格式化
+    #[test]
+    fn java_time_format_utc_clamps_huge_offset() {
+        let r = eval_js(
+            r#"java.timeFormatUTC(0, 'yyyy-MM-dd HH:mm', 99999999999999)"#,
+            &vars(&[]),
+        )
+        .unwrap();
+        assert_eq!(r, "1970-01-02 00:00", "巨偏移应钳制到 +24h: {r}");
+        let r = eval_js(
+            r#"java.timeFormatUTC(0, 'yyyy-MM-dd HH:mm', -99999999999999)"#,
+            &vars(&[]),
+        )
+        .unwrap();
+        assert_eq!(r, "1969-12-31 00:00", "巨负偏移应钳制到 -24h: {r}");
+    }
+
+    /// jsoup headers() 无参：不再踩 boa to_json 的 Undefined todo!() panic——空操作
+    #[test]
+    fn jsoup_connect_headers_no_arg_is_noop() {
+        let r = eval_js(
+            r#"(function(){
+                var c = org.jsoup.Jsoup.connect('http://127.0.0.1:1/x')
+                    .headers()
+                    .header('X-A', 'b');
+                return typeof c;
+            })()"#,
+            &vars(&[]),
+        )
+        .unwrap();
+        assert_eq!(r, "object", "headers() 无参应空操作且链不中断");
+        // null 同样空操作
+        let r = eval_js(
+            r#"(function(){
+                var c = org.jsoup.Jsoup.connect('http://127.0.0.1:1/x').headers(null);
+                return typeof c;
+            })()"#,
+            &vars(&[]),
+        )
+        .unwrap();
+        assert_eq!(r, "object");
+    }
+
+    /// js_value_to_json 递归深度上限：200 层嵌套 → 错误（不再无限递归打爆原生栈）
+    #[test]
+    fn js_value_to_json_depth_limit_errors() {
+        let err = eval_js_json(
+            r#"(function(){
+                var o = {"leaf": 1};
+                for (var i = 0; i < 200; i++) { o = {"n": o}; }
+                return o;
+            })()"#,
+            &vars(&[]),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("嵌套超限"),
+            "应报嵌套超限错误: {err}"
+        );
+        // 上限内（100 层）正常转换
+        let json = eval_js_json(
+            r#"(function(){
+                var o = {"leaf": 1};
+                for (var i = 0; i < 100; i++) { o = {"n": o}; }
+                return o;
+            })()"#,
+            &vars(&[]),
+        )
+        .unwrap();
+        assert!(json.is_object(), "100 层应正常转换: {json}");
+    }
+
+    /// js_value_to_json 数组预分配封顶：length=4294967295 不再触发 ~137GB 预分配 abort
+    #[test]
+    fn js_value_to_json_array_prealloc_capped() {
+        assert_eq!(json_array_prealloc(4294967295), 4096);
+        assert_eq!(json_array_prealloc(0), 0);
+        assert_eq!(json_array_prealloc(4096), 4096);
+        assert_eq!(json_array_prealloc(7), 7, "小数组按实际长度分配");
+    }
+
     /// 全局 gzip：UTF-8 → GZip → base64（可逆）
     #[test]
     fn test_gzip_base64_roundtrip() {
@@ -8350,7 +8845,12 @@ mod tests {
         assert_eq!(r, "false");
         // getStringList：css_chain 列表形态（需先 setContent 提供文档）
         let bridge = JsBridge::default();
-        eval_js_with_bridge("java.setContent('<ul><li>a</li><li>b</li></ul>')", &Default::default(), &bridge).unwrap();
+        eval_js_with_bridge(
+            "java.setContent('<ul><li>a</li><li>b</li></ul>')",
+            &Default::default(),
+            &bridge,
+        )
+        .unwrap();
         let r = eval_js_with_bridge(
             "JSON.stringify(java.getStringList('ul@li@text'))",
             &Default::default(),

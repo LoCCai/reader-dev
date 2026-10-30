@@ -129,7 +129,9 @@ fn sanitize_xml_name(name: &str) -> Option<&str> {
 }
 
 fn escape_xml_text(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn escape_xml_attr(s: &str) -> String {

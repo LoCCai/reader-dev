@@ -122,7 +122,8 @@ interface MergedResult {
 }
 
 const results = ref<MergedResult[]>([])
-const failedCovers = new Set<string>()
+/** 封面加载失败的书 URL（响应式：失败后模板即时切占位符，对齐 BookshelfView） */
+const failedCovers = ref(new Set<string>())
 /** 已返回结果的书源数（SSE 每源一个 book 事件，lastIndex 去重计数） */
 const searchedSources = ref(0)
 
@@ -628,6 +629,12 @@ function closeSuggest() {
 
 onBeforeUnmount(() => {
   window.clearTimeout(suggestTimer)
+  // #24：离开页面中止流式多源搜索——曾让 SSE 连接与后端爬源跑完，
+  // 流回调持续持有已卸载组件闭包
+  sseAbort?.()
+  sseAbort = null
+  batchAbort?.abort()
+  batchAbort = null
 })
 </script>
 

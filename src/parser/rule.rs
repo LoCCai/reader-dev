@@ -52,13 +52,17 @@ pub enum RuleKind {
 /// E10/AR5：`chapter_url`/`next_chapter_url` 同为实体字段回退上下文——JS 求值绑定的
 /// `chapter.url`/`nextChapterUrl` 来源（legacy AnalyzeRule.setBook/setChapter），
 /// 不参与持久化。
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct RuleVars {
     map: std::collections::HashMap<String, String>,
     pub chapter_title: Option<String>,
     pub book_name: Option<String>,
     pub chapter_url: Option<String>,
     pub next_chapter_url: Option<String>,
+    /// 书源 JS 上下文（jsLib/loginUrl 函数、java.* 桥）——分析入口注入，
+    /// 规则内所有 @js:/<js> 段求值时使用；None = 旧默认行为（无 jsLib）。
+    /// 不参与持久化（内存上下文，随流程存活）
+    pub(crate) bridge: Option<std::sync::Arc<crate::parser::js::JsBridgeInner>>,
 }
 
 /// E10/AR5 保留键：章节/书上下文经 vars 表传给 JS 求值（[`push_js_context`] 写入、
@@ -111,6 +115,19 @@ pub(crate) fn push_js_context(
     }
 }
 
+impl std::fmt::Debug for RuleVars {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuleVars")
+            .field("map", &self.map)
+            .field("chapter_title", &self.chapter_title)
+            .field("book_name", &self.book_name)
+            .field("chapter_url", &self.chapter_url)
+            .field("next_chapter_url", &self.next_chapter_url)
+            .field("bridge", &self.bridge.as_ref().map(|_| "JsBridgeInner"))
+            .finish()
+    }
+}
+
 impl RuleVars {
     pub fn new() -> Self {
         Self::default()
@@ -141,8 +158,91 @@ const BOOK_VARS_CACHE_MAX: usize = 512;
 const BOOK_VARS_ENTRIES_MAX: usize = 64;
 const BOOK_VARS_BYTES_MAX: usize = 1024 * 1024;
 
-static BOOK_VARS_CACHE: std::sync::RwLock<Vec<((String, String, String), RuleVars)>> =
-    std::sync::RwLock::new(Vec::new());
+/// HashMap + 插入序队列：查找 O(1)（曾为 Vec 线性扫 + FIFO remove(0) O(n) 搬移——
+/// 并发章节渲染热路径上每次 save/load 都全表扫）
+type BookVarsKey = (String, String, String);
+static BOOK_VARS_CACHE: std::sync::LazyLock<std::sync::RwLock<BookVarsMap<RuleVars>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(BookVarsMap::new()));
+static BOOK_VARS_PERSIST_STATE: std::sync::LazyLock<std::sync::RwLock<BookVarsMap<(String, i64)>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(BookVarsMap::new()));
+
+/// SQLite 落库节流状态：每键 (上次已落库 JSON, 上次落库毫秒时间戳)。
+/// 内容未变或距上次落库不足 [`BOOK_VARS_DB_MIN_INTERVAL_MS`] 时跳过落库（变更仍进内存 LRU）——
+/// 修复 book_vars_cache 无界膨胀（章节级双键 × 每次渲染即写 → 466 万行/35GB）。
+/// 节流状态容量（与内存 LRU 同数量级；超限逐出最旧条目——逐出后下次写入仅多落一次库）
+const BOOK_VARS_PERSIST_STATE_MAX: usize = 4096;
+
+/// 插入序 Map：HashMap O(1) 查找 + VecDeque 维护插入序（超限逐出最旧）
+struct BookVarsMap<V> {
+    map: std::collections::HashMap<BookVarsKey, V>,
+    order: std::collections::VecDeque<BookVarsKey>,
+}
+
+impl<V> BookVarsMap<V> {
+    fn new() -> Self {
+        Self {
+            map: std::collections::HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        }
+    }
+    fn get(&self, key: &BookVarsKey) -> Option<&V> {
+        self.map.get(key)
+    }
+    /// 插入/更新（新键追加插入序；已存在不动序——与原 Vec 行为一致）
+    fn insert(&mut self, key: BookVarsKey, value: V, max: usize) {
+        if !self.map.contains_key(&key) {
+            if self.order.len() >= max {
+                if let Some(old) = self.order.pop_front() {
+                    self.map.remove(&old);
+                }
+            }
+            self.order.push_back(key.clone());
+        }
+        self.map.insert(key, value);
+    }
+    /// 按命名空间前缀清除
+    fn retain_ns(&mut self, ns: &str) {
+        let dead: Vec<BookVarsKey> = self.order.iter().filter(|k| k.0 == ns).cloned().collect();
+        for k in dead {
+            self.map.remove(&k);
+            self.order.retain(|o| o != &k);
+        }
+    }
+    fn clear(&mut self) {
+        self.map.clear();
+        self.order.clear();
+    }
+}
+/// 同键两次落库最小间隔：高频变更（翻页计数等）在间隔内只留内存，30s 后的下一次
+/// save 仍会落库——不丢最终值，只丢中间值
+const BOOK_VARS_DB_MIN_INTERVAL_MS: i64 = 30_000;
+
+/// 同源最近落库内容：(ns, source) → 最近一次**成功落库**的 JSON。
+/// 内容与同源最近落库完全相同 → 跳过落库：读侧 load_book_vars_merged 以 root 键兜底
+/// （two_level 双写保证 root 持有同内容；内容真不同的章节级变量不受影响）——拦截
+/// "海量唯一 URL × 同一份书级变量"的写入洪流（机器人账号实测 9h 54.8 万行、3 次 OOM）。
+/// 容量自然有界（≤ 用户 × 书源数），无需逐出。
+static BOOK_VARS_SOURCE_LAST: std::sync::LazyLock<
+    std::sync::RwLock<std::collections::HashMap<(String, String), String>>,
+> = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+
+/// 同源同内容判定（只读）
+fn book_vars_source_recent(ns: &str, source: &str, json: &str) -> bool {
+    let g = match BOOK_VARS_SOURCE_LAST.read() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    g.get(&(ns.to_string(), source.to_string())) == Some(&json.to_string())
+}
+
+/// 登记同源最近落库内容（仅实际写库成功后调用——读穿透不登记，避免误跳过 root 更新）
+fn book_vars_source_mark(ns: &str, source: &str, json: &str) {
+    let mut g = match BOOK_VARS_SOURCE_LAST.write() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    g.insert((ns.to_string(), source.to_string()), json.to_string());
+}
 
 /// @put/@get 变量 SQLite 持久化句柄（serve() 启动时注册；None = 未注册（测试/降级）——仅内存）
 static BOOK_VARS_STORAGE: std::sync::LazyLock<std::sync::Mutex<Option<crate::storage::Storage>>> =
@@ -153,9 +253,11 @@ pub fn register_book_vars_storage(storage: crate::storage::Storage) {
     *BOOK_VARS_STORAGE.lock().unwrap_or_else(|e| e.into_inner()) = Some(storage);
 }
 
-/// 注销书级变量持久化存储（回到纯内存模式；重启模拟/测试收尾用）
+/// 注销书级变量持久化存储（回到纯内存模式；重启模拟/测试收尾用）。
+/// 同时清空节流/同源去重状态——DB 句柄已注销，登记的"已落库"基线随之失效
 pub fn clear_book_vars_storage() {
     *BOOK_VARS_STORAGE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    clear_book_vars_persist_state();
 }
 
 fn book_vars_registered() -> Option<crate::storage::Storage> {
@@ -176,14 +278,18 @@ pub fn clear_book_vars_memory_cache() {
 /// 清空指定命名空间的内存缓存（重启模拟；不动其他命名空间——并发测试隔离）
 pub fn clear_book_vars_memory_cache_ns(ns: &str) {
     match BOOK_VARS_CACHE.write() {
-        Ok(mut g) => g.retain(|(k, _)| k.0 != ns),
-        Err(e) => e.into_inner().retain(|(k, _)| k.0 != ns),
+        Ok(mut g) => g.retain_ns(ns),
+        Err(e) => e.into_inner().retain_ns(ns),
     }
 }
 
-/// RuleVars map → JSON（仅持久化变量表；章节/书上下文字段不参与——与内存缓存一致）
+/// RuleVars map → JSON（仅持久化变量表；章节/书上下文字段不参与——与内存缓存一致）。
+/// 收集进 BTreeMap 再序列化——canonical 形态：HashMap 键序随机，若直接序列化则
+/// 同一份变量两次产出的字符串可能不同，写入节流的"内容相同"字符串比较将按概率
+/// 失效/误判（P0：去重确定性）
 fn book_vars_to_json(vars: &RuleVars) -> Option<String> {
-    serde_json::to_string(&vars.map).ok()
+    let sorted: std::collections::BTreeMap<&String, &String> = vars.map.iter().collect();
+    serde_json::to_string(&sorted).ok()
 }
 
 /// JSON → 仅 map 的 RuleVars（上下文字段为 None）
@@ -197,11 +303,22 @@ fn book_vars_from_json(json: &str) -> Option<RuleVars> {
 /// SQLite 读穿透（同步阻塞等待；失败按未命中处理）
 fn book_vars_db_read(ns: &str, source: &str, url: &str) -> Option<RuleVars> {
     let storage = book_vars_registered()?;
-    let (ns, source, url) = (ns.to_string(), source.to_string(), url.to_string());
-    let fut = async move { storage.get_book_vars_cache(&ns, &source, &url).await };
+    let key = (ns.to_string(), source.to_string(), url.to_string());
+    let fut = async move { storage.get_book_vars_cache(&key.0, &key.1, &key.2).await };
     match crate::parser::js::block_on_task(fut, std::time::Duration::from_secs(10), "bookVars.get")
     {
-        Ok(Some(json)) => book_vars_from_json(&json),
+        Ok(Some(json)) => {
+            // 读穿透命中 → 预登记节流状态（时间戳前移一个完整间隔：紧随其后的首次
+            // 变更立即落库，不受去抖窗口误伤；内容相同则后续 save 全部被去重）
+            book_vars_persist_mark(
+                ns,
+                source,
+                url,
+                &json,
+                now_ms() - BOOK_VARS_DB_MIN_INTERVAL_MS,
+            );
+            book_vars_from_json(&json)
+        }
         Ok(None) => None,
         Err(e) => {
             tracing::debug!("book_vars 读库失败（按未命中处理）: {e}");
@@ -210,31 +327,99 @@ fn book_vars_db_read(ns: &str, source: &str, url: &str) -> Option<RuleVars> {
     }
 }
 
-/// SQLite 落库（同步阻塞等待；失败仅告警不中断——降级为纯内存）
-fn book_vars_db_write(ns: &str, source: &str, url: &str, json: &str) {
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default()
+}
+
+/// 节流判定（只读检查，不登记）：无状态 / 内容变化且过间隔 → true（应落库）
+fn book_vars_persist_due(ns: &str, source: &str, url: &str, json: &str) -> bool {
+    let key = (ns.to_string(), source.to_string(), url.to_string());
+    let st = match BOOK_VARS_PERSIST_STATE.read() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    match st.get(&key) {
+        Some((last_json, last_ms)) => {
+            last_json != json && now_ms() - last_ms >= BOOK_VARS_DB_MIN_INTERVAL_MS
+        }
+        None => true,
+    }
+}
+
+/// 登记节流状态（落库成功后 / 读穿透命中时调用）
+fn book_vars_persist_mark(ns: &str, source: &str, url: &str, json: &str, ts_ms: i64) {
+    let mut st = match BOOK_VARS_PERSIST_STATE.write() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    st.insert(
+        (ns.to_string(), source.to_string(), url.to_string()),
+        (json.to_string(), ts_ms),
+        BOOK_VARS_PERSIST_STATE_MAX,
+    );
+}
+
+/// 测试辅助：清空节流状态（重置去抖/去重判定基线；含同源去重）
+pub(crate) fn clear_book_vars_persist_state() {
+    match BOOK_VARS_PERSIST_STATE.write() {
+        Ok(mut g) => g.clear(),
+        Err(e) => e.into_inner().clear(),
+    }
+    match BOOK_VARS_SOURCE_LAST.write() {
+        Ok(mut g) => g.clear(),
+        Err(e) => e.into_inner().clear(),
+    }
+}
+
+/// SQLite 落库（同步阻塞等待；失败仅告警不中断——降级为纯内存）。
+/// 节流：① JSON 与上次落库相同 → 跳过；② 距上次落库 < 30s → 跳过。
+/// 落库失败时不回滚节流登记（下次内容变化仍会重写，中间态丢失无害——与既有降级语义一致）
+fn book_vars_db_write(ns: &str, source: &str, url: &str, json: &str, bypass_source_dedup: bool) {
     if let Some(storage) = book_vars_registered() {
+        if !book_vars_persist_due(ns, source, url, json) {
+            return;
+        }
+        // 同源同内容 → 已有等价数据在库（root 键或同源兄弟行），跳过（治唯一 URL 洪流）；
+        // root 语义写豁免（bypass_source_dedup）——root 是全书兜底键必在库
+        if !bypass_source_dedup && book_vars_source_recent(ns, source, json) {
+            return;
+        }
+        // 落库成功后登记节流状态（克隆一份——上方元组会被 move 进 async 块）
+        let mark = (
+            ns.to_string(),
+            source.to_string(),
+            url.to_string(),
+            json.to_string(),
+        );
         let (ns, source, url) = (ns.to_string(), source.to_string(), url.to_string());
         let json = json.to_string();
         let fut = async move { storage.put_book_vars_cache(&ns, &source, &url, &json).await };
         // 超时/失败仅降级纯内存；WARN 去抖 60s——并发搜索时锁竞争会集中爆发，逐条刷屏无益
         static LAST_WARN_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
-        if let Err(e) = crate::parser::js::block_on_task(
+        match crate::parser::js::block_on_task(
             fut,
             std::time::Duration::from_secs(10),
             "bookVars.put",
         ) {
-            use std::sync::atomic::Ordering;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or_default();
-            let prev = LAST_WARN_MS.load(Ordering::Relaxed);
-            if now - prev >= 60_000
-                && LAST_WARN_MS
-                    .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-            {
-                tracing::warn!("book_vars 落库失败（本次仅内存，60s 内同类告警去抖）: {e}");
+            Ok(()) => {
+                let (ns, source, url, json) = mark;
+                book_vars_persist_mark(&ns, &source, &url, &json, now_ms());
+                book_vars_source_mark(&ns, &source, &json);
+            }
+            Err(e) => {
+                use std::sync::atomic::Ordering;
+                let now = now_ms();
+                let prev = LAST_WARN_MS.load(Ordering::Relaxed);
+                if now - prev >= 60_000
+                    && LAST_WARN_MS
+                        .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok()
+                {
+                    tracing::warn!("book_vars 落库失败（本次仅内存，60s 内同类告警去抖）: {e}");
+                }
             }
         }
     }
@@ -245,12 +430,8 @@ fn book_vars_db_write(ns: &str, source: &str, url: &str, json: &str) {
 pub fn load_book_vars(ns: &str, source: &str, book_url: &str) -> RuleVars {
     let key = (ns.to_string(), source.to_string(), book_url.to_string());
     let mem_hit = match BOOK_VARS_CACHE.read() {
-        Ok(g) => g.iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone()),
-        Err(e) => e
-            .into_inner()
-            .iter()
-            .find(|(k, _)| *k == key)
-            .map(|(_, v)| v.clone()),
+        Ok(g) => g.get(&key).cloned(),
+        Err(e) => e.into_inner().get(&key).cloned(),
     };
     if let Some(v) = mem_hit {
         return v;
@@ -261,14 +442,7 @@ pub fn load_book_vars(ns: &str, source: &str, book_url: &str) -> RuleVars {
             Ok(g) => g,
             Err(e) => e.into_inner(),
         };
-        if let Some(slot) = g.iter_mut().find(|(k, _)| *k == key) {
-            slot.1 = v.clone();
-        } else {
-            if g.len() >= BOOK_VARS_CACHE_MAX {
-                g.remove(0);
-            }
-            g.push((key, v.clone()));
-        }
+        g.insert(key, v.clone(), BOOK_VARS_CACHE_MAX);
         return v;
     }
     RuleVars::default()
@@ -290,8 +464,10 @@ pub fn load_book_vars_merged(ns: &str, source: &str, root_key: &str, leaf_key: &
     merged
 }
 
-/// [`save_book_vars`] 双键版：leaf 键 + root 键各存一份（值相同）——
+/// [`save_book_vars`] 双键版：root 键 + leaf 键各存一份（值相同）——
 /// 详情/目录/正文任一阶段写入后，直接取正文/目录时按两级合并都能命中。
+/// 顺序：先 root 后 leaf——同源内容去重会跳过与最近落库相同的写入，root 先行
+/// 保证"全书兜底键"必在库（leaf 同内容被跳过无碍：读侧经 root 命中）。
 pub fn save_book_vars_two_level(
     ns: &str,
     source: &str,
@@ -299,15 +475,36 @@ pub fn save_book_vars_two_level(
     leaf_key: &str,
     vars: &RuleVars,
 ) {
-    save_book_vars(ns, source, leaf_key, vars);
+    // root 与 leaf（toc_url 级）双双豁免同源去重③——两个键都是"书/目录级兜底键"
+    // （每书每目录解析仅一行，量级=书数，非洪流面）：目录直达流程的逐章 leaf 循环
+    // 先于本调用执行并污染去重基线，若受③拦截则重启后该书全章节读穿透双 miss
+    // （章节级 ch.url 循环保留③——那才是海量唯一键的洪流面）
     if !root_key.is_empty() && root_key != leaf_key {
-        save_book_vars(ns, source, root_key, vars);
+        save_book_vars_root(ns, source, root_key, vars);
     }
+    save_book_vars_root(ns, source, leaf_key, vars);
 }
 
 /// 保存书级变量（LRU 上限 + 单书条目/字节上限，超限静默丢弃——与 source.put 上限语义一致；
 /// 内存 + SQLite 双写）。P0 按命名空间隔离
 pub fn save_book_vars(ns: &str, source: &str, book_url: &str, vars: &RuleVars) {
+    save_book_vars_inner(ns, source, book_url, vars, false);
+}
+
+/// root 语义版（[`save_book_vars_two_level`] 专用）：跳过同源内容去重③——
+/// root 键是全书兜底，无论同源最近落库内容是否相同都必须落库；
+/// 同键去重①与 30s 去抖②仍生效（root 行有界：每书一行）
+pub fn save_book_vars_root(ns: &str, source: &str, book_url: &str, vars: &RuleVars) {
+    save_book_vars_inner(ns, source, book_url, vars, true);
+}
+
+fn save_book_vars_inner(
+    ns: &str,
+    source: &str,
+    book_url: &str,
+    vars: &RuleVars,
+    bypass_source_dedup: bool,
+) {
     let key = (ns.to_string(), source.to_string(), book_url.to_string());
     let mut capped = RuleVars::new();
     let mut bytes = 0usize;
@@ -325,19 +522,32 @@ pub fn save_book_vars(ns: &str, source: &str, book_url: &str, vars: &RuleVars) {
         Ok(g) => g,
         Err(e) => e.into_inner(),
     };
-    if let Some(slot) = g.iter_mut().find(|(k, _)| *k == key) {
-        slot.1 = capped.clone();
-    } else {
-        if g.len() >= BOOK_VARS_CACHE_MAX {
-            g.remove(0);
-        }
-        g.push((key, capped.clone()));
-    }
+    g.insert(key, capped.clone(), BOOK_VARS_CACHE_MAX);
     drop(g);
-    // 双写落库（capped 已剔除超限条目；上下文字段不序列化）
-    if let Some(json) = book_vars_to_json(&capped) {
-        book_vars_db_write(ns, source, book_url, &json);
+    // 双写落库（capped 已剔除超限条目；上下文字段不序列化；再剔除页面级临时键——
+    // 见 [`BOOK_VARS_TRANSIENT_KEYS`]，内存层保留）
+    let persisted = strip_transient_vars(&capped);
+    if let Some(json) = book_vars_to_json(&persisted) {
+        book_vars_db_write(ns, source, book_url, &json, bypass_source_dedup);
     }
+}
+
+/// 持久化剔除的页面级临时键：`src` = 当前页原始 HTML（可达数百 KB，仅本章求值期间
+/// 有意义——legado 语义中页面上下文不跨请求存活）。内存层保留（同章 JS `@get:{src}`
+/// 仍可读）；落库剔除（重启后本就重新抓取）——否则每读/析一章就向库复制一份页面源码
+/// （实测单行 171KB × 全书章节数，是 book_vars_cache 膨胀到 35GB 的主因）。
+const BOOK_VARS_TRANSIENT_KEYS: [&str; 1] = ["src"];
+
+/// 剔除页面级临时键的拷贝（原 vars 不动——内存缓存继续持有 src）。
+/// 新建 map 逐键跳过，避免 clone 整个含 src（可达数百 KB）的 map 再删除
+fn strip_transient_vars(vars: &RuleVars) -> RuleVars {
+    let mut out = RuleVars::new();
+    for (k, v) in vars.iter() {
+        if !BOOK_VARS_TRANSIENT_KEYS.contains(&k.as_str()) {
+            out.map.insert(k.clone(), v.clone());
+        }
+    }
+    out
 }
 
 /// 从规则串中提取并移除 `@put:{...}` 段（legado splitPutRule）：
@@ -357,11 +567,18 @@ pub(crate) fn split_put(rule: &str) -> (String, Vec<(String, String)>) {
                 let open = i + 5 + open_rel;
                 if let Some(end) = matching_brace(rule, open) {
                     let body = &rule[open + 1..end];
-                    if let Some(map) = parse_put_json(body) {
-                        puts.extend(map);
-                        i = end + 1;
-                        continue;
+                    match parse_put_json(body) {
+                        Some(map) => puts.extend(map),
+                        // JSON 解析失败也摘除该段（对齐 legado splitPutRule 先移除
+                        // 再解析）——曾保留原文：残留 `@put:{...}` 进后续类型解析，
+                        // 整条字段规则被破坏
+                        None => {
+                            i = end + 1;
+                            continue;
+                        }
                     }
+                    i = end + 1;
+                    continue;
                 }
             }
         }
@@ -734,6 +951,25 @@ pub fn apply_init_with_vars(context: &str, init: Option<&str>, vars: &mut RuleVa
     apply_init_impl(context, init, Some(vars))
 }
 
+/// 规则内 JS 求值统一入口：vars 携带书源 bridge 时走 eval_js_with_bridge
+/// （jsLib 定义的 sign/GetUL 等函数可用），否则旧默认（无 jsLib）。
+/// pub：服务层残余裸 eval_js 调用点（book.rs preUpdateJs/chapterUrl 级联等）统一
+/// 改走此入口——同一语法在搜索流带桥、详情/目录/正文流无桥，jsLib 全部
+/// ReferenceError，同一书源「搜索可用、详情/目录/正文断」
+pub fn eval_rule_js(
+    code: &str,
+    js_vars: &std::collections::HashMap<String, String>,
+    vars: Option<&RuleVars>,
+) -> anyhow::Result<String> {
+    match vars.and_then(|v| v.bridge.clone()) {
+        Some(inner) => {
+            let bridge = crate::parser::js::js_bridge_from_inner(inner);
+            crate::parser::js::eval_js_with_bridge(code, js_vars, &bridge)
+        }
+        None => crate::parser::js::eval_js(code, js_vars),
+    }
+}
+
 fn apply_init_impl(context: &str, init: Option<&str>, vars: Option<&mut RuleVars>) -> String {
     let Some(r) = init else {
         return context.to_string();
@@ -749,7 +985,8 @@ fn apply_init_impl(context: &str, init: Option<&str>, vars: Option<&mut RuleVars
             js_vars.insert("result".to_string(), context.to_string());
             // E10/AR5：init 段 JS 同样注入章节/书上下文（legacy evalJS 全量绑定）
             push_js_context(&mut js_vars, vars.as_deref());
-            crate::parser::js::eval_js(&parsed.body, &js_vars).unwrap_or_default()
+            crate::parser::rule::eval_rule_js(&parsed.body, &js_vars, vars.as_deref())
+                .unwrap_or_default()
         }
         _ => apply_depth(r, context, 0, vars)
             .into_iter()
@@ -797,8 +1034,24 @@ fn apply_depth(
             .map(|r| r.join("\n"))
             .unwrap_or_else(|| html.to_string());
         if seg.is_js {
+            // legado splitPutRule/putRule/makeUpRule 对 JS 段同样生效（AnalyzeRule.kt:636
+            // splitPutRule 无条件、713-761 makeUpRule 先于 evalJS）：先分离 @put:{...}
+            // 求值入 vars，再把 @get:{x} 替换为变量值——曾原样进 JS 求值，
+            // `@get:{bid}`/`@put:{k:1}` 均为 JS 语法错误 → eval Err → 整链返回空
+            //（使用该语法的书源目录/正文/搜索全断；本库 rule.rs:544 注释亦预期
+            //  「同章 JS `@get:{src}` 仍可读」）
+            let (code_seg, puts) = split_put(seg.text);
+            if !puts.is_empty() {
+                if let Some(v) = vars.as_deref_mut() {
+                    apply_put_vars(&puts, &input, v, depth);
+                }
+            }
+            let code_seg = match vars.as_deref() {
+                Some(v) => resolve_get(&code_seg, v),
+                None => code_seg,
+            };
             // JS 段：{{...}} 先展开（legado makeUpRule 对 JS 规则同样处理），再以 result 执行
-            let code = expand_inline_depth_checked(seg.text, &input, depth, vars.as_deref_mut()).0;
+            let code = expand_inline_depth_checked(&code_seg, &input, depth, vars.as_deref_mut()).0;
             let mut js_vars = std::collections::HashMap::new();
             js_vars.insert("result".to_string(), input);
             js_vars.insert("key".to_string(), String::new());
@@ -809,7 +1062,7 @@ fn apply_depth(
             js_vars.insert("url".to_string(), String::new());
             // E10/AR5：章节/书上下文绑定（legacy AnalyzeRule evalJS）
             push_js_context(&mut js_vars, vars.as_deref());
-            match crate::parser::js::eval_js(&code, &js_vars) {
+            match eval_rule_js(&code, &js_vars, vars.as_deref()) {
                 Ok(s) => {
                     // 空串结果 → 空列表；下一轮循环检测到空结果即终止整链（AR3）
                     result = Some(if s.is_empty() { vec![] } else { vec![s] });
@@ -846,7 +1099,12 @@ fn apply_single(
 
 /// @put 值求值（legado putRule → getString(value)）：对当前上下文按规则取首个结果；
 /// JSON 上下文允许裸字段名（如 `@put:{bid:bookId}`——legado isJSON 下按 JSONPath 处理）
-pub(crate) fn apply_put_vars(puts: &[(String, String)], html: &str, vars: &mut RuleVars, depth: usize) {
+pub(crate) fn apply_put_vars(
+    puts: &[(String, String)],
+    html: &str,
+    vars: &mut RuleVars,
+    depth: usize,
+) {
     for (k, v) in puts {
         let val = if v.trim().is_empty() {
             String::new()
@@ -940,7 +1198,7 @@ fn apply_rule_inner(
                 js_vars.insert("urlSearch".to_string(), String::new());
                 js_vars.insert("url".to_string(), String::new());
                 push_js_context(&mut js_vars, vars.as_deref());
-                match crate::parser::js::eval_js(&rule.body, &js_vars) {
+                match eval_rule_js(&rule.body, &js_vars, vars.as_deref()) {
                     Ok(s) if !s.is_empty() => vec![s],
                     _ => vec![],
                 }
@@ -1003,7 +1261,9 @@ fn expand_inline_depth_checked(
 /// - `##`：段切分（值可拆出新的规则链）；`{{`：二次模板展开
 /// - `@js:`/`<js>`（任意位置，大小写不敏感）：JS 代码执行标记
 /// - 以 `@` / `//` 开头：规则引用/类型前缀（值被当作规则而非文本）
-fn is_rule_control_value(v: &str) -> bool {
+/// pub(crate)：search.rs 的 URL/字段模板展开器（expand_embedded_impl 等）移植
+/// 同款 P2 防护——两套展开器语义对齐
+pub(crate) fn is_rule_control_value(v: &str) -> bool {
     v.contains("##")
         || v.contains("{{")
         || contains_js_marker(v)
@@ -1048,7 +1308,7 @@ pub(crate) fn inline_js(expr: &str, text: &str, vars: Option<&RuleVars>) -> Stri
     js_vars.insert("page".to_string(), "1".to_string());
     // E10/AR5：{{}} 内嵌 JS 同样绑定章节/书上下文
     push_js_context(&mut js_vars, vars);
-    crate::parser::js::eval_js(expr, &js_vars).unwrap_or_default()
+    eval_rule_js(expr, &js_vars, vars).unwrap_or_default()
 }
 
 /// CSS 选择器执行（legado 链式：<js> 链 + &&/||/%% 组合 + @ 链 + 末段属性）
@@ -2224,6 +2484,7 @@ fn replace_regex_str(result: &str, re_str: &str, replacement: &str, first: bool)
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
@@ -2923,6 +3184,106 @@ mod tests {
         assert!(loaded.book_name.is_none(), "书名上下文不应持久化");
     }
 
+    /// 落库节流状态机：无状态 → 应写；内容相同 → 不写；内容变化但在去抖窗口内 → 不写；
+    /// 过窗口后同内容仍保持、变化则应写（读穿透预登记的时间戳前移不受窗口误伤）
+    #[test]
+    fn test_book_vars_persist_throttle() {
+        clear_book_vars_persist_state();
+        let (ns, src, url) = ("ns-th", "src-th", "https://b.test/throttle");
+        // ① 无状态 → due
+        assert!(book_vars_persist_due(ns, src, url, "{\"a\":1}"));
+        // ② 落库成功登记后：相同 JSON → 不 due（去重）
+        book_vars_persist_mark(ns, src, url, "{\"a\":1}", now_ms());
+        assert!(!book_vars_persist_due(ns, src, url, "{\"a\":1}"));
+        // ③ 内容变化但 30s 窗口内 → 不 due（去抖）
+        assert!(!book_vars_persist_due(ns, src, url, "{\"a\":2}"));
+        // ④ 内容变化且过窗口 → due
+        book_vars_persist_mark(ns, src, url, "{\"a\":1}", now_ms() - 31_000);
+        assert!(book_vars_persist_due(ns, src, url, "{\"a\":2}"));
+        // ⑤ 读穿透式登记（时间戳前移一个完整间隔）→ 紧随其后的变更立即 due
+        book_vars_persist_mark(
+            ns,
+            src,
+            url,
+            "{\"a\":1}",
+            now_ms() - BOOK_VARS_DB_MIN_INTERVAL_MS,
+        );
+        assert!(book_vars_persist_due(ns, src, url, "{\"a\":2}"));
+        clear_book_vars_persist_state();
+    }
+
+    /// 持久化剔除页面级临时键：src（页面原始 HTML）不落库、其他键保留、原内存变量不受影响
+    #[test]
+    fn test_book_vars_persist_strips_src() {
+        let mut vars = RuleVars::new();
+        vars.insert(
+            "src".to_string(),
+            "<html>163KB 的页面源码...</html>".to_string(),
+        );
+        vars.insert("token".to_string(), "abc".to_string());
+        vars.insert("baseUrl".to_string(), "https://b.test/book".to_string());
+        let persisted = strip_transient_vars(&vars);
+        assert!(persisted.get("src").is_none(), "src 不应持久化");
+        assert_eq!(persisted.get("token").map(String::as_str), Some("abc"));
+        assert_eq!(
+            persisted.get("baseUrl").map(String::as_str),
+            Some("https://b.test/book")
+        );
+        // 内存层不受影响（同章 JS @get:{src} 仍可读）
+        assert!(vars.get("src").is_some());
+    }
+
+    /// 同源内容去重：同 (ns, source) 最近落库内容相同 → recent；内容不同 / 命名空间不同 → 不拦
+    #[test]
+    fn test_book_vars_same_source_dedup() {
+        clear_book_vars_persist_state();
+        assert!(
+            !book_vars_source_recent("ns-dedup", "src-a", "{\"baseUrl\":\"https://a\"}"),
+            "无登记时不应拦截"
+        );
+        book_vars_source_mark("ns-dedup", "src-a", "{\"baseUrl\":\"https://a\"}");
+        assert!(
+            book_vars_source_recent("ns-dedup", "src-a", "{\"baseUrl\":\"https://a\"}"),
+            "同源同内容应拦截"
+        );
+        assert!(
+            !book_vars_source_recent("ns-dedup", "src-a", "{\"baseUrl\":\"https://b\"}"),
+            "内容变化不应拦截"
+        );
+        assert!(
+            !book_vars_source_recent("ns-dedup", "src-b", "{\"baseUrl\":\"https://a\"}"),
+            "不同书源不应拦截"
+        );
+        assert!(
+            !book_vars_source_recent("ns-other", "src-a", "{\"baseUrl\":\"https://a\"}"),
+            "不同命名空间不应拦截（P0 隔离）"
+        );
+        clear_book_vars_persist_state();
+    }
+
+    /// canonical JSON：多键 map 两次序列化字符串一致（BTreeMap 键序确定）——
+    /// 写入节流的字符串比较依赖此性质（HashMap 键序随机会按概率失效）
+    #[test]
+    fn test_book_vars_to_json_canonical() {
+        let mut vars = RuleVars::new();
+        for (k, v) in [
+            ("zz", "1"),
+            ("aa", "2"),
+            ("mm", "3"),
+            ("bb", "4"),
+            ("token", "T"),
+        ] {
+            vars.insert(k.to_string(), v.to_string());
+        }
+        let a = book_vars_to_json(&vars).unwrap();
+        let b = book_vars_to_json(&vars).unwrap();
+        assert_eq!(a, b, "同一 map 两次序列化必须一致");
+        assert!(a.starts_with("{\"aa\":"), "键应按字典序: {a}");
+        // 反序列化后往返等价
+        let back = book_vars_from_json(&a).unwrap();
+        assert_eq!(back.map.len(), 5);
+    }
+
     /// E10/AR5：push_js_context 把章节/书上下文以保留键写入 JS 变量表——
     /// 结构体字段（title/url/next/bookName）+ map 透传（baseUrl/src/额外 `__x__` 键）
     #[test]
@@ -3010,6 +3371,55 @@ mod tests {
         // {{}} 内嵌 JS 同样吃到绑定
         let out2 = apply_with_vars("^{{chapter.title}}，(.+)", "第三章，张三", &mut vars);
         assert_eq!(out2, vec!["张三".to_string()]);
+    }
+
+    /// JS 链段 @put/@get 对齐 legado（splitPutRule 无条件 + makeUpRule 先于 evalJS）：
+    /// 段内 `@put:{...}` 分离求值入 vars、`@get:{x}` 替换为变量值——曾原样进 JS
+    /// 求值（`var t = @get:{bid}` 是 JS 语法错误 → eval Err → 整链返回空，
+    /// 使用该语法的书源目录/正文/搜索全断）
+    #[test]
+    fn test_js_segment_put_get_resolved() {
+        // @get 替换后再 eval（变量值为数字字面量——替换后为合法 JS 表达式）
+        let mut vars = RuleVars::new();
+        vars.insert("bid".to_string(), "42".to_string());
+        let out = apply_with_vars("@js:result + @get:{bid}", "<html></html>", &mut vars);
+        assert_eq!(
+            out,
+            vec!["<html></html>42".to_string()],
+            "JS 段内 @get 应先替换为变量值再求值: {out:?}"
+        );
+
+        // @put 分离求值（值按当前上下文规则取值）并写入 vars 供后续段读取
+        let mut vars = RuleVars::new();
+        let out = apply_with_vars(
+            "@js:result + '-J' @put:{nid:$.id}",
+            r#"{"id":"N7"}"#,
+            &mut vars,
+        );
+        assert_eq!(
+            out,
+            vec![r#"{"id":"N7"}-J"#.to_string()],
+            "@put 应分离求值: {out:?}"
+        );
+        assert_eq!(
+            vars.get("nid").map(String::as_str),
+            Some("N7"),
+            "@put 值应写入 vars"
+        );
+
+        // 同链后续段读到 JS 段 @put 写入的变量（@put 段位于完整表达式之后——
+        // 分离后余下代码合法；@get 替换后为合法 JS 表达式——变量值为数字字面量）
+        let mut vars = RuleVars::new();
+        let out = apply_with_vars(
+            "<js>'V-' @put:{k:$.id}</js><js>@get:{k} + '-T'</js>",
+            r#"{"id":7}"#,
+            &mut vars,
+        );
+        assert_eq!(
+            out,
+            vec!["7-T".to_string()],
+            "后续 JS 段应读到前段 @put 的变量: {out:?}"
+        );
     }
 
     /// P1 跨阶段合并：book 级作底、章节级覆盖（legacy book→chapter 单 varMap 回退链）

@@ -57,6 +57,7 @@ import {
 import { relocateChapterIndex } from '@/utils/progressRelocate'
 import { listProfiles, saveProfile, deleteProfile, applyProfile } from '@/utils/readerConfig'
 import { sanitizeHtml } from '@/utils/sanitize'
+import { checkTestRegex } from '@/utils/regexGuard'
 import type { Book, BookChapter, BookInfo, Bookmark, HttpTts, ReplaceRule, SearchBook } from '@/types'
 
 const route = useRoute()
@@ -1793,11 +1794,26 @@ function refreshReplaceRules() {
   replaceRules.value = loadReplaceRules().filter((r) => r.enabled && r.find && r.find.trim().length > 0)
 }
 
-/** 逐条 replaceAll（字面替换，非正则）；空 find 已在上层过滤 */
+/** 逐条替换：isRegex 规则按全局正则（regexGuard 长度防护；非法/超限跳过该条并 console.warn），
+ *  其余字面 replaceAll（非正则）；空 find 已在上层过滤 */
 function applyReplace(text: string): string {
   let out = text
   for (const r of replaceRules.value) {
-    out = out.split(r.find).join(r.replace ?? '')
+    if (r.isRegex) {
+      const guard = checkTestRegex(r.find)
+      if (guard) {
+        console.warn(`替换规则「${r.name}」跳过：${guard}`)
+        continue
+      }
+      try {
+        out = out.replace(new RegExp(r.find, 'g'), r.replace ?? '')
+      } catch (e) {
+        // 非法正则跳过该条（不影响其余规则与正文渲染）
+        console.warn(`替换规则「${r.name}」正则无效，已跳过：`, e)
+      }
+    } else {
+      out = out.split(r.find).join(r.replace ?? '')
+    }
   }
   return out
 }
@@ -1822,6 +1838,13 @@ const TTS_HTTP_NAME_KEY = 'reader_tts_http_name'
 
 type TtsState = 'idle' | 'loading' | 'playing' | 'paused'
 const ttsState = ref<TtsState>('idle')
+let ttsVisibilityBound = false
+function onTtsVisibilityChange(): void {
+  const a = ttsAudioRef.value
+  if (document.visibilityState === 'visible' && ttsState.value === 'playing' && a && a.paused && a.src) {
+    void a.play().catch(() => {})
+  }
+}
 const ttsPanelOpen = ref(false)
 const ttsVoices = ref<TtsVoice[]>([])
 const ttsVoicesLoaded = ref(false)
@@ -2017,17 +2040,13 @@ async function startTts() {
   audio.pause()
   audio.src = url
   ttsState.value = 'playing'
-  // 后台标签页被浏览器暂停时，切回自动恢复（防"听书几分钟后中断"）
-  document.addEventListener(
-    'visibilitychange',
-    () => {
-      const a = ttsAudioRef.value
-      if (document.visibilityState === 'visible' && ttsState.value === 'playing' && a && a.paused && a.src) {
-        void a.play().catch(() => {})
-      }
-    },
-    { once: true },
-  )
+  // 后台标签页被浏览器暂停时，切回自动恢复（防"听书几分钟后中断"）。
+  // 单例监听（#15）：曾用 { once: true }——首次触发是切后台（hidden）即被消耗，
+  // 回前台不会 resume 且连播每章累积 pending 监听
+  if (!ttsVisibilityBound) {
+    ttsVisibilityBound = true
+    document.addEventListener('visibilitychange', onTtsVisibilityChange)
+  }
   try {
     await audio.play()
     startTtsParaTracking()
@@ -2049,6 +2068,10 @@ function stopTts() {
   ttsState.value = 'idle'
   stopTtsParaTracking()
   clearTtsStopTimer()
+  if (ttsVisibilityBound) {
+    ttsVisibilityBound = false
+    document.removeEventListener('visibilitychange', onTtsVisibilityChange)
+  }
   const audio = ttsAudioRef.value
   if (audio) {
     audio.pause()
@@ -3031,8 +3054,12 @@ async function applyRestoreScroll() {
 
 /* ---------------- 正文加载 ---------------- */
 
+/** 正文请求序号：切章/长按快进时自增，慢响应晚归直接弃（防覆盖新章内容/滚动位置） */
+let contentLoadSeq = 0
+
 async function loadContent(chapterUrl: string) {
   if (!shelfBook.value?.origin) return
+  const seq = ++contentLoadSeq
   loading.value = true
   loadError.value = false
   content.value = ''
@@ -3049,11 +3076,13 @@ async function loadContent(chapterUrl: string) {
         { timeout: chapterTimeout.value * 1000 },
         1,
       )
+      if (seq !== contentLoadSeq) return
       chapterHtml.value = res.data?.content ?? ''
     } else {
       // 本机缓存优先；未命中再走服务器缓存/书源（getBookContent 命中服务器缓存，未命中自动抓取并写回）
       // B4：携带 bookUrl——服务端按书键写正文缓存（legacy 语义；epubContent 模式不带，防 HTML 污染纯文本缓存）
       const local = await getLocalChapter(bookUrl.value, chapterUrl)
+      if (seq !== contentLoadSeq) return
       text = local?.content ?? ''
       // D2：EPUB 书在 HTML 模式编辑保存过 → 本机缓存是 HTML——纯文本模式读取时
       // 按 chapterPlainText 剥离标签降级（防模式互串出满屏标签）
@@ -3066,6 +3095,7 @@ async function loadContent(chapterUrl: string) {
           timeout: chapterTimeout.value * 1000,
           bookUrl: bookUrl.value,
         })
+        if (seq !== contentLoadSeq) return
         text = res.data?.content ?? ''
         if (typeof res.data?.chapterWordCount === 'number') {
           fetchedWordCount = res.data.chapterWordCount
@@ -3095,14 +3125,17 @@ async function loadContent(chapterUrl: string) {
       void startTts()
     }
   } catch {
+    if (seq !== contentLoadSeq) return
     ttsAutoNext = false
     loadError.value = true
     return
   } finally {
-    loading.value = false
+    // 仅最新请求管理 loading：旧请求晚归零会提前掐掉新章的加载态
+    if (seq === contentLoadSeq) loading.value = false
   }
   // 等正文真正渲染（loading 置 false 后）再滚动，避免被加载态高度钳制
   await nextTick()
+  if (seq !== contentLoadSeq) return
   if (isFlipMode()) measureFlipColumns()
   if (restoreParagraphIdx != null) {
     await applyRestoreParagraph()
@@ -4208,6 +4241,16 @@ onBeforeUnmount(() => {
   // 屏幕常亮：离开阅读页释放
   document.removeEventListener('visibilitychange', onWakeVisibilityChange)
   void releaseWakeLock()
+  // 泄漏修复三件套：
+  // ① autoThemeTimer 曾只在开关回调里清——离开页面后定时器永久存活并翻动全局主题
+  if (autoThemeTimer !== undefined) {
+    window.clearInterval(autoThemeTimer)
+    autoThemeTimer = undefined
+  }
+  // ② 换源面板打开时离开曾把 body overflow:hidden 永久留下（全局滚动锁死）
+  document.body.style.overflow = ''
+  // ③ 换源 SSE 未完成时离开——abort 流（曾在面板关闭/刷新才处理）
+  forceCloseSource()
   // 非文本书：暂停媒体 + 销毁 hls.js 实例
   mediaAudioRef.value?.pause()
   videoElRef.value?.pause()

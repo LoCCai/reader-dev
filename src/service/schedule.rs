@@ -7,6 +7,7 @@
 //! - `refresh_source_sub_core`：订阅抓取核心（saveSourceSub/refreshSourceSub 与定时任务共用）
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -20,8 +21,74 @@ const SUB_REFRESH_INTERVAL: Duration = Duration::from_secs(6 * 3600);
 const RSS_REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
 /// 自动备份保留份数（最近 7 份）
 const AUTO_BACKUP_KEEP: usize = 7;
+
+/// book_vars_cache 定期清理参数：超 14 天未更新的行删除 + 总行数裁到 20 万以内
+/// （20 万 × ~7KB/行 ≈ 最坏 1.4GB——有界；配合 parser 层写入节流双保险）
+const BOOK_VARS_PRUNE_MAX_ROWS: usize = 200_000;
+const BOOK_VARS_PRUNE_TTL: Duration = Duration::from_secs(14 * 24 * 3600);
+/// js_cache 清理参数：过期行物理删除 + 全局按 rowid 保留最新 2 万行
+/// （表无时间戳列；写侧另有 256KB 单值上限）
+const JS_CACHE_PRUNE_MAX_ROWS: usize = 20_000;
+/// 换源候选 TTL：30 天未更新删除（行内容为全源搜索结果 JSON，几十 KB/行）
+const BOOK_CANDIDATES_PRUNE_TTL: Duration = Duration::from_secs(30 * 24 * 3600);
+
+/// 缓存表统一清理（book_vars_cache + js_cache + book_source_candidates）
+/// + users.token_map 过期会话清理（原先清理只发生在该用户下一次成功登录时，
+/// 整体判定过期的用户不再登录则死会话无限期留存）。
+/// 启动时与每小时各跑一次（每日一次赶不上 ~5千行/分钟的写入洪流——实测 9h 54.8 万行）。
+pub async fn run_cache_prune(storage: &Storage) {
+    match storage
+        .prune_book_vars_cache(BOOK_VARS_PRUNE_MAX_ROWS, BOOK_VARS_PRUNE_TTL)
+        .await
+    {
+        Ok((ttl, over)) if ttl + over > 0 => {
+            tracing::info!("book_vars_cache 清理：TTL 过期 {ttl} 行，超限裁剪 {over} 行")
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("book_vars_cache 清理失败: {e:#}"),
+    }
+    match storage.prune_js_cache(JS_CACHE_PRUNE_MAX_ROWS).await {
+        Ok((expired, over)) if expired + over > 0 => {
+            tracing::info!("js_cache 清理：过期 {expired} 行，超限裁剪 {over} 行")
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("js_cache 清理失败: {e:#}"),
+    }
+    match storage
+        .prune_book_candidates(BOOK_CANDIDATES_PRUNE_TTL)
+        .await
+    {
+        Ok(n) if n > 0 => tracing::info!("book_source_candidates 清理：TTL 过期 {n} 行"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("book_source_candidates 清理失败: {e:#}"),
+    }
+    match storage
+        .prune_expired_user_tokens(chrono::Utc::now().timestamp_millis())
+        .await
+    {
+        Ok(n) if n > 0 => tracing::info!("过期会话 token 清理：{n} 条"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("过期会话 token 清理失败: {e:#}"),
+    }
+}
 /// 订阅抓取超时（秒）——远程书源 JSON 常达数百 KB（如 yckceo 7595 实测 >15s）
 const SUB_FETCH_TIMEOUT_SECS: u64 = 45;
+
+/// 单阶段 panic 隔离：阶段 future 放独立 spawn 执行——panic 只终止该阶段任务，
+/// JoinError 记错误日志后返回 None，调度循环存活继续下一 tick。
+/// （此前任一阶段 panic 会把整个循环 spawn 任务打掉，定时任务自此静默停摆）
+async fn run_stage_isolated<T: Send + 'static>(
+    name: &str,
+    stage: impl Future<Output = T> + Send + 'static,
+) -> Option<T> {
+    match tokio::spawn(stage).await {
+        Ok(r) => Some(r),
+        Err(e) => {
+            tracing::error!("定时任务阶段 {name} panic: {e}");
+            None
+        }
+    }
+}
 
 /// 启动定时任务（书架更新 + 订阅/RSS 自动刷新；在 lib.rs serve 时调用一次）
 pub fn spawn_schedule_jobs(storage: Storage) {
@@ -33,23 +100,41 @@ pub fn spawn_schedule_jobs(storage: Storage) {
         loop {
             interval.tick().await;
             // ① 书架更新（原有 F-35：can_update=1 的书回写最新章节/总数）
-            match crate::storage::run_shelf_update(&storage).await {
-                Ok(n) => tracing::info!("书架更新检查完成：更新 {n} 本"),
-                Err(e) => tracing::warn!("书架更新检查失败: {e:#}"),
+            let st = storage.clone();
+            match run_stage_isolated("书架更新", async move {
+                crate::storage::run_shelf_update(&st).await
+            })
+            .await
+            {
+                Some(Ok(n)) => tracing::info!("书架更新检查完成：更新 {n} 本"),
+                Some(Err(e)) => tracing::warn!("书架更新检查失败: {e:#}"),
+                None => {} // panic 已记日志，循环存活
             }
             // ② 订阅源自动刷新（每 6 小时，节流）
             if last_sub.elapsed() >= SUB_REFRESH_INTERVAL {
-                match run_source_sub_refresh(&storage).await {
-                    Ok(n) => tracing::info!("订阅源自动刷新完成：{n} 个订阅"),
-                    Err(e) => tracing::warn!("订阅源自动刷新失败: {e:#}"),
+                let st = storage.clone();
+                match run_stage_isolated("订阅源刷新", async move {
+                    run_source_sub_refresh(&st).await
+                })
+                .await
+                {
+                    Some(Ok(n)) => tracing::info!("订阅源自动刷新完成：{n} 个订阅"),
+                    Some(Err(e)) => tracing::warn!("订阅源自动刷新失败: {e:#}"),
+                    None => {}
                 }
                 last_sub = std::time::Instant::now();
             }
             // ③ RSS 源自动刷新（每 30 分钟，节流）
             if last_rss.elapsed() >= RSS_REFRESH_INTERVAL {
-                match run_rss_refresh(&storage).await {
-                    Ok(n) => tracing::info!("RSS 源自动刷新完成：{n} 个源"),
-                    Err(e) => tracing::warn!("RSS 源自动刷新失败: {e:#}"),
+                let st = storage.clone();
+                match run_stage_isolated("RSS 刷新", async move {
+                    run_rss_refresh(&st).await
+                })
+                .await
+                {
+                    Some(Ok(n)) => tracing::info!("RSS 源自动刷新完成：{n} 个源"),
+                    Some(Err(e)) => tracing::warn!("RSS 源自动刷新失败: {e:#}"),
+                    None => {}
                 }
                 last_rss = std::time::Instant::now();
             }
@@ -79,8 +164,16 @@ pub fn spawn_auto_backup_job(storage: Storage) {
         let mut interval = tokio::time::interval(Duration::from_secs(10 * 60));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut last_date: Option<chrono::NaiveDate> = None;
+        let mut tick_count: u64 = 0;
         loop {
             interval.tick().await;
+            tick_count += 1;
+            // 每小时第一个 tick 跑缓存清理（backup 循环复用同一 spawn——无需独立任务）
+            if tick_count % 6 == 1 {
+                let st = storage.clone();
+                let _ =
+                    run_stage_isolated("缓存清理", async move { run_cache_prune(&st).await }).await;
+            }
             let now = chrono::Local::now();
             if now.hour() as i64 != hour {
                 continue;
@@ -88,13 +181,37 @@ pub fn spawn_auto_backup_job(storage: Storage) {
             if last_date == Some(now.date_naive()) {
                 continue; // 当天已备份
             }
-            match run_auto_backup(&storage).await {
-                Ok(n) => {
+            let st = storage.clone();
+            match run_stage_isolated("自动备份", async move { run_auto_backup(&st).await }).await {
+                Some(Ok(n)) => {
                     tracing::info!("自动备份完成：{} 个命名空间", n);
                     last_date = Some(now.date_naive());
                 }
-                Err(e) => tracing::warn!("自动备份失败: {e:#}"),
+                Some(Err(e)) => tracing::warn!("自动备份失败: {e:#}"),
+                None => {} // panic 已记日志，last_date 不置位 → 下一 tick 重试
             }
+            // 每日全库快照（GAP 148 补位——此前仅启动时备份一次，长运行进程库损坏
+            // 时无近期快照可回滚；backup_reader_db 自带 mtime 守卫，库未变化则跳过）
+            let dir = storage.config.storage_dir();
+            if let Some(r) = run_stage_isolated("每日数据库备份", async move {
+                crate::util::db_backup::backup_reader_db(&dir).await
+            })
+            .await
+            {
+                match r {
+                    Ok(Some(p)) => tracing::info!("每日数据库备份: {}", p.display()),
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!("每日数据库备份失败: {e:#}"),
+                }
+            }
+            // bot 导出文件清理（>3 天）——每日定时（此前挂在下载任务上，无人下载则永不清）
+            crate::api::bot::sweep_export_files(&storage.config.storage_dir());
+            // toc_cache / book_chapters / rss_articles 每日清理（READER_CACHE_TTL_DAYS）
+            let st = storage.clone();
+            let _ = run_stage_isolated("缓存表清理", async move {
+                run_cache_table_cleanup(&st).await
+            })
+            .await;
         }
     });
 }
@@ -131,6 +248,45 @@ pub async fn run_auto_backup(storage: &Storage) -> Result<usize> {
         storage.prune_auto_backups(&ns, AUTO_BACKUP_KEEP);
     }
     Ok(done)
+}
+
+/// 缓存表 TTL（天）：env `READER_CACHE_TTL_DAYS`（默认 30；非法/越界回退默认）
+fn cache_ttl_days() -> i64 {
+    let raw = std::env::var("READER_CACHE_TTL_DAYS").unwrap_or_default();
+    if raw.trim().is_empty() {
+        return 30;
+    }
+    match raw.trim().parse::<i64>() {
+        Ok(d) if (1..=3650).contains(&d) => d,
+        _ => {
+            tracing::warn!("READER_CACHE_TTL_DAYS 非法（{raw}），使用默认 30");
+            30
+        }
+    }
+}
+
+/// toc_cache / book_chapters / rss_articles 每日清理（READER_CACHE_TTL_DAYS，默认 30 天）：
+/// - toc_cache：TTL 外且书不在书架的行（书架书目录缓存不动）；
+/// - book_chapters：书不在书架的孤儿行（表无时间戳列，孤儿即判据）；
+/// - rss_articles：time 早于 TTL 的行（time=0 缺失时间不清——保守）。
+/// 各表删除前行数先 tracing::info（首次上线保守——日志可核对删除规模）。
+pub async fn run_cache_table_cleanup(storage: &Storage) {
+    let ttl = Duration::from_secs(cache_ttl_days() as u64 * 24 * 3600);
+    match storage.prune_toc_cache(ttl).await {
+        Ok(n) if n > 0 => tracing::info!("toc_cache 清理完成：删除 {n} 行"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("toc_cache 清理失败: {e:#}"),
+    }
+    match storage.prune_orphan_book_chapters().await {
+        Ok(n) if n > 0 => tracing::info!("book_chapters 清理完成：删除 {n} 行"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("book_chapters 清理失败: {e:#}"),
+    }
+    match storage.prune_rss_articles(ttl).await {
+        Ok(n) if n > 0 => tracing::info!("rss_articles 清理完成：删除 {n} 行"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("rss_articles 清理失败: {e:#}"),
+    }
 }
 
 /// 订阅源定时刷新（GAP #101）：各命名空间订阅重新拉取并覆盖书源。
@@ -524,6 +680,105 @@ mod tests {
         storage.config.secure = true;
         let nss = storage.schedule_namespaces().await;
         assert!(nss.contains(&"alice".to_string()));
+        cleanup(storage, dir).await;
+    }
+
+    /// 单阶段 panic 隔离：panic 被捕获为 None（记日志），不向调用方传播——
+    /// 调度循环不会因单阶段 panic 死亡
+    #[tokio::test]
+    async fn test_run_stage_isolated_contains_panic() {
+        let r: Option<()> = run_stage_isolated("panic阶段", async { panic!("boom") }).await;
+        assert!(r.is_none(), "panic 应被隔离为 None 而非传播");
+        // 正常阶段输出透传；阶段内 Err 也只透传不 panic
+        let r = run_stage_isolated("ok阶段", async { Ok::<usize, anyhow::Error>(3) }).await;
+        assert_eq!(r.unwrap().unwrap(), 3);
+        let r = run_stage_isolated("err阶段", async { Err::<usize, anyhow::Error>(anyhow!("x")) }).await;
+        assert!(r.unwrap().is_err());
+    }
+
+    /// 三缓存表清理：书架书保留、TTL/孤儿规则命中删除
+    #[tokio::test]
+    async fn test_prune_content_caches_respects_shelf_and_ttl() {
+        let (storage, dir) = test_storage("cacheclean").await;
+        let now = chrono::Utc::now().timestamp_millis();
+        let old = now - 40 * 24 * 3600 * 1000; // 40 天前（TTL 30 天外）
+        // 书架书一本
+        sqlx::query("INSERT INTO books (book_url, user_namespace, name) VALUES ('https://shelf.ed/b', 'default', '在架书')")
+            .execute(&storage.pool)
+            .await
+            .unwrap();
+
+        // toc_cache：在架过期行保留 / 孤儿过期行删除 / 孤儿新鲜行保留
+        for (bu, tu, ts) in [
+            ("https://shelf.ed/b", "https://shelf.ed/toc", old),
+            ("https://gone.ed/b", "https://gone.ed/toc", old),
+            ("https://fresh.ed/b", "https://fresh.ed/toc", now),
+        ] {
+            sqlx::query(
+                "INSERT INTO toc_cache (book_url, toc_url, chapters_json, updated_at, user_namespace) VALUES (?1, ?2, '[]', ?3, 'default')",
+            )
+            .bind(bu)
+            .bind(tu)
+            .bind(ts)
+            .execute(&storage.pool)
+            .await
+            .unwrap();
+        }
+        // 书架书的第二写形态：book_url 列存 tocUrl、toc_url 列存 bookUrl——同样保留
+        sqlx::query(
+            "INSERT INTO toc_cache (book_url, toc_url, chapters_json, updated_at, user_namespace) VALUES ('https://shelf.ed/toc', 'https://shelf.ed/b', '[]', ?1, 'default')",
+        )
+        .bind(old)
+        .execute(&storage.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            storage
+                .prune_toc_cache(Duration::from_secs(30 * 24 * 3600))
+                .await
+                .unwrap(),
+            1,
+            "只删孤儿过期行（gone.ed）"
+        );
+
+        // book_chapters：在架书行保留 / 孤儿行删除
+        for bu in ["https://shelf.ed/b", "https://gone.ed/b"] {
+            sqlx::query(
+                "INSERT INTO book_chapters (book_url, chapter_index, title, content, user_namespace) VALUES (?1, 0, 't', 'c', 'default')",
+            )
+            .bind(bu)
+            .execute(&storage.pool)
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            storage.prune_orphan_book_chapters().await.unwrap(),
+            1,
+            "只删不在书架的孤儿行"
+        );
+
+        // rss_articles：过期行删除 / 新鲜行与 time=0 行保留
+        for (u, t) in [("https://r.e/old", old), ("https://r.e/new", now), ("https://r.e/zero", 0)] {
+            sqlx::query(
+                "INSERT INTO rss_articles (url, time, user_namespace) VALUES (?1, ?2, 'default')",
+            )
+            .bind(u)
+            .bind(t)
+            .execute(&storage.pool)
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            storage
+                .prune_rss_articles(Duration::from_secs(30 * 24 * 3600))
+                .await
+                .unwrap(),
+            1,
+            "只删 TTL 外文章（time=0 不清）"
+        );
+
+        // run_cache_table_cleanup 全链路可跑（TTL env 默认 30 天——上面已删过，幂等为 0）
+        run_cache_table_cleanup(&storage).await;
         cleanup(storage, dir).await;
     }
 }

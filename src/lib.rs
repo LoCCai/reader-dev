@@ -135,11 +135,17 @@ impl AppConfig {
         service::schedule::spawn_schedule_jobs(storage.clone());
         // GAP #57 自动备份（每天 READER_AUTO_BACKUP_HOUR 03:00 默认）
         service::schedule::spawn_auto_backup_job(storage.clone());
+        // P0 缓存清理：启动即跑一次（重启可能错过整点 tick；崩溃循环期间积累的
+        // 洪水行第一时间回收——book_vars/js_cache/candidates 三表）
+        service::schedule::run_cache_prune(&storage).await;
         let app = api::router(self.clone(), storage);
         // GAP 60：静态资源 Cache-Control（hash 文件名 30 天 / index.html no-cache）。
         // 挂载点说明：router.rs 被并行修改（git status 未提交改动）——避免冲突，
         // 在 app 构造处（lib.rs serve()，main.rs 无 app 构造代码）挂载，效果等同 router 内层。
         let app = app.layer(crate::middleware::cache_control::CacheControlLayer);
+        // LOW-9：HTML/JSON 响应安全头（X-Content-Type-Options: nosniff /
+        // X-Frame-Options: SAMEORIGIN——按 Content-Type 判定，其余类型不动）
+        let app = app.layer(crate::middleware::security_headers::SecurityHeadersLayer);
         // GAP 60 备注（实测确认）：router.rs 内的 CompressionLayer 只覆盖其调用前注册的路由
         // （/assets、/health 等）——fallback 静态资源（web-ui/dist）与后注册的 /reader3、/opds
         // 路由未覆盖（axum Router::layer 只包装调用时已注册的路由）。此处外层再挂一层兜底：

@@ -798,7 +798,9 @@ mod tests {
                 for j in 0..6usize {
                     // 24 键 × 6 轮 = 144 个不同 URL，远超容量 → 持续驱逐
                     let url = format!("{base}?v={j}");
-                    let _ = cache.get_or_fetch("default", &url, None, 10, 64 * 1024).await;
+                    let _ = cache
+                        .get_or_fetch("default", &url, None, 10, 64 * 1024)
+                        .await;
                 }
             }));
         }
@@ -817,11 +819,7 @@ mod tests {
             .map(|rd| {
                 rd.flatten()
                     .filter(|e| e.path().is_file())
-                    .filter(|e| {
-                        e.file_name()
-                            .to_string_lossy()
-                            .ends_with(".png")
-                    })
+                    .filter(|e| e.file_name().to_string_lossy().ends_with(".png"))
                     .count()
             })
             .unwrap_or(0);

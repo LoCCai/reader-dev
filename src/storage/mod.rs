@@ -550,6 +550,13 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
     )
     .execute(&pool)
     .await?;
+    // get_toc_cache 按 (user_namespace, toc_url) 查询——表主键是 (book_url, ns)，
+    // 无索引则全表扫（随书数线性恶化）
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_toc_cache_toc ON toc_cache (user_namespace, toc_url)",
+    )
+    .execute(&pool)
+    .await?;
 
     // 书签（任务规格：PRIMARY KEY (book_url, title)）
     sqlx::query(
@@ -1322,6 +1329,133 @@ impl Storage {
         Ok(())
     }
 
+    /// book_vars_cache 定期清理（配合 parser 层写入节流的兜底上限）：
+    /// ① 删除 `ttl` 时间内未更新的行；② 再按 updated_at 从新到旧保留 `max_rows` 行、删除其余。
+    /// 返回 (TTL 过期删除数, 超限裁剪数)。
+    pub async fn prune_book_vars_cache(
+        &self,
+        max_rows: usize,
+        ttl: std::time::Duration,
+    ) -> Result<(u64, u64)> {
+        let cutoff = chrono::Utc::now().timestamp_millis() - ttl.as_millis() as i64;
+        let expired = sqlx::query("DELETE FROM book_vars_cache WHERE updated_at < ?1")
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        // LIMIT -1 OFFSET n = 跳过最新的 n 行、删除其余（SQLite 特有写法）
+        let overflow = sqlx::query(
+            "DELETE FROM book_vars_cache WHERE rowid IN \
+             (SELECT rowid FROM book_vars_cache ORDER BY updated_at DESC LIMIT -1 OFFSET ?1)",
+        )
+        .bind(max_rows as i64)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok((expired, overflow))
+    }
+
+    /// js_cache 定期清理：① 物理删除已过期行（expiry>0 且已过期——此前过期行永久留存）；
+    /// ② 全局按 rowid 保留最新 `max_rows` 行（表无时间戳列，REPLACE 会刷新 rowid，
+    /// 近似"最近使用"）。返回 (过期删除数, 超限裁剪数)。
+    pub async fn prune_js_cache(&self, max_rows: usize) -> Result<(u64, u64)> {
+        let now = chrono::Utc::now().timestamp_millis();
+        let expired = sqlx::query("DELETE FROM js_cache WHERE expiry > 0 AND expiry < ?1")
+            .bind(now)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        let overflow = sqlx::query(
+            "DELETE FROM js_cache WHERE rowid NOT IN \
+             (SELECT rowid FROM js_cache ORDER BY rowid DESC LIMIT ?1)",
+        )
+        .bind(max_rows as i64)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok((expired, overflow))
+    }
+
+    /// book_source_candidates 定期清理：删除 `ttl` 时间未更新的换源候选行
+    /// （行内容为全源搜索结果 JSON，几十 KB/行——无 TTL 会慢性膨胀）。返回删除数。
+    pub async fn prune_book_candidates(&self, ttl: std::time::Duration) -> Result<u64> {
+        let cutoff = chrono::Utc::now().timestamp_millis() - ttl.as_millis() as i64;
+        let n = sqlx::query("DELETE FROM book_source_candidates WHERE updated_at < ?1")
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        Ok(n)
+    }
+
+    /// toc_cache 定期清理：删除 `ttl` 前更新且书已不在书架的行。
+    /// 书架判定同时匹配 books.book_url / books.toc_url 与行的两列——cache_toc 写入
+    /// 形态不一（book_url 列可能存 tocUrl），四组合保守取交集外才删。
+    /// 删除前 tracing::info 记录将删行数（首次上线保守核对）。返回删除数。
+    pub async fn prune_toc_cache(&self, ttl: std::time::Duration) -> Result<u64> {
+        let cutoff = chrono::Utc::now().timestamp_millis() - ttl.as_millis() as i64;
+        let where_sql = "updated_at < ?1 AND NOT EXISTS (\
+             SELECT 1 FROM books b WHERE b.user_namespace = toc_cache.user_namespace \
+             AND (b.book_url = toc_cache.book_url OR b.book_url = toc_cache.toc_url \
+             OR b.toc_url = toc_cache.book_url OR b.toc_url = toc_cache.toc_url))";
+        let n: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM toc_cache WHERE {where_sql}"))
+            .bind(cutoff)
+            .fetch_one(&self.pool)
+            .await?;
+        if n > 0 {
+            tracing::info!("toc_cache 清理：将删除 {n} 行（TTL 外且书不在书架）");
+        }
+        let deleted = sqlx::query(&format!("DELETE FROM toc_cache WHERE {where_sql}"))
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        Ok(deleted)
+    }
+
+    /// book_chapters 孤儿清理：删除书已不在书架的正文缓存行（表无时间戳列，
+    /// 孤儿即判据——书架书的章节缓存是服务端缓存功能本体，不动）。
+    /// 删除前 tracing::info 记录将删行数。返回删除数。
+    pub async fn prune_orphan_book_chapters(&self) -> Result<u64> {
+        let where_sql =
+            "NOT EXISTS (SELECT 1 FROM books b WHERE b.user_namespace = book_chapters.user_namespace \
+             AND b.book_url = book_chapters.book_url)";
+        let n: i64 =
+            sqlx::query_scalar(&format!("SELECT COUNT(*) FROM book_chapters WHERE {where_sql}"))
+                .fetch_one(&self.pool)
+                .await?;
+        if n > 0 {
+            tracing::info!("book_chapters 清理：将删除 {n} 行（书不在书架的孤儿缓存）");
+        }
+        let deleted = sqlx::query(&format!("DELETE FROM book_chapters WHERE {where_sql}"))
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        Ok(deleted)
+    }
+
+    /// rss_articles 定期清理：删除 `ttl` 前的文章行（time 为发布时间毫秒；
+    /// time=0 缺失时间的行不清——保守）。删除前 tracing::info 记录将删行数。
+    pub async fn prune_rss_articles(&self, ttl: std::time::Duration) -> Result<u64> {
+        let cutoff = chrono::Utc::now().timestamp_millis() - ttl.as_millis() as i64;
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM rss_articles WHERE time > 0 AND time < ?1",
+        )
+        .bind(cutoff)
+        .fetch_one(&self.pool)
+        .await?;
+        if n > 0 {
+            tracing::info!("rss_articles 清理：将删除 {n} 行（TTL 外文章）");
+        }
+        let deleted =
+            sqlx::query("DELETE FROM rss_articles WHERE time > 0 AND time < ?1")
+                .bind(cutoff)
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
+        Ok(deleted)
+    }
+
     /// 启动加载：全部未过期条目 (user_namespace, key, value, expiry)
     pub async fn load_js_cache(&self) -> Result<Vec<(String, String, String, i64)>> {
         let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
@@ -1790,9 +1924,12 @@ impl Storage {
     }
 
     /// 全书搜索：book_chapters 正文 LIKE 匹配（key 中 %/_ 转义为字面量），按章节序返回
-    /// 命中章节（chapterIndex/title/snippet——命中段落前后截取），最多 limit 条
+    /// 命中章节（chapterIndex/title/snippet——命中段落前后截取），最多 limit 条。
+    /// 按 user_namespace 隔离（同表 get_chapter_content/count_chapters 同规格）——
+    /// 跨 ns 同 book_url 的缓存/编辑行（含他人 saveBookContent 改写正文）不得读出
     pub async fn search_book_content(
         &self,
+        ns: &str,
         book_url: &str,
         key: &str,
         limit: i64,
@@ -1803,9 +1940,10 @@ impl Storage {
             .replace('_', "\\_");
         let pattern = format!("%{escaped}%");
         let rows = sqlx::query_as::<_, (i64, String, String)>(
-            "SELECT chapter_index, title, content FROM book_chapters             WHERE book_url = ?1 AND content LIKE ?2 ESCAPE '\\'             ORDER BY chapter_index LIMIT ?3",
+            "SELECT chapter_index, title, content FROM book_chapters             WHERE book_url = ?1 AND user_namespace = ?2 AND content LIKE ?3 ESCAPE '\\'             ORDER BY chapter_index LIMIT ?4",
         )
         .bind(book_url)
+        .bind(ns)
         .bind(&pattern)
         .bind(limit)
         .fetch_all(&self.pool)
@@ -2184,7 +2322,8 @@ impl Storage {
         .execute(&mut *tx)
         .await?;
         sqlx::query(
-            "DELETE FROM toc_cache WHERE book_url = ?1              AND book_url IN (SELECT book_url FROM books WHERE user_namespace = ?2)",
+            // 键错配修复：写入行 book_url 列实为 tocUrl（getBookToc 写法）——两侧都匹配
+            "DELETE FROM toc_cache WHERE (book_url = ?1 OR toc_url = ?1)              AND user_namespace = ?2",
         )
         .bind(book_url)
         .bind(ns)
@@ -2204,7 +2343,7 @@ impl Storage {
 
     /// GAP 117：封面文件残留清理——cover_url 形如 /assets/{ns}/covers/{file}，
     /// 且删除后无其他书引用同一路径时删除文件（最佳努力，失败仅告警）
-    async fn cleanup_orphan_cover(&self, ns: &str, cover_url: Option<&str>) {
+    pub(crate) async fn cleanup_orphan_cover(&self, ns: &str, cover_url: Option<&str>) {
         let Some(cover_url) = cover_url else { return };
         let Some(file) = cover_file_name(ns, cover_url) else {
             return;
@@ -2292,7 +2431,7 @@ impl Storage {
             .execute(&mut *tx)
             .await?;
             sqlx::query(
-                "DELETE FROM toc_cache WHERE book_url = ?1                  AND book_url IN (SELECT book_url FROM books WHERE user_namespace = ?2)",
+                "DELETE FROM toc_cache WHERE (book_url = ?1 OR toc_url = ?1)                  AND user_namespace = ?2",
             )
             .bind(old_url)
             .bind(ns)
@@ -2527,8 +2666,11 @@ impl Storage {
         max_age_ms: i64,
     ) -> Result<Option<String>> {
         let cutoff = chrono::Utc::now().timestamp_millis() - max_age_ms;
+        // OR 反查：getBookToc 写缓存时 book_url 列存的是 toc_url（书源书 tocUrl≠bookUrl 占多数），
+        // 而进度反查/JS 上下文/越界校验等 4 个调用点传的是 book_url——只按 toc_url 列过滤
+        // 时这些调用全部 miss（实测 39/92 本在架书受影响）
         let r: Option<(String,)> = sqlx::query_as(
-            "SELECT chapters_json FROM toc_cache WHERE toc_url = ?1 AND updated_at >= ?2 AND user_namespace = ?3",
+            "SELECT chapters_json FROM toc_cache WHERE (toc_url = ?1 OR book_url = ?1) AND updated_at >= ?2 AND user_namespace = ?3",
         )
         .bind(toc_url)
         .bind(cutoff)
@@ -2653,8 +2795,115 @@ impl Storage {
 
     /// 多分组设置（legacy saveBookGroupId 位掩码语义）：group_ids 存 JSON 数组，
     /// group_name 同步为首个分组（兼容旧前端/排序）。自动过滤不属于该命名空间的分组 id。
+    /// BEGIN IMMEDIATE 事务（与 mutate_user_tokens 同款——deferred BEGIN 并发升级
+    /// 写锁会 BUSY_SNAPSHOT，busy_timeout 不重试；先取写锁再读防并发冲突）。
     pub async fn set_book_groups(&self, ns: &str, book_url: &str, ids: &[i64]) -> Result<u64> {
-        let valid = self.valid_group_ids(ns, ids).await?;
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        match Self::set_book_groups_tx(&mut conn, ns, book_url, ids).await {
+            Ok(n) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                Ok(n)
+            }
+            Err(e) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                Err(e)
+            }
+        }
+    }
+
+    /// 往书籍追加一个分组（幂等）；返回受影响行数。
+    /// BEGIN IMMEDIATE 事务内读-改-写（照 mutate_user_tokens 模式——原先读快照与
+    /// UPDATE 跨两个连接，并发 add/remove 同一本书会互相覆盖丢分组）。
+    pub async fn add_book_group(&self, ns: &str, book_url: &str, group_id: i64) -> Result<u64> {
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        let inner = async {
+            let mut ids = Self::book_group_ids(&mut conn, ns, book_url).await?;
+            if ids.contains(&group_id) {
+                return Ok(0);
+            }
+            ids.push(group_id);
+            Self::set_book_groups_tx(&mut conn, ns, book_url, &ids).await
+        };
+        match inner.await {
+            Ok(n) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                Ok(n)
+            }
+            Err(e) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                Err(e)
+            }
+        }
+    }
+
+    /// 从书籍移除一个分组（group_ids 去除；group_name 若为该分组则改为剩余首项/0）；
+    /// 返回受影响行数。BEGIN IMMEDIATE 事务内读-改-写（同 add_book_group）。
+    pub async fn remove_book_group(&self, ns: &str, book_url: &str, group_id: i64) -> Result<u64> {
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        let inner = async {
+            let mut ids = Self::book_group_ids(&mut conn, ns, book_url).await?;
+            let before = ids.len();
+            ids.retain(|id| *id != group_id);
+            if ids.len() == before {
+                return Ok(0);
+            }
+            Self::set_book_groups_tx(&mut conn, ns, book_url, &ids).await
+        };
+        match inner.await {
+            Ok(n) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                Ok(n)
+            }
+            Err(e) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                Err(e)
+            }
+        }
+    }
+
+    /// 读取书籍当前分组 ID 列表（JSON 数组；无记录/空 → []）——事务连接参数版
+    async fn book_group_ids(
+        conn: &mut sqlx::SqliteConnection,
+        ns: &str,
+        book_url: &str,
+    ) -> Result<Vec<i64>> {
+        let raw: Option<String> = sqlx::query_scalar(
+            "SELECT group_ids FROM books WHERE user_namespace = ?1 AND book_url = ?2",
+        )
+        .bind(ns)
+        .bind(book_url)
+        .fetch_optional(&mut *conn)
+        .await?;
+        Ok(raw
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Vec<i64>>(s).ok())
+            .unwrap_or_default())
+    }
+
+    /// set_book_groups 事务内核心：过滤不属于该命名空间的分组 id（防跨用户/幽灵 id）
+    /// → 去重排序 → UPDATE，全程同一连接（与原 set_book_groups 语义一致）
+    async fn set_book_groups_tx(
+        conn: &mut sqlx::SqliteConnection,
+        ns: &str,
+        book_url: &str,
+        ids: &[i64],
+    ) -> Result<u64> {
+        let mut valid = Vec::with_capacity(ids.len());
+        for id in ids {
+            let owned: Option<i64> = sqlx::query_scalar(
+                "SELECT id FROM book_groups WHERE user_namespace = ?1 AND id = ?2",
+            )
+            .bind(ns)
+            .bind(id)
+            .fetch_optional(&mut *conn)
+            .await?;
+            if owned.is_some() {
+                valid.push(*id);
+            }
+        }
         let mut unique: Vec<i64> = Vec::with_capacity(valid.len());
         for id in valid {
             if !unique.contains(&id) {
@@ -2671,67 +2920,9 @@ impl Storage {
         .bind(book_url)
         .bind(primary)
         .bind(encoded)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await?;
         Ok(r.rows_affected())
-    }
-
-    /// 往书籍追加一个分组（幂等）；返回受影响行数
-    pub async fn add_book_group(&self, ns: &str, book_url: &str, group_id: i64) -> Result<u64> {
-        let mut ids = self.book_group_ids(ns, book_url).await?;
-        if ids.contains(&group_id) {
-            return Ok(0);
-        }
-        ids.push(group_id);
-        self.set_book_groups(ns, book_url, &ids).await
-    }
-
-    /// 从书籍移除一个分组（group_ids 去除；group_name 若为该分组则改为剩余首项/0）；
-    /// 返回受影响行数
-    pub async fn remove_book_group(&self, ns: &str, book_url: &str, group_id: i64) -> Result<u64> {
-        let mut ids = self.book_group_ids(ns, book_url).await?;
-        let before = ids.len();
-        ids.retain(|id| *id != group_id);
-        if ids.len() == before {
-            return Ok(0);
-        }
-        self.set_book_groups(ns, book_url, &ids).await
-    }
-
-    /// 读取书籍当前分组 ID 列表（JSON 数组；无记录/空 → []）
-    async fn book_group_ids(&self, ns: &str, book_url: &str) -> Result<Vec<i64>> {
-        let raw: Option<String> = sqlx::query_scalar(
-            "SELECT group_ids FROM books WHERE user_namespace = ?1 AND book_url = ?2",
-        )
-        .bind(ns)
-        .bind(book_url)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(raw
-            .as_deref()
-            .and_then(|s| serde_json::from_str::<Vec<i64>>(s).ok())
-            .unwrap_or_default())
-    }
-
-    /// 过滤出属于该命名空间的分组 id（防跨用户/幽灵 id）
-    async fn valid_group_ids(&self, ns: &str, ids: &[i64]) -> Result<Vec<i64>> {
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut valid = Vec::with_capacity(ids.len());
-        for id in ids {
-            let owned: Option<i64> = sqlx::query_scalar(
-                "SELECT id FROM book_groups WHERE user_namespace = ?1 AND id = ?2",
-            )
-            .bind(ns)
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
-            if owned.is_some() {
-                valid.push(*id);
-            }
-        }
-        Ok(valid)
     }
 
     /// 分组列表（带组内书数统计：books.group_name = 分组 id 计数）
@@ -2931,6 +3122,29 @@ impl Storage {
         let mut tx = self.pool.begin().await?;
         let mut deleted = 0u64;
         for url in book_urls {
+            // 换源候选连带删除（键 = name_author，与 save_book_candidates 一致）——
+            // 修复"删书后候选行成孤儿、只进不出"的慢性膨胀
+            if let Ok((name, author)) = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+                "SELECT name, author FROM books WHERE user_namespace = ?1 AND book_url = ?2",
+            )
+            .bind(ns)
+            .bind(url)
+            .fetch_one(&self.pool)
+            .await
+            {
+                let key = format!(
+                    "{}_{}",
+                    name.unwrap_or_default().trim(),
+                    author.unwrap_or_default().trim()
+                );
+                let _ = sqlx::query(
+                    "DELETE FROM book_source_candidates WHERE user_namespace = ?1 AND book_key = ?2",
+                )
+                .bind(ns)
+                .bind(key)
+                .execute(&mut *tx)
+                .await;
+            }
             // P1-C1：章节/目录缓存删除按书架归属过滤（跨用户删除防护）
             sqlx::query(
                 "DELETE FROM book_chapters WHERE book_url = ?1              AND book_url IN (SELECT book_url FROM books WHERE user_namespace = ?2)",
@@ -2940,7 +3154,7 @@ impl Storage {
             .execute(&mut *tx)
             .await?;
             sqlx::query(
-                "DELETE FROM toc_cache WHERE book_url = ?1              AND book_url IN (SELECT book_url FROM books WHERE user_namespace = ?2)",
+                "DELETE FROM toc_cache WHERE (book_url = ?1 OR toc_url = ?1)              AND user_namespace = ?2",
             )
             .bind(url)
             .bind(ns)
@@ -3739,7 +3953,8 @@ impl Storage {
                     .join(ns)
                     .join("covers");
                 let _ = std::fs::create_dir_all(&cover_dir);
-                let file_id = format!("{}.jpg", uuid::Uuid::new_v4());
+                // md5 内容寻址：同内容幂等（重复导入/重解析不再新增孤儿文件）
+                let file_id = format!("{}.jpg", crate::util::md5::md5_bytes_hex(cover));
                 if std::fs::write(cover_dir.join(&file_id), cover).is_ok() {
                     let _ = self
                         .update_book_cover(ns, book_url, &format!("/assets/{ns}/covers/{file_id}"))
@@ -3869,6 +4084,19 @@ impl Storage {
         book_url: &str,
         cover_url: &str,
     ) -> Result<u64> {
+        // 换封面 → 清旧文件（引用计数为 0 才删；GAP 117 清理逻辑复用）
+        if let Ok(Some(old)) = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT cover_url FROM books WHERE user_namespace = ?1 AND book_url = ?2",
+        )
+        .bind(ns)
+        .bind(book_url)
+        .fetch_one(&self.pool)
+        .await
+        {
+            if old != cover_url {
+                self.cleanup_orphan_cover(ns, Some(&old)).await;
+            }
+        }
         let r = sqlx::query(
             "UPDATE books SET cover_url = ?3 WHERE user_namespace = ?1 AND book_url = ?2",
         )
@@ -3960,56 +4188,189 @@ impl Storage {
         Ok(())
     }
 
-    // ---------------- GAP 59 多设备 token（users.token_map） ----------------
+    /// token_map 读-改-写专用事务（BEGIN IMMEDIATE——先取写锁再读快照）：
+    /// 连接池 8 连接 + WAL 下，原先「无事务读快照 → 内存改 → 整列写回」会让
+    /// 并发登录互相覆盖（先完成登录方拿到的 token 直接丢失，响应成功但立即 401）。
+    /// 闭包 f 基于锁内最新 user 行计算：
+    /// - Some((token_map JSON, 主 token, last_login_at(None=保留))) → 执行 UPDATE；
+    /// - None → 跳过 UPDATE（节流窗口内的 touch 等场景，避免无变化写入）；
+    /// 第二个返回值为透传结果。任一步失败自动 ROLLBACK。用户不存在 → Ok(None)。
+    async fn mutate_user_tokens<T>(
+        &self,
+        username: &str,
+        f: impl FnOnce(&User) -> (Option<(String, String, Option<i64>)>, T),
+    ) -> Result<Option<T>> {
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        let inner = async {
+            let user: Option<User> =
+                sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = ?1")
+                    .bind(username)
+                    .fetch_optional(&mut *conn)
+                    .await?;
+            let Some(user) = user else {
+                return Ok(None);
+            };
+            let (update, ret) = f(&user);
+            if let Some((map_json, token, last_login_at)) = update {
+                sqlx::query(
+                    "UPDATE users SET token = ?1, token_map = ?2, \
+                     last_login_at = COALESCE(?3, last_login_at) WHERE username = ?4",
+                )
+                .bind(&token)
+                .bind(&map_json)
+                .bind(last_login_at)
+                .bind(username)
+                .execute(&mut *conn)
+                .await?;
+            }
+            Ok(Some(ret))
+        };
+        match inner.await {
+            Ok(v) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                Ok(v)
+            }
+            Err(e) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                Err(e)
+            }
+        }
+    }
 
-    /// 登录：追加 token 到 token_map（对象形态 {token: 过期毫秒}，上限 5，最旧被丢），
+    /// 登录：追加 token 到 token_map（对象形态 {token: 过期毫秒}，上限 5，最久未使用被丢），
     /// 同时刷新主 token 与 last_login_at。过期时间 = now + ttl 天（ttl<=0 永不过期）。
+    /// 整体在 BEGIN IMMEDIATE 事务内（防并发登录丢 token，见 mutate_user_tokens）。
     pub async fn add_user_token(
         &self,
         username: &str,
         token: &str,
         last_login_at: i64,
     ) -> Result<()> {
-        let user = self.find_user(username).await?;
         let ttl_days = self.config.token_ttl_days;
         let expire_ms = if ttl_days > 0 {
             last_login_at.saturating_add(ttl_days * 86_400_000)
         } else {
             i64::MAX
         };
-        let map_json = crate::model::user::token_map_push(
-            &user.as_ref().and_then(|u| u.token_map.clone()),
-            token,
-            expire_ms,
-            last_login_at,
-        );
-        sqlx::query(
-            "UPDATE users SET token = ?1, token_map = ?2, last_login_at = ?3 WHERE username = ?4",
-        )
-        .bind(token)
-        .bind(&map_json)
-        .bind(last_login_at)
-        .bind(username)
-        .execute(&self.pool)
-        .await?;
+        self.mutate_user_tokens(username, |user| {
+            let map_json = crate::model::user::token_map_push(
+                &user.token_map,
+                token,
+                expire_ms,
+                last_login_at,
+            );
+            (Some((map_json, token.to_string(), Some(last_login_at))), ())
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// 会话滑动续期（token 校验通过后调用；内部自带节流，详见下）：
+    /// - 仅当该 token 的 expire 进入后半程（剩余不足 ttl/2，token_needs_renewal）
+    ///   才写库——热路径绝大多数请求零写入；
+    /// - token 在 token_map 对象形态中 → expire 续到 now + ttl（expire = 最近使用 + ttl，
+    ///   上限淘汰随之变为 LRU：活跃会话不会被后登录者挤出）；
+    /// - 同时刷新 last_login_at——GAP 118 整体过期判定不再误杀天天使用但不重新
+    ///   /login 的程序化客户端；
+    /// - 数组形态（legacy 旧数据，无过期信息）不动 token_map，仅刷新 last_login_at。
+    /// 调用方（resolve_current_user）已持同一节流前置判断；此处锁内用最新值复核。
+    pub async fn touch_user_token(&self, username: &str, token: &str, now_ms: i64) -> Result<()> {
+        let ttl_days = self.config.token_ttl_days;
+        if ttl_days <= 0 {
+            return Ok(()); // 永不过期：无需续期
+        }
+        let ttl_ms = ttl_days * 86_400_000;
+        let touched = self
+            .mutate_user_tokens(username, |user| {
+                if !crate::model::user::token_needs_renewal(
+                    &user.token_map,
+                    token,
+                    user.last_login_at,
+                    now_ms,
+                    ttl_ms,
+                ) {
+                    // 节流窗口内（锁内最新值复核）：不写，避免每请求一次 UPDATE
+                    return (None, false);
+                }
+                let map_json = match &user.token_map {
+                    // 数组形态（legacy）：无过期信息，保持原样
+                    Some(serde_json::Value::Array(_)) => user
+                        .token_map
+                        .as_ref()
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "{}".to_string()),
+                    // 对象形态 / None：续期该 token（不存在则补入——统一纳入 expire 管理）
+                    _ => crate::model::user::token_map_push(
+                        &user.token_map,
+                        token,
+                        now_ms.saturating_add(ttl_ms),
+                        now_ms,
+                    ),
+                };
+                (Some((map_json, user.token.clone(), Some(now_ms))), true)
+            })
+            .await?;
+        if touched.unwrap_or(false) {
+            tracing::debug!(
+                "会话滑动续期 [{username}] token={}…",
+                token.get(..8).unwrap_or(token)
+            );
+        }
         Ok(())
     }
 
     /// 登出：从 token_map 移除指定 token；若移除的是主 token 则同时清空主 token
     /// （其他设备 token 不受影响——多设备会话互不干扰）。返回受影响行数。
+    /// 整体在 BEGIN IMMEDIATE 事务内（防并发登出互相覆盖，见 mutate_user_tokens）。
     pub async fn remove_user_token(&self, username: &str, token: &str) -> Result<u64> {
-        let user = self.find_user(username).await?;
-        let Some(user) = user else { return Ok(0) };
-        let (map_json, removed) = crate::model::user::token_map_remove(&user.token_map, token);
-        let clear_main = !user.token.is_empty() && user.token == token;
-        let main_token = if clear_main { "" } else { user.token.as_str() };
-        sqlx::query("UPDATE users SET token = ?1, token_map = ?2 WHERE username = ?3")
-            .bind(main_token)
-            .bind(&map_json)
-            .bind(username)
-            .execute(&self.pool)
+        let removed = self
+            .mutate_user_tokens(username, |user| {
+                let (map_json, removed) =
+                    crate::model::user::token_map_remove(&user.token_map, token);
+                let clear_main = !user.token.is_empty() && user.token == token;
+                let main_token = if clear_main { "" } else { user.token.as_str() };
+                (
+                    Some((map_json, main_token.to_string(), None)),
+                    removed || clear_main,
+                )
+            })
             .await?;
-        Ok(if removed || clear_main { 1 } else { 0 })
+        Ok(if removed.unwrap_or(false) { 1 } else { 0 })
+    }
+
+    /// 后台清理：全量扫描 users，移除 token_map 中已过期条目；GAP 118 整体判定
+    /// 过期的用户（last_login_at + ttl 已过，任一 token 本就无法通过校验）全清
+    /// token_map——原先清理只发生在该用户下一次成功登录时，不再登录则死会话
+    /// 无限期留存。返回清理的总条数（schedule 定时任务调用；用户量级=user_limit）。
+    pub async fn prune_expired_user_tokens(&self, now_ms: i64) -> Result<usize> {
+        let ttl_days = self.config.token_ttl_days;
+        let users = self.list_users().await?;
+        let mut total = 0usize;
+        for user in &users {
+            // 走 mutate_user_tokens 的 BEGIN IMMEDIATE 事务（锁内基于最新行计算）：
+            // 原先 list_users 快照 + 直接 UPDATE 写回——并发登录刚写入的新 token
+            // 会被过期快照覆盖丢失（响应成功但立即 401）
+            let pruned = self
+                .mutate_user_tokens(&user.username, |user| {
+                    let overall = ttl_days > 0
+                        && now_ms.saturating_sub(user.last_login_at) > ttl_days * 86_400_000;
+                    let (map_json, pruned) = crate::model::user::token_map_prune_expired(
+                        &user.token_map,
+                        now_ms,
+                        overall,
+                    );
+                    if pruned == 0 {
+                        (None, 0)
+                    } else {
+                        // 主 token / last_login_at 保持锁内行原值不动
+                        (Some((map_json, user.token.clone(), None)), pruned)
+                    }
+                })
+                .await?;
+            total += pruned.unwrap_or(0);
+        }
+        Ok(total)
     }
 
     /// 查询某命名空间的书架（按插入顺序，兼容 legacy bookshelf.json 数组顺序）
@@ -4291,7 +4652,9 @@ impl Storage {
         }
     }
 
-    /// 重置用户密码（新 salt + 加密密码；清空 token 使旧会话立即失效）
+    /// 重置用户密码（新 salt + 加密密码；清空主 token 与 token_map 使全部旧会话
+    /// 立即失效——HIGH-四轮：原先只清主 token，token_map 内多设备 token 改密后
+    /// 仍有效，等于改密不踢会话）。单条 UPDATE 原子完成，无读-改-写竞态。
     pub async fn reset_user_password(
         &self,
         username: &str,
@@ -4299,7 +4662,7 @@ impl Storage {
         encrypted_password: &str,
     ) -> Result<u64> {
         let r = sqlx::query(
-            "UPDATE users SET password = ?1, salt = ?2, token = '' WHERE username = ?3",
+            "UPDATE users SET password = ?1, salt = ?2, token = '', token_map = '{}' WHERE username = ?3",
         )
         .bind(encrypted_password)
         .bind(salt)
@@ -4406,6 +4769,68 @@ impl Storage {
         let txt_toc_rules = self.get_txt_toc_rules(ns).await?;
         let http_tts_list = self.get_http_tts_list(ns).await?;
         let cookies = self.list_cookies(ns).await?;
+        // #13 备份完备性：书源订阅（含 raw_json/勾选）与阅读统计此前不入包——
+        // 换机恢复后订阅定义静默全灭、书源自动更新失效
+        #[derive(serde::Serialize)]
+        struct SubBackupRow {
+            url: String,
+            name: String,
+            enabled: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            raw_json: Option<String>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            selected_urls: Vec<String>,
+        }
+        let sub_rows: Vec<SubBackupRow> = sqlx::query_as(
+            "SELECT url, name, enabled, raw_json, selected_urls FROM source_subs \
+             WHERE user_namespace = ?1 AND hidden = 0 ORDER BY url",
+        )
+        .bind(ns)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(
+            |(url, name, enabled, raw_json, selected): (
+                String,
+                String,
+                bool,
+                Option<String>,
+                String,
+            )| {
+                SubBackupRow {
+                    url,
+                    name,
+                    enabled,
+                    raw_json,
+                    selected_urls: serde_json::from_str(&selected).unwrap_or_default(),
+                }
+            },
+        )
+        .collect();
+        #[derive(serde::Serialize)]
+        struct StatsBackupRow {
+            book_url: String,
+            date: String,
+            seconds: i64,
+            chars: i64,
+        }
+        let stats_rows: Vec<StatsBackupRow> = sqlx::query_as(
+            "SELECT book_url, date, seconds, chars FROM reading_stats \
+             WHERE user_namespace = ?1 ORDER BY book_url, date",
+        )
+        .bind(ns)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(
+            |(book_url, date, seconds, chars): (String, String, i64, i64)| StatsBackupRow {
+                book_url,
+                date,
+                seconds,
+                chars,
+            },
+        )
+        .collect();
         // 用户配置全量（{键: 值} 对象；值原样字符串——restore 按字符串读回，往返无损）
         let config_rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT ns, COALESCE(config, '') FROM user_config WHERE user_namespace = ?1 ORDER BY ns",
@@ -4419,7 +4844,10 @@ impl Storage {
         }
         let user_configs = serde_json::Value::Object(user_configs);
 
-        let file = std::fs::File::create(&zip_path)?;
+        // 原子写：先写 .part，finish 成功后 rename——曾直写最终名，写一半崩溃/断电
+        // 会留下残缺 zip 被后续 restore 当有效备份选中
+        let part_path = zip_path.with_extension("zip.part");
+        let file = std::fs::File::create(&part_path)?;
         let mut writer = zip::ZipWriter::new(file);
         write_zip_entry(
             &mut writer,
@@ -4468,6 +4896,16 @@ impl Storage {
         )?;
         write_zip_entry(
             &mut writer,
+            "sourceSubs.json",
+            &serde_json::to_vec_pretty(&sub_rows)?,
+        )?;
+        write_zip_entry(
+            &mut writer,
+            "readingStats.json",
+            &serde_json::to_vec_pretty(&stats_rows)?,
+        )?;
+        write_zip_entry(
+            &mut writer,
             "bookSourceCookies.json",
             &serde_json::to_vec_pretty(&cookies)?,
         )?;
@@ -4485,10 +4923,7 @@ impl Storage {
                 let Ok(rel) = abs.strip_prefix(&storage_dir) else {
                     continue;
                 };
-                let entry_name = format!(
-                    "books/{}",
-                    rel.to_string_lossy().replace('\\', "/")
-                );
+                let entry_name = format!("books/{}", rel.to_string_lossy().replace('\\', "/"));
                 match std::fs::read(&abs) {
                     Ok(bytes) => {
                         if write_zip_entry(&mut writer, &entry_name, &bytes).is_ok() {
@@ -4501,8 +4936,12 @@ impl Storage {
         }
 
         writer.finish()?;
+        std::fs::rename(&part_path, &zip_path)?;
 
-        tracing::info!("备份完成 [{ns}]: {}（本地书文件 {packed_files} 个）", zip_path.display());
+        tracing::info!(
+            "备份完成 [{ns}]: {}（本地书文件 {packed_files} 个）",
+            zip_path.display()
+        );
         Ok(zip_path.to_string_lossy().into_owned())
     }
 
@@ -4563,6 +5002,7 @@ impl Storage {
     ///
     /// 逐项幂等：已存在时 overwrite=true 覆盖、否则跳过（计数进 skipped）；
     /// namespace 一律为当前用户（备份内 user_namespace 不生效）。
+    /// 条目级错误会中断恢复（已写入条目不回滚——调用方收到错误时应提示"部分恢复，建议重试"）。
     pub async fn restore_backup_zip(
         &self,
         ns: &str,
@@ -4572,15 +5012,39 @@ impl Storage {
         let cursor = std::io::Cursor::new(zip_bytes.to_vec());
         let mut archive = zip::ZipArchive::new(cursor)
             .map_err(|e| anyhow::anyhow!("备份文件不是有效的 zip：{e}"))?;
-        // 预读全部条目到内存（zip 读取是同步 IO，避免跨 await 持有 archive）
+        // 预读全部条目到内存（zip 读取是同步 IO，避免跨 await 持有 archive）。
+        // P0 炸弹防护：单条目/累计双上限——100MB 压缩包可解出任意体积，曾无任何限制
+        const RESTORE_ENTRY_MAX: u64 = 200 * 1024 * 1024;
+        const RESTORE_TOTAL_MAX: u64 = 500 * 1024 * 1024;
         let mut entries: std::collections::HashMap<String, Vec<u8>> =
             std::collections::HashMap::new();
         use std::io::Read;
+        let mut total: u64 = 0;
         for i in 0..archive.len() {
             let mut f = archive.by_index(i)?;
             let name = f.name().to_string();
-            let mut bytes = Vec::new();
-            f.read_to_end(&mut bytes)?;
+            let declared = f.size();
+            if declared > RESTORE_ENTRY_MAX {
+                anyhow::bail!(
+                    "备份条目 [{name}] 解压后超出大小上限（{}MB）",
+                    RESTORE_ENTRY_MAX / 1024 / 1024
+                );
+            }
+            let mut bytes = Vec::with_capacity(declared.min(RESTORE_ENTRY_MAX) as usize);
+            std::io::Read::take(&mut f, RESTORE_ENTRY_MAX + 1).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > RESTORE_ENTRY_MAX {
+                anyhow::bail!(
+                    "备份条目 [{name}] 解压后超出大小上限（{}MB）",
+                    RESTORE_ENTRY_MAX / 1024 / 1024
+                );
+            }
+            total += bytes.len() as u64;
+            if total > RESTORE_TOTAL_MAX {
+                anyhow::bail!(
+                    "备份总解压体积超过上限（{}MB），已拒绝",
+                    RESTORE_TOTAL_MAX / 1024 / 1024
+                );
+            }
             entries.insert(name, bytes);
         }
 
@@ -4899,6 +5363,103 @@ impl Storage {
         }
 
         // 书签（按 bookUrl+title）——备份 zip 含 bookmark.json，一并恢复
+        // #13：书源订阅恢复（保留 enabled/raw_json/勾选；按 url 覆盖或跳过）
+        if let Some(bytes) = entry("sourceSubs.json") {
+            match serde_json::from_slice::<Vec<serde_json::Value>>(bytes) {
+                Ok(items) => {
+                    for it in items {
+                        let url = it.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                        if url.trim().is_empty() {
+                            report.skipped.source_subs += 1;
+                            continue;
+                        }
+                        let name = it.get("name").and_then(|v| v.as_str()).unwrap_or("订阅");
+                        let enabled = it.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+                        let raw_json = it.get("rawJson").and_then(|v| v.as_str()).unwrap_or("[]");
+                        let selected: Vec<String> = it
+                            .get("selectedUrls")
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if !overwrite
+                            && self
+                                .table_exists(
+                                    "SELECT 1 FROM source_subs WHERE user_namespace = ?1 AND url = ?2",
+                                    ns,
+                                    url,
+                                )
+                                .await?
+                        {
+                            report.skipped.source_subs += 1;
+                            continue;
+                        }
+                        sqlx::query(
+                            "INSERT OR REPLACE INTO source_subs (url, name, enabled, hidden, user_namespace, raw_json, selected_urls)                             VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6)",
+                        )
+                        .bind(url)
+                        .bind(name)
+                        .bind(enabled as i64)
+                        .bind(ns)
+                        .bind(raw_json)
+                        .bind(serde_json::to_string(&selected).unwrap_or_else(|_| "[]".into()))
+                        .execute(&self.pool)
+                        .await?;
+                        report.restored.source_subs += 1;
+                    }
+                }
+                Err(_) => report.skipped.source_subs += 1,
+            }
+        }
+
+        // #13：阅读统计恢复（按主键 book_url+date 覆盖；restore 语义 = 回到备份时点）
+        if let Some(bytes) = entry("readingStats.json") {
+            match serde_json::from_slice::<Vec<serde_json::Value>>(bytes) {
+                Ok(items) => {
+                    for it in items {
+                        let book_url = it.get("bookUrl").and_then(|v| v.as_str()).unwrap_or("");
+                        let date = it.get("date").and_then(|v| v.as_str()).unwrap_or("");
+                        if book_url.is_empty() || date.is_empty() {
+                            report.skipped.reading_stats += 1;
+                            continue;
+                        }
+                        let seconds = it.get("seconds").and_then(|v| v.as_i64()).unwrap_or(0);
+                        let chars = it.get("chars").and_then(|v| v.as_i64()).unwrap_or(0);
+                        if !overwrite {
+                            let exists: bool = sqlx::query_scalar::<_, i64>(
+                                "SELECT 1 FROM reading_stats WHERE user_namespace = ?1 AND book_url = ?2 AND date = ?3",
+                            )
+                            .bind(ns)
+                            .bind(book_url)
+                            .bind(date)
+                            .fetch_optional(&self.pool)
+                            .await?
+                            .is_some();
+                            if exists {
+                                report.skipped.reading_stats += 1;
+                                continue;
+                            }
+                        }
+                        sqlx::query(
+                            "INSERT OR REPLACE INTO reading_stats (user_namespace, book_url, date, seconds, chars)                             VALUES (?1, ?2, ?3, ?4, ?5)",
+                        )
+                        .bind(ns)
+                        .bind(book_url)
+                        .bind(date)
+                        .bind(seconds)
+                        .bind(chars)
+                        .execute(&self.pool)
+                        .await?;
+                        report.restored.reading_stats += 1;
+                    }
+                }
+                Err(_) => report.skipped.reading_stats += 1,
+            }
+        }
+
         if let Some(bytes) = entry("bookmark.json") {
             match serde_json::from_slice::<Vec<crate::model::Bookmark>>(bytes) {
                 Ok(items) => {
@@ -5055,6 +5616,12 @@ pub struct RestoreCounts {
     pub cookies: u64,
     /// 本地书原文件（F11：books/ 条目，按文件相对路径）
     pub book_files: u64,
+    /// 书源订阅（按 url）
+    #[serde(default)]
+    pub source_subs: u64,
+    /// 阅读统计（按 bookUrl+date）
+    #[serde(default)]
+    pub reading_stats: u64,
 }
 
 /// 恢复报告（restoreFromZip / restoreFromWebdav 返回：restored/skipped 各类目计数）
@@ -5063,23 +5630,48 @@ pub struct RestoreCounts {
 pub struct RestoreReport {
     pub restored: RestoreCounts,
     pub skipped: RestoreCounts,
+    /// 条目级错误中断恢复时置 true（已写入条目不回滚——半恢复，调用方应提示重试）
+    #[serde(default)]
+    pub partial: bool,
 }
 
-/// zip 单条目写入（F-39）
+/// zip 单条目写入（F-39；条目 mtime 写当前时间——此前缺省 1980-01-01，
+/// 部分工具按条目时间排序/展示异常）
 fn write_zip_entry(
     writer: &mut zip::ZipWriter<std::fs::File>,
     name: &str,
     bytes: &[u8],
 ) -> Result<()> {
     use std::io::Write;
-    writer.start_file(name, zip::write::FileOptions::default())?;
+    writer.start_file(
+        name,
+        zip::write::FileOptions::default().last_modified_time(zip_now()),
+    )?;
     writer.write_all(bytes)?;
     Ok(())
 }
 
+/// 当前本地时间 → zip DateTime（秒精度；年份越界回退默认 1980）
+fn zip_now() -> zip::DateTime {
+    use chrono::{Datelike, Timelike};
+    let now = chrono::Local::now();
+    zip::DateTime::from_date_and_time(
+        now.year() as u16,
+        now.month() as u8,
+        now.day() as u8,
+        now.hour() as u8,
+        now.minute() as u8,
+        now.second() as u8,
+    )
+    .unwrap_or_default()
+}
+
 /// F11：收集文件型本地书的实际文件（解析回退链与 api::resolve_loc_book_file 一致——
 /// 文件本身 / 目录内 index.epub / 目录内首个 .epub），并钳位在 storage 根内
-fn collect_loc_book_files(storage_dir: &std::path::Path, book_url: &str) -> Vec<std::path::PathBuf> {
+fn collect_loc_book_files(
+    storage_dir: &std::path::Path,
+    book_url: &str,
+) -> Vec<std::path::PathBuf> {
     let path = storage_dir.join(book_url.trim_start_matches("storage/"));
     let mut found: Vec<std::path::PathBuf> = Vec::new();
     if path.is_file() {
@@ -5123,7 +5715,14 @@ fn is_safe_storage_rel_path(rel: &str) -> bool {
 /// latest_chapter_title / total_chapter_num（单本失败跳过，不影响其余）
 pub async fn run_shelf_update(storage: &Storage) -> Result<usize> {
     let books = storage.list_updatable_books().await?;
+    let total = books.len();
+    // 并发受限（8 路）——书架含大量死源书时串行全刷曾把 getBookshelf?refresh=1 拖到
+    // 180s+ 无响应；失效源 600s 短路（health::is_source_invalid）跳过已知死站
+    const SHELF_UPDATE_CONCURRENCY: usize = 8;
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(SHELF_UPDATE_CONCURRENCY));
+    let mut handles = Vec::with_capacity(total);
     let mut updated = 0usize;
+    let updated_counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for book in books {
         // 本地书（local:// 或 storage 文件型）无书源可抓，跳过
         if book.origin == "local"
@@ -5135,6 +5734,10 @@ pub async fn run_shelf_update(storage: &Storage) -> Result<usize> {
         if book.toc_url.trim().is_empty() {
             continue;
         }
+        // 已知失效书源短路（600s 内 skip 重探）——死源站一本 30s×2 重试 + CF 兜底
+        if crate::service::health::is_source_invalid(&book.user_namespace, &book.origin) {
+            continue;
+        }
         // 书源缺失（用户/系统均无）→ 无法抓取，跳过
         let Ok(Some(source)) = storage
             .find_book_source(&book.user_namespace, &book.origin)
@@ -5142,40 +5745,56 @@ pub async fn run_shelf_update(storage: &Storage) -> Result<usize> {
         else {
             continue;
         };
-        match crate::service::book::analyze_toc(
-            &book.user_namespace,
-            &book.toc_url,
-            &source,
-            20,
-            Some(&book.name),
-            &book.book_url,
-        )
-        .await
-        {
-            Ok(chapters) if !chapters.is_empty() => {
-                let non_volume: Vec<&crate::model::book_chapter::BookChapter> =
-                    chapters.iter().filter(|c| !c.is_volume).collect();
-                let latest = non_volume.last().map(|c| c.title.clone());
-                let total = non_volume.len() as i64;
-                let now = chrono::Utc::now().timestamp_millis();
-                match storage
-                    .update_book_update_info(
-                        &book.user_namespace,
-                        &book.book_url,
-                        latest.as_deref(),
-                        total,
-                        now,
-                    )
-                    .await
-                {
-                    Ok(_) => updated += 1,
-                    Err(e) => tracing::warn!("书架更新回写失败 [{}]: {e:#}", book.book_url),
+        let sem = sem.clone();
+        let storage_c = storage.clone();
+        let book_c = book.clone();
+        let counter = updated_counter.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await;
+            match crate::service::book::analyze_toc(
+                &book_c.user_namespace,
+                &book_c.toc_url,
+                &source,
+                20,
+                Some(&book_c.name),
+                &book_c.book_url,
+            )
+            .await
+            {
+                Ok(chapters) if !chapters.is_empty() => {
+                    let non_volume: Vec<&crate::model::book_chapter::BookChapter> =
+                        chapters.iter().filter(|c| !c.is_volume).collect();
+                    let latest = non_volume.last().map(|c| c.title.clone());
+                    let total = non_volume.len() as i64;
+                    let now = chrono::Utc::now().timestamp_millis();
+                    match storage_c
+                        .update_book_update_info(
+                            &book_c.user_namespace,
+                            &book_c.book_url,
+                            latest.as_deref(),
+                            total,
+                            now,
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            tracing::warn!("书架更新回写失败 [{}]: {e:#}", book_c.book_url)
+                        }
+                    }
                 }
+                Ok(_) => {} // 无章节规则/空目录：无可更新内容，跳过
+                Err(e) => tracing::warn!("书架更新跳过 [{}]: {e:#}", book_c.book_url),
             }
-            Ok(_) => {} // 无章节规则/空目录：无可更新内容，跳过
-            Err(e) => tracing::warn!("书架更新跳过 [{}]: {e:#}", book.book_url),
-        }
+        }));
     }
+    for h in handles {
+        let _ = h.await;
+    }
+    updated = updated_counter.load(std::sync::atomic::Ordering::Relaxed);
+    let _ = total;
     Ok(updated)
 }
 
@@ -5207,10 +5826,15 @@ async fn delete_user_rows(
     .execute(&mut **tx)
     .await?;
     // 表名单为内部硬编码常量，无注入面
+    // （book_source_candidates/book_vars_cache/js_cache 为后加三表——
+    //   含用户登录态/书级变量等私有中间量，删用户时需一并清理）
     for table in [
         "books",
         "book_sources",
         "book_source_cookies",
+        "book_source_candidates",
+        "book_vars_cache",
+        "js_cache",
         "reading_stats",
         "user_config",
         "rss_sources",
@@ -5632,6 +6256,111 @@ mod tests {
             custom_order: 1,
             ..Default::default()
         }
+    }
+
+    /// #13：get_toc_cache OR 反查——book_url 列与 toc_url 列任一命中
+    #[tokio::test]
+    async fn test_get_toc_cache_matches_both_keys() {
+        let storage = test_storage("toc-or").await;
+        // getBookToc 写入形态：book_url 列存的是 toc_url
+        storage
+            .cache_toc(
+                "default",
+                "https://t.example/toc",
+                "https://t.example/toc",
+                r#"[{"url":"u1"}]"#,
+            )
+            .await
+            .unwrap();
+        // setBookSource 写入形态：两列分别为 new_url / toc_url
+        storage
+            .cache_toc(
+                "default",
+                "https://new.example/b",
+                "https://t2.example/toc",
+                r#"[{"url":"u2"}]"#,
+            )
+            .await
+            .unwrap();
+        assert!(storage
+            .get_toc_cache("default", "https://t.example/toc", 60_000)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(storage
+            .get_toc_cache("default", "https://new.example/b", 60_000)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(storage
+            .get_toc_cache("default", "https://t2.example/toc", 60_000)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(storage
+            .get_toc_cache("default", "https://none.example/x", 60_000)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    /// prune_book_vars_cache：TTL 过期删除 + 超限按 updated_at 从新到旧裁剪
+    #[tokio::test]
+    async fn test_prune_book_vars_cache() {
+        let storage = test_storage("prune-vars").await;
+        // 5 行：3 旧（updated_at = now - 20 天，超 TTL）+ 2 新（now）
+        let now = chrono::Utc::now().timestamp_millis();
+        let old = now - 20 * 24 * 3600 * 1000;
+        for i in 0..5 {
+            storage
+                .put_book_vars_cache("default", "https://a.com", &format!("/b{i}"), "{}")
+                .await
+                .unwrap();
+            let ts = if i < 3 { old } else { now + i };
+            sqlx::query("UPDATE book_vars_cache SET updated_at = ?1 WHERE url = ?2")
+                .bind(ts)
+                .bind(format!("/b{i}"))
+                .execute(&storage.pool)
+                .await
+                .unwrap();
+        }
+        // max_rows=10（不触上限）+ TTL=14 天 → 只删 3 行旧数据
+        let (ttl, over) = storage
+            .prune_book_vars_cache(10, std::time::Duration::from_secs(14 * 24 * 3600))
+            .await
+            .unwrap();
+        assert_eq!((ttl, over), (3, 0));
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM book_vars_cache")
+            .fetch_one(&storage.pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 2, "只剩 2 行新数据");
+
+        // 再放 3 行新的 → 共 5 行，max_rows=4 → 裁掉 updated_at 最旧的 1 行（/b3：now+3 批次最早）
+        for i in 5..8 {
+            storage
+                .put_book_vars_cache("default", "https://a.com", &format!("/b{i}"), "{}")
+                .await
+                .unwrap();
+            sqlx::query("UPDATE book_vars_cache SET updated_at = ?1 WHERE url = ?2")
+                .bind(now + i) // 拉开时间差，确保 /b3 最旧
+                .bind(format!("/b{i}"))
+                .execute(&storage.pool)
+                .await
+                .unwrap();
+        }
+        let (ttl2, over2) = storage
+            .prune_book_vars_cache(4, std::time::Duration::from_secs(14 * 24 * 3600))
+            .await
+            .unwrap();
+        assert_eq!((ttl2, over2), (0, 1), "无 TTL 过期，超限裁 1 行");
+        let b3: Option<String> =
+            sqlx::query_scalar("SELECT vars_json FROM book_vars_cache WHERE url = '/b3'")
+                .fetch_optional(&storage.pool)
+                .await
+                .unwrap();
+        assert!(b3.is_none(), "最旧的 /b3 应被裁掉");
+        cleanup(storage, "prune-vars").await;
     }
 
     /// 保存 → 查询 → 覆盖保存 → 删除 往返；raw_json camelCase 与 bookSource.json 一致
@@ -6108,14 +6837,16 @@ mod tests {
             .await
             .unwrap();
         // 空串 / 纯空白 → None（而非任意源）
-        assert!(storage.find_book_source("default", "").await.unwrap().is_none());
-        assert!(
-            storage
-                .find_book_source("default", "   ")
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(storage
+            .find_book_source("default", "")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .find_book_source("default", "   ")
+            .await
+            .unwrap()
+            .is_none());
         // 正常查：精确命中
         let got = storage
             .find_book_source("default", "https://a.example.com/")
@@ -8164,7 +8895,10 @@ mod tests {
             .restore_backup_zip("default", &evil, true)
             .await
             .unwrap();
-        assert_eq!(report.skipped.book_files, 2, "穿越/点开头应拒收: {report:?}");
+        assert_eq!(
+            report.skipped.book_files, 2,
+            "穿越/点开头应拒收: {report:?}"
+        );
         assert_eq!(report.restored.book_files, 1);
         assert!(!storage2.config.storage_dir().join("evil.txt").exists());
         assert!(storage2.config.storage_dir().join("ok.txt").is_file());
@@ -9140,7 +9874,7 @@ mod tests {
 
         // 命中两章，按章节序返回
         let hits = storage
-            .search_book_content("local://book1", "关键词", 50)
+            .search_book_content("default", "local://book1", "关键词", 50)
             .await
             .unwrap();
         assert_eq!(hits.len(), 2);
@@ -9158,7 +9892,7 @@ mod tests {
 
         // 其他书不串
         let hits = storage
-            .search_book_content("local://book2", "关键词", 50)
+            .search_book_content("default", "local://book2", "关键词", 50)
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);
@@ -9166,12 +9900,12 @@ mod tests {
 
         // 无命中 / 书不存在
         assert!(storage
-            .search_book_content("local://book1", "不存在词", 50)
+            .search_book_content("default", "local://book1", "不存在词", 50)
             .await
             .unwrap()
             .is_empty());
         assert!(storage
-            .search_book_content("local://ghost", "关键词", 50)
+            .search_book_content("default", "local://ghost", "关键词", 50)
             .await
             .unwrap()
             .is_empty());
@@ -9185,7 +9919,7 @@ mod tests {
             .await
             .unwrap();
         let hits = storage
-            .search_book_content("local://book3", "world", 50)
+            .search_book_content("default", "local://book3", "world", 50)
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);
@@ -9193,7 +9927,7 @@ mod tests {
 
         // limit 生效
         let hits = storage
-            .search_book_content("local://book1", "关键词", 1)
+            .search_book_content("default", "local://book1", "关键词", 1)
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);
@@ -9210,18 +9944,18 @@ mod tests {
             .await
             .unwrap();
         let hits = storage
-            .search_book_content("local://book4", "5_0%", 10)
+            .search_book_content("default", "local://book4", "5_0%", 10)
             .await
             .unwrap();
         assert_eq!(hits.len(), 1, "% 应转义为字面量");
         assert_eq!(hits[0].title, "C1");
         let hits = storage
-            .search_book_content("local://book4", "5_", 10)
+            .search_book_content("default", "local://book4", "5_", 10)
             .await
             .unwrap();
         assert_eq!(hits.len(), 1, "_ 应转义为字面量");
         let hits = storage
-            .search_book_content("local://book4", "%", 10)
+            .search_book_content("default", "local://book4", "%", 10)
             .await
             .unwrap();
         assert_eq!(
@@ -9231,7 +9965,7 @@ mod tests {
         );
         assert_eq!(hits[0].title, "C1");
         let hits = storage
-            .search_book_content("local://book4", "_", 10)
+            .search_book_content("default", "local://book4", "_", 10)
             .await
             .unwrap();
         assert_eq!(
@@ -9256,6 +9990,80 @@ mod tests {
         );
 
         cleanup(storage, "search").await;
+    }
+
+    /// 全书搜索跨 ns 隔离：同 book_url 下他人 ns 的缓存/编辑行（含 saveBookContent
+    /// 改写正文）不得被读出——search_book_content 必须按 user_namespace 过滤
+    /// （同表 get_chapter_content/count_chapters/cache_chapter_content 同规格）
+    #[tokio::test]
+    async fn test_search_book_content_namespace_isolation() {
+        let storage = test_storage("search-ns").await;
+        // default ns 本地书章节（save_chapters 落 default）
+        storage
+            .save_chapters(
+                "local://shared",
+                &[("第一章".to_string(), "default 缓存的秘密词正文".to_string())],
+            )
+            .await
+            .unwrap();
+        // alice/bob 两个 ns 对同一 book_url 各自缓存/编辑章节
+        storage
+            .cache_chapter_content(
+                "alice",
+                "local://shared",
+                0,
+                "第一章",
+                "alice 编辑后的正文 含秘密词",
+            )
+            .await
+            .unwrap();
+        storage
+            .cache_chapter_content(
+                "alice",
+                "local://shared",
+                1,
+                "第二章",
+                "alice 第二章 无匹配",
+            )
+            .await
+            .unwrap();
+        storage
+            .cache_chapter_content("bob", "local://shared", 1, "第二章", "bob 缓存的秘密词正文")
+            .await
+            .unwrap();
+
+        // alice 搜索只命中本 ns 的行（不串 default/bob）
+        let hits = storage
+            .search_book_content("alice", "local://shared", "秘密词", 100)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1, "跨 ns 行不得命中: {hits:?}");
+        assert_eq!(hits[0].chapter_index, 0);
+        assert!(hits[0].snippet.contains("alice"));
+        // 同章不重复命中（修复前 default+alice 两行同返回）：alice 两章内容均含
+        // "alice"——命中应恰为本 ns 两行（无 default 行混入）
+        let hits = storage
+            .search_book_content("alice", "local://shared", "alice", 100)
+            .await
+            .unwrap();
+        let idx: Vec<i64> = hits.iter().map(|h| h.chapter_index).collect();
+        assert_eq!(idx, vec![0, 1], "同 book_url 跨 ns 行不得混入: {hits:?}");
+        // bob 同理
+        let hits = storage
+            .search_book_content("bob", "local://shared", "秘密词", 100)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1, "跨 ns 行不得命中: {hits:?}");
+        assert!(hits[0].snippet.contains("bob"));
+        // default 只见自己的行
+        let hits = storage
+            .search_book_content("default", "local://shared", "秘密词", 100)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].snippet.contains("default"));
+
+        cleanup(storage, "search-ns").await;
     }
 
     /// 书源订阅：CRUD 往返 + 命名空间隔离 + default 回退
@@ -10900,5 +11708,236 @@ mod tests {
         assert_eq!(storage.count_books_for_user("alice").await.unwrap(), 2);
         assert_eq!(storage.count_books_for_user("default").await.unwrap(), 0);
         cleanup(storage, "bklimit").await;
+    }
+
+    /// HIGH-四轮 3：reset_user_password 同时清空主 token 与 token_map——
+    /// 改密即踢全部会话（原先 token_map 内多设备 token 改密后仍有效）
+    #[tokio::test]
+    async fn test_reset_user_password_clears_token_map() {
+        let mut storage = test_storage("reset-pw").await;
+        storage.config.token_ttl_days = 0; // 永不过期：只验证清空语义，不混入过期因素
+        storage
+            .insert_user(&crate::model::User {
+                username: "alice".into(),
+                token: "main-token".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        // 多设备：token_map 追加两个次级 token
+        let now = 1_800_000_000_000i64;
+        storage
+            .add_user_token("alice", "device-a", now)
+            .await
+            .unwrap();
+        storage
+            .add_user_token("alice", "device-b", now)
+            .await
+            .unwrap();
+        let user = storage.find_user("alice").await.unwrap().unwrap();
+        assert_eq!(user.token, "device-b", "add_user_token 刷新主 token");
+        assert!(
+            crate::model::user::token_map_valid(&user.token_map, "device-a", now),
+            "前置：token_map 内会话有效"
+        );
+
+        // 改密
+        let n = storage
+            .reset_user_password("alice", "s1a2b3c4", "$argon2id$phc")
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+
+        let user = storage.find_user("alice").await.unwrap().unwrap();
+        assert_eq!(user.token, "", "主 token 清空");
+        assert_eq!(
+            crate::model::user::token_map_list(&user.token_map).len(),
+            0,
+            "token_map 全清：{}",
+            user.token_map
+                .as_ref()
+                .map(|v| v.to_string())
+                .unwrap_or_default()
+        );
+        for t in ["main-token", "device-a", "device-b"] {
+            assert!(
+                !crate::model::user::token_map_valid(&user.token_map, t, now),
+                "旧会话 {t} 应已失效"
+            );
+        }
+        assert_eq!(user.password, "$argon2id$phc");
+        assert_eq!(user.salt, "s1a2b3c4");
+
+        cleanup(storage, "reset-pw").await;
+    }
+
+    /// MEDIUM-7：prune_expired_user_tokens——过期条目清理、未过期保留、
+    /// 整体过期（last_login_at + ttl）全清；走 mutate_user_tokens 事务路径
+    #[tokio::test]
+    async fn test_prune_expired_user_tokens_semantics() {
+        let mut storage = test_storage("prune-tok").await;
+        storage.config.token_ttl_days = 1; // 1 天
+        let now = chrono::Utc::now().timestamp_millis();
+        let day = 86_400_000i64;
+        // alice：2 天前登录 → device-old 过期（expire=now-1d）；随后仅刷新
+        // last_login_at=now（update_user_token 不动 token_map——模拟"旧会话残留但
+        // 账号近期活跃"，区别于整体过期）
+        storage
+            .insert_user(&crate::model::User {
+                username: "alice".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        storage
+            .add_user_token("alice", "device-old", now - 2 * day)
+            .await
+            .unwrap();
+        storage
+            .update_user_session("alice", "main-tok", now)
+            .await
+            .unwrap();
+
+        let pruned = storage.prune_expired_user_tokens(now).await.unwrap();
+        assert_eq!(pruned, 1, "仅过期条目计入清理");
+        let user = storage.find_user("alice").await.unwrap().unwrap();
+        assert!(
+            crate::model::user::token_map_list(&user.token_map).is_empty(),
+            "过期会话清理（非整体过期不误伤账号）: {}",
+            user.token_map
+                .as_ref()
+                .map(|v| v.to_string())
+                .unwrap_or_default()
+        );
+
+        // bob：token 仍有效（expire=now+1d）但 40 天未活跃 → GAP 118 整体过期全清
+        storage
+            .insert_user(&crate::model::User {
+                username: "bob".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        storage
+            .add_user_token("bob", "t1", now)
+            .await
+            .unwrap();
+        storage
+            .update_user_session("bob", "t1", now - 40 * day)
+            .await
+            .unwrap();
+        let pruned = storage.prune_expired_user_tokens(now).await.unwrap();
+        assert_eq!(pruned, 1);
+        let bob = storage.find_user("bob").await.unwrap().unwrap();
+        assert!(
+            crate::model::user::token_map_list(&bob.token_map).is_empty(),
+            "整体过期用户全清"
+        );
+
+        // carol：未过期且活跃 → prune 零写入（pruned=0）
+        storage
+            .insert_user(&crate::model::User {
+                username: "carol".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        storage
+            .add_user_token("carol", "t1", now)
+            .await
+            .unwrap();
+        let pruned = storage.prune_expired_user_tokens(now).await.unwrap();
+        assert_eq!(pruned, 0, "活跃会话不动");
+        let carol = storage.find_user("carol").await.unwrap().unwrap();
+        assert_eq!(
+            crate::model::user::token_map_list(&carol.token_map),
+            vec!["t1".to_string()]
+        );
+
+        cleanup(storage, "prune-tok").await;
+    }
+
+    /// MEDIUM-7：add_book_group 并发不丢分组——原先读快照与 UPDATE 跨两个连接，
+    /// 并发追加同一本书互相覆盖；事务包裹后 8 个并发追加全部落库
+    #[tokio::test]
+    async fn test_add_book_group_concurrent_no_loss() {
+        let storage = test_storage("grp-race").await;
+        let ns = "default";
+        storage
+            .upsert_book(
+                ns,
+                &crate::model::Book {
+                    book_url: "https://race.example/b1".into(),
+                    name: "并发书".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        // 建 8 个分组（add 校验分组归属，需真实 book_groups 行）
+        let mut group_ids = Vec::new();
+        for i in 0..8 {
+            let g = storage
+                .save_book_group(
+                    ns,
+                    &crate::model::BookGroup {
+                        name: format!("组{i}"),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            group_ids.push(g.id);
+        }
+
+        // 8 个并发任务各追加一个分组到同一本书
+        let mut handles = Vec::new();
+        for gid in group_ids.clone() {
+            let st = storage.clone();
+            handles.push(tokio::spawn(async move {
+                st.add_book_group("default", "https://race.example/b1", gid)
+                    .await
+                    .unwrap()
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let books = storage.list_books(ns).await.unwrap();
+        let book = books
+            .iter()
+            .find(|b| b.book_url == "https://race.example/b1")
+            .unwrap();
+        let ids: Vec<i64> = serde_json::from_str(&book.group_ids).unwrap_or_default();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted, group_ids,
+            "并发追加的 8 个分组应全部落库（实际 {ids:?}）"
+        );
+
+        // remove 同规格：并发移除后对应分组全部消失
+        let mut handles = Vec::new();
+        for gid in group_ids.clone() {
+            let st = storage.clone();
+            handles.push(tokio::spawn(async move {
+                st.remove_book_group("default", "https://race.example/b1", gid)
+                    .await
+                    .unwrap()
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        let books = storage.list_books(ns).await.unwrap();
+        let book = books
+            .iter()
+            .find(|b| b.book_url == "https://race.example/b1")
+            .unwrap();
+        let ids: Vec<i64> = serde_json::from_str(&book.group_ids).unwrap_or_default();
+        assert!(ids.is_empty(), "并发移除后应清空（实际 {ids:?}）");
+
+        cleanup(storage, "grp-race").await;
     }
 }

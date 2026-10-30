@@ -58,7 +58,10 @@ fn main() -> Result<()> {
 /// `RotatingFileWriter`（按字节数轮转，无额外依赖）。
 fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+        // html5ever 的 "foster parenting not implemented" WARN 是解析器未实现特性的
+        // 固有噪音（一次全源搜索可爆 6千+条），对排障无价值——默认关闭（RUST_LOG 可覆盖）
+        .add_directive("html5ever=off".parse().expect("合法 EnvFilter 指令"));
 
     let log_dir = std::env::var("READER_LOG_DIR")
         .ok()

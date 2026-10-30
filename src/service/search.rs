@@ -121,6 +121,16 @@ pub fn build_search_url(search_url: &str, key: &str, page: i64, base_url: &str) 
 
 /// 相对 URL → 绝对（基于 base）
 pub fn to_absolute(url: &str, base: &str) -> String {
+    // 入口防御（legado isUrl 语义）：上游多值拼接产物（`url1\nurl2`）按换行拆分
+    // 取首个非空段——畸形 URL 不得整体外发请求
+    let url = if url.contains('\n') {
+        match url.lines().map(str::trim).find(|l| !l.is_empty()) {
+            Some(first) => first,
+            None => return String::new(),
+        }
+    } else {
+        url
+    };
     if url.is_empty() {
         return url.to_string();
     }
@@ -153,7 +163,10 @@ pub struct UrlSuffix {
     /// 宽容反序列化（「🏷QQ浏览器」等源 body 为 JSON 对象而非字符串——严格 String
     /// 会使整个后缀反序列化失败、url 带尾巴整体当 URL 请求）：String 原样，
     /// 其余 JSON 值序列化为紧凑字符串
-    #[serde(default, deserialize_with = "crate::util::json_text::deserialize_option")]
+    #[serde(
+        default,
+        deserialize_with = "crate::util::json_text::deserialize_option"
+    )]
     pub body: Option<String>,
     /// 附加请求头（与书源 header 合并）
     pub headers: Option<std::collections::HashMap<String, String>>,
@@ -249,14 +262,15 @@ pub(crate) fn format_book_author(author: &str) -> String {
         });
     // 元数据行兜底剔除：多行 author（详情页 p 原文整段提取——源清洗正则常按旧模板
     // 书写失配）时，剔除「分类：/状态：/格式：/大小：/更新：」等元数据行，首行保留
-    static META_LINE_RE: std::sync::LazyLock<crate::util::regex::Regex> =
-        std::sync::LazyLock::new(|| {
+    static META_LINE_RE: std::sync::LazyLock<crate::util::regex::Regex> = std::sync::LazyLock::new(
+        || {
             crate::util::regex::RegexBuilder::new(
                 r"(?m)^\s*((分类|状态|格式|大小|更新|时间|来源|字数|点击)[:：].*|(下载|RAR|ZIP|苹果端|安卓|电子书).*)$",
             )
             .build()
             .expect("author meta line 编译失败")
-        });
+        },
+    );
     let cleaned = if author.contains('\n') {
         // 元数据行剔除后仍多行 → 取首非空行（作者天然单行；多行即详情页整段杂烩）
         let after = META_LINE_RE.replace_all(author, "");
@@ -358,7 +372,9 @@ pub(crate) fn expand_url_js_templates(
                         .inspect_err(|_| {
                             let err = crate::parser::js::take_last_js_error()
                                 .unwrap_or_else(|| "unknown".to_string());
-                            eprintln!("URL {{{{js}}}} 求值失败 [{code}]: {err}");
+                            // 坏源搜索时可高频触发——走 tracing（可轮转/可过滤），
+                            // 不用裸 eprintln（曾绕过日志系统刷屏）
+                            tracing::warn!("URL {{{{js}}}} 求值失败 [{code}]: {err}");
                         })
                         .unwrap_or_else(|_| format!("{{{{{code}}}}}"));
                 out.push_str(&replaced);
@@ -647,13 +663,14 @@ async fn search_one_source_impl(
     let headers = source
         .header
         .as_deref()
-        .map(crawler::parse_header)
+        .map(|h| crawler::parse_header_for(h, source, ns))
         .unwrap_or_default();
 
     // 书源 JS 桥接（带用户命名空间：java.ajax / java.startBrowserAwait 自动携带
     // 书源 cookie；同流程内多次 eval 共享 java.put/get / setContent 文档）
-    let bridge =
-        JsBridge::new(&source.book_source_url, &source.book_source_name).with_namespace(ns);
+    // from_source：注入 jsLib/loginUrl/书源变量——header 与 searchUrl {{js}} 引用的
+    // GetUL/sign/AES_KEY 等函数均定义在 js_lib 或 loginUrl（曾用 new()：全部 ReferenceError）
+    let bridge = JsBridge::from_source(source, ns);
 
     // 1) @js:/js: 前缀 + 2) `,{...}` 后缀（js 修改 URL）→ 最终请求 URL
     let (url, suffix) = build_request_url(
@@ -789,9 +806,11 @@ async fn search_one_source_impl(
         Some(&bridge),
     );
 
-    // 书源使用统计：搜索命中（结果非空）→ use_count+1 / use_ts 刷新；
+    // 书源使用统计：搜索命中（结果非空且源启用）→ use_count+1 / use_ts 刷新；
+    // 口径：仅启用源计入（禁用源的命中不虚增 use_count 权重；正文抓取成功的
+    // 计数在 getBookContent 的 bump_source_use，互不重复）。
     // 计数失败仅记 debug 日志，不影响搜索流程（搜索/换源共用此入口）
-    if !books.is_empty() {
+    if !books.is_empty() && source.enabled {
         if let Err(e) = storage
             .bump_book_source_use(ns, &source.book_source_url)
             .await
@@ -873,7 +892,10 @@ fn replace_book_refs(rule: &str, book: &SearchBook) -> String {
         ("bookUrlPattern", ""),
         ("coverUrl", book.cover_url.as_deref().unwrap_or("")),
         ("wordCount", book.word_count.as_deref().unwrap_or("")),
-        ("latestChapterTitle", book.latest_chapter_title.as_deref().unwrap_or("")),
+        (
+            "latestChapterTitle",
+            book.latest_chapter_title.as_deref().unwrap_or(""),
+        ),
     ] {
         if val.is_empty() {
             continue;
@@ -910,8 +932,9 @@ fn analyze_book_list_impl(
     // legado BookList：列表规则前缀 `-` = 结果倒序；`+` = 去掉前缀（兼容旧写法）
     let (list_rule, reverse) = strip_list_rule_prefix(book_list_rule);
     let list_rule = list_rule.as_str();
-    let is_whole_js =
-        list_rule.contains("<js>") || list_rule.trim_start().starts_with("@js:") || list_rule.trim_start().starts_with("js:");
+    let is_whole_js = list_rule.contains("<js>")
+        || list_rule.trim_start().starts_with("@js:")
+        || list_rule.trim_start().starts_with("js:");
     // bookList 规则求条目：
     // - 整条 JS 规则（脚本内常含 ||，禁拆分）
     // - 其余按 legado splitSource `||` 语义顶层拆分逐个备选尝试，首个非空生效
@@ -961,6 +984,7 @@ fn analyze_book_list_impl(
         .filter_map(|(idx, item_html)| {
             // legado：同一本书条目共用一个 AnalyzeRule——@put 跨字段存入、@get 后置字段读取
             let mut vars = RuleVars::new();
+            crate::parser::js::attach_source_context(&mut vars, source, ns);
             // E10/AR5：搜索无章节上下文，仅绑定 baseUrl（JS 字段规则可用）
             vars.insert("baseUrl".to_string(), base_url.to_string());
             // E10：src = 当前条目 HTML（legacy AnalyzeRule.kt:661 bindings["src"]=content——
@@ -1030,13 +1054,8 @@ fn analyze_book_list_impl(
                 .as_deref()
                 .map(|r| replace_book_refs(r, &book))
                 .unwrap_or_default();
-            let book_url = field_url_with_vars(
-                &item_html,
-                Some(&book_url_rule),
-                "",
-                base_url,
-                &mut vars,
-            );
+            let book_url =
+                field_url_with_vars(&item_html, Some(&book_url_rule), "", base_url, &mut vars);
             if book_url.is_empty() {
                 // legacy getSearchItem：bookUrl 为空时回退当前响应 URL
                 book.book_url = base_url.to_string();
@@ -1051,9 +1070,13 @@ fn analyze_book_list_impl(
             let _ = idx;
             book.toc_url = String::new();
             // 字段 @put 的变量按条目 book_url 落书级表（详情/目录 @get 读取——
-            // 实测宜搜 name@put:{nid:nid} 此前只存条目局部，循环即丢）
+            // 实测宜搜 name@put:{nid:nid} 此前只存条目局部，循环即丢）。
+            // root 语义（豁免同源去重③，同键去重①/30s 去抖②仍生效）：键=每书一个，
+            // 量级=书数非洪流面——曾受③拦截：同源两本书持久化 JSON 相同（vars 只含
+            // 搜索页共享 baseUrl + 恒定 @put 值的书源）时第二本起不落库，LRU 逐出/
+            // 重启后该书 @get 读穿透双 miss 断链（读侧无跨书回退）
             if !vars.is_empty() {
-                crate::parser::rule::save_book_vars(
+                crate::parser::rule::save_book_vars_root(
                     ns,
                     &source.book_source_url,
                     &book.book_url,
@@ -1225,13 +1248,23 @@ fn field_url_impl(
     let Some(rule) = rule else {
         return default.to_string();
     };
-    let expanded = expand_embedded_impl(rule, context, vars.as_deref_mut());
+    let (expanded, unsafe_expand) =
+        expand_embedded_impl_checked(rule, context, vars.as_deref_mut());
     // legado makeUpRule：@get 在类型检测/URL 直判前替换
     // （URL 字段可拼 `https://x/...@get:{id}`——{{}} 内嵌已在上一步展开）
     let expanded = match vars.as_deref() {
         Some(v) => resolve_get(&expanded, v),
         None => expanded,
     };
+    if unsafe_expand {
+        // P2 移植：展开值含规则控制标记 → 视为最终 URL 文本（相对转绝对后返回），
+        // 不再经 field_impl 二次展开/规则解析（数据驱动 {{}} 注入防护）
+        return if expanded.trim().is_empty() {
+            default.to_string()
+        } else {
+            to_absolute(&expanded, base)
+        };
+    }
     // URL 型：路径或完整 URL → 直接返回（相对转绝对）；// 开头是 XPath 不在此列
     if expanded.starts_with('/') && !expanded.starts_with("//") {
         return to_absolute(&expanded, base);
@@ -1268,23 +1301,55 @@ pub(crate) fn expand_embedded_with_vars(rule: &str, context: &str, vars: &RuleVa
     expand_embedded_impl(&resolve_get(rule, vars), context, None)
 }
 
-fn expand_embedded_impl(rule: &str, context: &str, mut vars: Option<&mut RuleVars>) -> String {
+/// [`expand_embedded_with_vars`] 带安全标记版（P2 移植调用方使用）
+pub(crate) fn expand_embedded_with_vars_checked(
+    rule: &str,
+    context: &str,
+    vars: &RuleVars,
+) -> (String, bool) {
+    expand_embedded_impl_checked(&resolve_get(rule, vars), context, None)
+}
+
+fn expand_embedded_impl(rule: &str, context: &str, vars: Option<&mut RuleVars>) -> String {
+    expand_embedded_impl_checked(rule, context, vars).0
+}
+
+/// 展开 `{{...}}`（返回展开串 + 是否含规则控制标记）——P2 移植（对齐 rule.rs
+/// expand_inline_depth_checked/apply_rule_inner）：
+/// 1) **前向推进**：每轮从上一替换点之后继续扫描（曾每轮 `find("{{")` 从 0 重扫
+///    整串——替换值中的 `{{...}}` 被再次当 JS 求值，自指值（JSON 值引用自身）
+///    每轮膨胀直至死循环/OOM；legado makeUpRule 拼接替换值后不重新 tokenize）；
+/// 2) `is_rule_control_value` 标记：任一替换值含规则控制标记（@js:/<js>/##/{{、
+///    @ 与 // 前缀）→ 调用方不得把展开结果再当规则链解析/二次展开（书页数据可
+///    借 {{$.x}} 注入 @js: 代码被再次 eval——rule.rs P2 同款防护）；
+/// 3) 迭代上限：单串模板数超上限即停止展开（防御性封顶，正常规则 <10 个）。
+fn expand_embedded_impl_checked(
+    rule: &str,
+    context: &str,
+    mut vars: Option<&mut RuleVars>,
+) -> (String, bool) {
     // 单花括号 JSONPath 内嵌（{$.x} / {$[x]}——legado 内嵌规则单括号形态，实测纵横中文
     // bookUrl `bookId={$.bookId}`；仅识别 `$.`/`$[` 开头，避免与正则量词 `{2,3}` 等冲突）
     let rule = expand_single_brace_json(rule, context, vars.as_deref_mut());
     if !rule.contains("{{") {
-        return rule;
+        return (rule, false);
     }
-    let mut result = rule;
-    loop {
-        let Some(start) = result.find("{{") else {
+    let mut out = String::new();
+    let mut rest: &str = rule.as_str();
+    let mut unsafe_value = false;
+    let mut iterations = 0usize;
+    while iterations < EXPAND_EMBEDDED_MAX_ITERATIONS {
+        iterations += 1;
+        let Some(start) = rest.find("{{") else { break };
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end_rel) = after.find("}}") else {
+            // 未闭合 `{{`：连同余下文本原样保留（与旧实现一致）
+            out.push_str(&rest[start..]);
             break;
         };
-        let Some(end_rel) = result[start + 2..].find("}}") else {
-            break;
-        };
-        let end = start + 2 + end_rel;
-        let inner = &result[start + 2..end];
+        let end = end_rel;
+        let inner = &after[..end];
         let mut replacement = String::new();
         if inner.starts_with("$.") || inner.starts_with("$[") || inner.starts_with('{') {
             // JSONPath 内嵌：从上下文（可能是 JSON 对象文本）提取
@@ -1307,25 +1372,37 @@ fn expand_embedded_impl(rule: &str, context: &str, mut vars: Option<&mut RuleVar
             // 条目内 src=当前元素 HTML 可用；求值失败 → 空串）
             replacement = crate::parser::rule::inline_js(inner.trim(), context, vars.as_deref());
         }
-        result.replace_range(start..=end + 1, &replacement);
+        if crate::parser::rule::is_rule_control_value(&replacement) {
+            unsafe_value = true;
+        }
+        out.push_str(&replacement);
+        // 前向推进：替换值不再重扫（防数据驱动二次执行 / 自指值死循环）
+        rest = &after[end + 2..];
     }
-    result
+    out.push_str(rest);
+    (out, unsafe_value)
 }
+
+/// 单串模板展开迭代上限（防御性封顶；每轮至少消费 4 字节本已必然终止）
+const EXPAND_EMBEDDED_MAX_ITERATIONS: usize = 1000;
 
 /// 单花括号 JSONPath 内嵌展开（`{$.x}` / `{$[x]}` → 首个提取值；未命中 → 空串）。
 /// 仅当 `{` 后紧跟 `$.`/`$[` 且**前导不是另一个 `{`**（那是 `{{...}}` 双花括号形态）
-/// 才识别——普通大括号文本/正则量词不受影响
-fn expand_single_brace_json(
-    rule: &str,
-    context: &str,
-    mut vars: Option<&mut RuleVars>,
-) -> String {
+/// 才识别——普通大括号文本/正则量词不受影响。
+/// 前向推进（search_from 越过替换值）：曾 `search_from = start` 重扫替换值——
+/// 替换值含 `{$.` 时同一位置反复展开（自指值死循环）
+fn expand_single_brace_json(rule: &str, context: &str, mut vars: Option<&mut RuleVars>) -> String {
     if !rule.contains("{$.") && !rule.contains("{$[") {
         return rule.to_string();
     }
     let mut result = rule.to_string();
     let mut search_from = 0usize;
+    let mut iterations = 0usize;
     loop {
+        if iterations >= EXPAND_EMBEDDED_MAX_ITERATIONS {
+            break;
+        }
+        iterations += 1;
         let hay = &result[search_from..];
         let a = hay.find("{$.");
         let b = hay.find("{$[");
@@ -1353,7 +1430,8 @@ fn expand_single_brace_json(
         };
         let replacement = values.first().cloned().unwrap_or_default();
         result.replace_range(start..=end, &replacement);
-        search_from = start;
+        // 前向推进：越过替换值（替换值中的 `{$.` 不再二次展开）
+        search_from = start + replacement.len();
     }
     result
 }
@@ -1416,7 +1494,17 @@ fn field_impl(
     }
     let rule: &str = if puts.is_empty() { rule } else { &rule_cleaned };
     // legado 内嵌规则：{{$.xxx}} 从上下文提取替换（v1 支持 JSONPath 内嵌）
-    let rule = expand_embedded_impl(rule, context, vars.as_deref_mut());
+    let (rule, unsafe_expand) = expand_embedded_impl_checked(rule, context, vars.as_deref_mut());
+    if unsafe_expand {
+        // P2 移植（对齐 rule.rs apply_rule_inner）：替换值含规则控制标记（@js:/
+        // <js>/##/{{、@ 与 // 前缀）→ 展开结果视为纯文本值，不再走 @js: 后缀链
+        // 或规则解析——书页数据可借 {{$.x}} 注入 @js: 代码被再次 eval（带全量桥）
+        return if rule.trim().is_empty() {
+            default.to_string()
+        } else {
+            rule
+        };
+    }
     // @js: 后缀链（legado）：`提取规则@js:code` → 先提取，结果注入 result 执行 JS
     // （如猫眼章节 URL：$.path@js:java.aesBase64DecodeToString(...)）
     if let Some((main_part, js_code)) = rule.split_once("@js:") {
@@ -1442,9 +1530,18 @@ fn field_impl(
             js_env.insert("result".to_string(), first);
             // E10：@js: 后缀链同样绑定章节/书上下文（baseUrl/src——legacy evalJS 全量注入）
             push_js_context(&mut js_env, vars.as_deref());
+            // 带桥优先级：显式 bridge > vars.bridge（field_with_vars/field_url_impl 等
+            // 详情/目录路径只传 vars——曾传 None 裸 eval_js：jsLib 的 aes/sign 函数全部
+            // ReferenceError，搜索流同语法带桥正常——同一书源「搜索可用、详情/目录断」）
             let s = match bridge {
                 Some(b) => crate::parser::js::eval_js_with_bridge(js_code.trim(), &js_env, b),
-                None => crate::parser::js::eval_js(js_code.trim(), &js_env),
+                None => match vars.as_deref().and_then(|v| v.bridge.clone()) {
+                    Some(inner) => {
+                        let b = crate::parser::js::js_bridge_from_inner(inner);
+                        crate::parser::js::eval_js_with_bridge(js_code.trim(), &js_env, &b)
+                    }
+                    None => crate::parser::js::eval_js(js_code.trim(), &js_env),
+                },
             };
             if let Ok(s) = s {
                 if !s.is_empty() {
@@ -1504,6 +1601,15 @@ fn field_impl(
                 Some(v) => apply_with_vars(&rule, context, v),
                 None => apply(&rule, context),
             };
+            // isUrl=true：URL 字段仅取首个非空命中（legado getString0——与 CSS 分支
+            // 同语义；多值 join("\n") 不适用于 URL 字段，曾致详情 tocUrl/coverUrl
+            // 拼出 `url1\nurl2` 畸形 URL，波及大量 JsonPath 型源）
+            if is_url {
+                if let Some(first) = v.into_iter().find(|s| !s.is_empty()) {
+                    return first;
+                }
+                return default.to_string();
+            }
             // AR2b：与 CSS 分支同为 legacy getString 全量语义——多值（JSON 数组
             // 展开的正文段落等）以 "\n" 连接，非仅首个命中
             let items: Vec<String> = v.into_iter().filter(|s| !s.is_empty()).collect();
@@ -1618,6 +1724,52 @@ pub(crate) fn opt_field_with_bridge_vars(
 mod tests {
     use super::*;
 
+    /// P2 移植：{{...}} 展开前向推进——替换值中的 {{...}} 不再被二次当 JS 求值，
+    /// 且含控制标记的展开结果标记 unsafe（调用方据此停止规则链二次解析）
+    #[test]
+    fn test_expand_embedded_no_rescan_of_replacement() {
+        // $.x 的值本身含 {{js}} 形态文本：修复前替换值被重扫 → {{1+1}} 再次当 JS
+        // 执行（"A2B"）；修复后前向推进，替换值原样保留
+        let ctx = r#"{"x":"A{{1+1}}B"}"#;
+        let (out, unsafe_v) = expand_embedded_impl_checked("{{$.x}}", ctx, None);
+        assert_eq!(out, "A{{1+1}}B", "替换值中的 {{}} 不得二次展开");
+        assert!(unsafe_v, "含 {{ 的替换值应标记 unsafe");
+
+        // 自指值：JSON 值引用自身模板形态——修复前每轮重扫替换值，串每轮膨胀
+        // 直至死循环/OOM；修复后一次展开即终止
+        let ctx = r#"{"a":"x{{$.a}}y"}"#;
+        let (out, _) = expand_embedded_impl_checked("{{$.a}}", ctx, None);
+        assert_eq!(out, "x{{$.a}}y");
+    }
+
+    /// 书页数据注入 @js: 代码：修复前 {{$.x}} 替换值被重扫并按 @js: 后缀链二次
+    /// 执行（带全量源桥）；修复后展开结果标记 unsafe，按纯文本返回
+    #[test]
+    fn test_field_impl_data_injected_js_not_executed() {
+        let ctx = r#"{"y":"VAL","x":"$.y@js:'INJECTED-'+result"}"#;
+        let mut vars = RuleVars::new();
+        let out = field_with_vars(&ctx, Some("{{$.x}}"), "d", &mut vars);
+        assert_eq!(
+            out, "$.y@js:'INJECTED-'+result",
+            "数据注入的 @js: 代码不得被二次执行（P2：按纯文本返回）"
+        );
+    }
+
+    /// 单花括号 JSONPath 展开前向推进：替换值含 `{$.b}` 时不二次展开
+    /// （修复前 search_from=start 重扫替换值，自指值同一位置反复展开死循环）
+    #[test]
+    fn test_expand_single_brace_no_rescan() {
+        let ctx = r#"{"a":"{$.b}","b":"BV"}"#;
+        let mut vars = RuleVars::new();
+        let out = expand_single_brace_json("X{$.a}Y", &ctx, Some(&mut vars));
+        assert_eq!(out, "X{$.b}Y", "替换值中的 {{$.}} 不得二次展开");
+        // 自指值：一次展开即终止
+        let ctx = r#"{"a":"{$.a}"}"#;
+        let mut vars = RuleVars::new();
+        let out = expand_single_brace_json("V{$.a}", &ctx, Some(&mut vars));
+        assert_eq!(out, "V{$.a}");
+    }
+
     /// E8：字段清洗四件套（legacy formatBookName/Author/wordCountFormat/kind 归一）
     #[test]
     fn test_field_cleaning_helpers() {
@@ -1628,8 +1780,14 @@ mod tests {
         assert_eq!(format_book_name(""), "");
         // 多行 name → 首非空行（QQ浏览器搜索推荐聚合卡：`$..title` 递归命中卡内
         // 多书标题拼接成多行——第十七轮实测 resourceId=3 死链即源于该卡可点击）
-        assert_eq!(format_book_name("我竟然是修仙大佬\n我家老祖天天想跑路\n每天一个修仙小愿望"), "我竟然是修仙大佬");
-        assert_eq!(format_book_name("\n\n  \n首行前后有空白\n第二行"), "首行前后有空白");
+        assert_eq!(
+            format_book_name("我竟然是修仙大佬\n我家老祖天天想跑路\n每天一个修仙小愿望"),
+            "我竟然是修仙大佬"
+        );
+        assert_eq!(
+            format_book_name("\n\n  \n首行前后有空白\n第二行"),
+            "首行前后有空白"
+        );
         // 单行含 \r\n 也算多行（CRLF 拼接形态）
         assert_eq!(format_book_name("标题A\r\n标题B"), "标题A");
         // authorRegex：「作者：」前缀 / 「著」后缀
@@ -1789,6 +1947,42 @@ mod tests {
         );
     }
 
+    /// to_absolute 入口防御（legado isUrl）：上游多值拼接产物（含换行）按换行
+    /// 拆分取首个非空段——畸形 URL 不得整体外发
+    #[test]
+    fn test_to_absolute_multiline_takes_first_segment() {
+        assert_eq!(
+            to_absolute("https://a.test/1\nhttps://a.test/2", "https://b.test"),
+            "https://a.test/1"
+        );
+        // 首段为空/含首尾空白 → 取首个非空段（trim 后）
+        assert_eq!(
+            to_absolute("\n  /rel2\nhttps://x.test", "https://b.test/p"),
+            "https://b.test/rel2"
+        );
+        // 全空白段 → 空串
+        assert_eq!(to_absolute("\n \n\t", "https://b.test"), "");
+    }
+
+    /// field_url（isUrl=true）JsonPath 分支多命中取首值：不再 join("\n")
+    /// 拼出畸形 URL（修复前 JsonPath 分支不认 is_url，恒 join("\n")）
+    #[test]
+    fn test_field_url_jsonpath_multi_hit_takes_first() {
+        let mut vars = RuleVars::new();
+        // 绝对 URL 多命中 → 首值原样
+        let ctx = r#"{"urls":["https://a.test/1","https://a.test/2"]}"#;
+        let out = field_url_with_vars(ctx, Some("$.urls[*]"), "", "https://base.test", &mut vars);
+        assert_eq!(out, "https://a.test/1", "绝对 URL 多命中应仅取首值");
+        // 相对路径多命中 → 首值转绝对
+        let ctx = r#"{"u":["/a","/b"]}"#;
+        let out = field_url_with_vars(ctx, Some("$.u[*]"), "", "https://base.test/x", &mut vars);
+        assert_eq!(out, "https://base.test/a", "相对路径取首值并转绝对");
+        // 空数组 → 默认值（空串）
+        let ctx = r#"{"u":[]}"#;
+        let out = field_url_with_vars(ctx, Some("$.u[*]"), "dft", "https://base.test", &mut vars);
+        assert_eq!(out, "dft", "无命中应返回默认值");
+    }
+
     #[test]
     fn test_analyze_real_json_list() {
         // 真实猫眼 JSON（15 条）+ 真实规则
@@ -1889,8 +2083,7 @@ mod tests {
             "kind": "$.groupID##.*_##",
             "bookUrl": "https://novel.html5.qq.com/qbread/api/novel/bookInfo?resourceId={{book.kind}}"
         }));
-        let rule: SearchRule =
-            serde_json::from_value(src.rule_search.clone().unwrap()).unwrap();
+        let rule: SearchRule = serde_json::from_value(src.rule_search.clone().unwrap()).unwrap();
         let body = r#"{"data":{"state":[
             {"groupID":"90000001_1143352450","items":[{"title":"模拟修仙十年，我天下无敌","author":"混沌冬瓜精"}]},
             {"groupID":"tabpage_hub_novel_search_recomm_3","items":[
@@ -1911,7 +2104,12 @@ mod tests {
             &JsBridge::default(),
         );
         // 4 条 state：真实书 + 聚合卡保留，NovelGuid/空桩（name 空）丢弃
-        assert_eq!(books.len(), 2, "空名条目应被丢弃: {:?}", books.iter().map(|b| b.name.clone()).collect::<Vec<_>>());
+        assert_eq!(
+            books.len(),
+            2,
+            "空名条目应被丢弃: {:?}",
+            books.iter().map(|b| b.name.clone()).collect::<Vec<_>>()
+        );
         assert_eq!(books[0].name, "模拟修仙十年，我天下无敌");
         assert_eq!(books[0].author, "混沌冬瓜精");
         assert_eq!(
@@ -2639,8 +2837,13 @@ mod tests {
         let (u, s) = split_url_suffix(url);
         assert_eq!(u, "https://x.test/api/ads-read");
         assert_eq!(s.method.as_deref(), Some("POST"));
-        assert!(s.body.as_deref().is_some_and(|b| b.contains("\"Scene\":\"chapter\"") && b.contains("[1,2]")),
-            "对象 body 应规范为紧凑 JSON 字符串: {:?}", s.body);
+        assert!(
+            s.body
+                .as_deref()
+                .is_some_and(|b| b.contains("\"Scene\":\"chapter\"") && b.contains("[1,2]")),
+            "对象 body 应规范为紧凑 JSON 字符串: {:?}",
+            s.body
+        );
     }
 
     /// UrlSuffix.retry（legacy AnalyzeUrl UrlOption.retry，AnalyzeUrl.kt:564-573）：
@@ -2681,7 +2884,8 @@ mod tests {
             })),
             ..Default::default()
         };
-        let body = r#"{"books":[{"name":"测试书","author":"某人","nid":"23412","gid":"100023412"}]}"#;
+        let body =
+            r#"{"books":[{"name":"测试书","author":"某人","nid":"23412","gid":"100023412"}]}"#;
         let books = analyze_book_list(
             "default",
             body,
@@ -2759,8 +2963,7 @@ mod tests {
             })),
             ..Default::default()
         };
-        let rule: SearchRule =
-            serde_json::from_value(src.rule_explore.clone().unwrap()).unwrap();
+        let rule: SearchRule = serde_json::from_value(src.rule_explore.clone().unwrap()).unwrap();
         let body = r#"{"code":0,"message":"Success","result":{"resultList":[
             {"bookName":"剑来","author":"烽火戏诸侯","pseudonym":"烽火","bookId":"101","bookCover":"http://c/1.png","description":"简介一"},
             {"bookName":"雪中悍刀行","author":"烽火戏诸侯","bookId":"102"}
@@ -2775,7 +2978,10 @@ mod tests {
         );
         assert_eq!(books.len(), 2, "裸键 + || 备选应解析出 2 本: {books:?}");
         assert_eq!(books[0].name, "剑来");
-        assert_eq!(books[0].author, "烽火", "author 规则 pseudonym||authorName 应命中备选");
+        assert_eq!(
+            books[0].author, "烽火",
+            "author 规则 pseudonym||authorName 应命中备选"
+        );
         assert!(
             books[0].book_url.contains("bookId=101"),
             "bookUrl 内嵌 $.bookId 应展开: {}",

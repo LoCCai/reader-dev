@@ -21,9 +21,7 @@ fn expand_next_url(next: &str, base: &str, source: &BookSource, ns: &str) -> Str
     if !next.contains("{{") && !next.contains("<js>") && !next.starts_with("@js:") {
         return next.to_string();
     }
-    let bridge =
-        crate::parser::js::JsBridge::new(&source.book_source_url, &source.book_source_name)
-            .with_namespace(ns);
+    let bridge = crate::parser::js::JsBridge::from_source(source, ns);
     match crate::service::search::build_request_url(next, "", 1, base, &HashMap::new(), &bridge) {
         Ok((u, _suffix)) => u,
         Err(e) => {
@@ -138,7 +136,7 @@ pub async fn fetch_url(ns: &str, url: &str, source: &BookSource) -> Result<crawl
     let mut headers = source
         .header
         .as_deref()
-        .map(crawler::parse_header)
+        .map(|h| crawler::parse_header_for(h, source, ns))
         .unwrap_or_default();
     // 兜底：header（含 @js 动态生成）中 Referer 为**空串**时回填书源根——
     // 实测「📚QQ浏览器」源 header 为 @js 脚本动态生成 Referer:""（脚本缺陷），
@@ -162,9 +160,12 @@ pub async fn fetch_url(ns: &str, url: &str, source: &BookSource) -> Result<crawl
     }
     let (url_part, suffix) = crate::service::search::split_url_suffix(url);
     let mut final_url = url_part;
+    // URL option js 与 bodyJs 与搜索流同语法（search.rs build_request_url 带桥）——
+    // 曾裸 eval_js：jsLib（java.* / sign 等）全部 ReferenceError，URL 改写静默失效
+    let bridge = crate::parser::js::JsBridge::from_source(source, ns);
     if let Some(js) = &suffix.js {
         let vars = crate::service::search::js_vars("", 0, &source.book_source_url, &headers, "");
-        if let Ok(u) = crate::parser::js::eval_js(js, &vars) {
+        if let Ok(u) = crate::parser::js::eval_js_with_bridge(js, &vars, &bridge) {
             if !u.is_empty() {
                 final_url = u;
             }
@@ -283,7 +284,7 @@ pub async fn fetch_url(ns: &str, url: &str, source: &BookSource) -> Result<crawl
     if let Some(js) = &suffix.body_js {
         let vars =
             crate::service::search::js_vars("", 0, &source.book_source_url, &headers, &resp.body);
-        if let Ok(b) = crate::parser::js::eval_js(js, &vars) {
+        if let Ok(b) = crate::parser::js::eval_js_with_bridge(js, &vars, &bridge) {
             if !b.is_empty() {
                 resp.body = b;
             }
@@ -370,8 +371,14 @@ fn fallback_title(html: &str) -> String {
             continue;
         }
         // 验证/错误页标题黑名单——不作为书名（实测 m.yibige 详情被拦时 h1=「访问验证」）
-        const TITLE_BLACKLIST: [&str; 6] =
-            ["访问验证", "安全验证", "验证码", "403 forbidden", "404 not found", "just a moment"];
+        const TITLE_BLACKLIST: [&str; 6] = [
+            "访问验证",
+            "安全验证",
+            "验证码",
+            "403 forbidden",
+            "404 not found",
+            "just a moment",
+        ];
         let lower = c.to_ascii_lowercase();
         if TITLE_BLACKLIST.iter().any(|b| lower.contains(b)) {
             continue;
@@ -382,7 +389,34 @@ fn fallback_title(html: &str) -> String {
             .next()
             .unwrap_or(c)
             .trim();
-        return if head.is_empty() { c.to_string() } else { head.to_string() };
+        let base = if head.is_empty() { c } else { head };
+        // 首段无分隔符时可能整体粘连尾巴（"书名笔趣阁无弹窗免费阅读"实测样本）——
+        // 按常见站点尾巴关键词截断：只认首次出现，截后不足 2 字符则保留原文
+        const SITE_TAILS: [&str; 14] = [
+            "笔趣阁",
+            "无弹窗",
+            "免费阅读",
+            "全文阅读",
+            "全文免费",
+            "最新章节",
+            "小说网",
+            "文学网",
+            "阅读网",
+            "书屋",
+            "电子书",
+            "完结小说",
+            "手机版",
+            "无广告",
+        ];
+        for tail in SITE_TAILS {
+            if let Some(pos) = base.find(tail) {
+                let h = base[..pos].trim();
+                if h.chars().count() >= 2 {
+                    return h.to_string();
+                }
+            }
+        }
+        return base.to_string();
     }
     String::new()
 }
@@ -414,6 +448,7 @@ pub fn analyze_book_info(
     // legado init：先提取详情上下文（如 $.data），字段规则相对应用
     // @put/@get 变量随本书流程贯通（legado Book.putVariable）——详情→目录共享
     let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, book_url);
+    crate::parser::js::attach_source_context(&mut vars, source, ns);
     vars.book_name = book_name.map(str::to_string);
     // E10/AR5：详情页真实 URL → JS 求值绑定 baseUrl（搜索场景无章节上下文）
     vars.insert("baseUrl".to_string(), base_url.to_string());
@@ -421,14 +456,12 @@ pub fn analyze_book_info(
     let html = html.as_str();
     // kind 先求（tocUrl 的 {{book.kind}} 实体引用需要——「📚QQ浏览器」实测：
     // `bookId={{book.kind}}` 且 kind 规则映射 resourceID）
-    let kind_val: Option<String> = crate::service::search::opt_field_with_vars(
-        html,
-        rule.kind.as_deref(),
-        &mut vars,
-    )
-    .map(|k| crate::service::search::normalize_kind_list(&k));
+    let kind_val: Option<String> =
+        crate::service::search::opt_field_with_vars(html, rule.kind.as_deref(), &mut vars)
+            .map(|k| crate::service::search::normalize_kind_list(&k));
     // tocUrl 规则（legacy BookInfo.tocUrl 为完整字段规则）：
-    // ① 选择器形态（CSS/XPath/JSONPath/@js 链）→ field 全量求值；
+    // ① URL 型求值走 field_url_with_vars（legado isUrl 取首值语义，搜索链路同款）
+    //   ——多命中不再 join("\n") 拼出畸形 URL（波及大量 JsonPath 型源）；
     // ② 求值为空（或 URL 型字面量含未展开 {{}}）时回退内嵌模板展开；
     // ③ `{{book.xxx}}` 实体引用替换为已求值字段（搜索条目同款语义）
     let toc_url = rule
@@ -440,17 +473,19 @@ pub fn analyze_book_info(
                 book_name.unwrap_or_default(),
                 kind_val.as_deref().unwrap_or_default(),
             );
-            let evaluated = crate::service::search::field_with_vars(html, Some(&r), "", &mut vars);
-            // URL 型规则（`https://...?x={{$.y}}`）被当字面量原样返回时 {{}} 未展开
-            // ——实测 QQ浏览器 tocUrl `bookId={{$.resourceID}}` 恒空参（目录 0 章）。
-            // 含未展开 {{}} 的结果走内嵌展开（init 后上下文相对求值）
+            let evaluated =
+                crate::service::search::field_url_with_vars(html, Some(&r), "", base_url, &mut vars);
+            // URL 型规则（`https://...?x={{$.y}}`）的 {{}} 未展开/未闭合时求值结果
+            // 含 {{ ——实测 QQ浏览器 tocUrl `bookId={{$.resourceID}}` 恒空参（目录 0 章）。
+            // 走内嵌展开（init 后上下文相对求值）
             if !evaluated.is_empty() && !evaluated.contains("{{") {
                 evaluated
             } else {
                 crate::service::search::expand_embedded_with_vars(&r, html, &vars)
             }
         })
-        .filter(|r| !r.is_empty())
+        // 展开后仍含未展开 {{ 的视为求值失败——不把规则文本当 URL 外发（回退 baseUrl）
+        .filter(|r| !r.is_empty() && !r.contains("{{"))
         .map(|r| to_abs(&r, base_url));
 
     let info = BookInfo {
@@ -483,12 +518,22 @@ pub fn analyze_book_info(
             rule.update_time.as_deref(),
             &mut vars,
         ),
-        cover_url: crate::service::search::opt_field_with_vars(
-            html,
-            rule.cover_url.as_deref(),
-            &mut vars,
-        )
-        .map(|c| to_abs(&c, base_url)),
+        // 封面同 tocUrl：field_url_with_vars 取首值语义（多命中不 join）+ 求值空 →
+        // 内嵌展开回退；仍含未展开 {{ 的视为失败（不把规则文本当 URL 外发）
+        cover_url: rule
+            .cover_url
+            .as_deref()
+            .map(|r| {
+                let evaluated =
+                    crate::service::search::field_url_with_vars(html, Some(r), "", base_url, &mut vars);
+                if !evaluated.is_empty() && !evaluated.contains("{{") {
+                    evaluated
+                } else {
+                    crate::service::search::expand_embedded_with_vars(r, html, &vars)
+                }
+            })
+            .filter(|c| !c.is_empty() && !c.contains("{{"))
+            .map(|c| to_abs(&c, base_url)),
         // legacy BookInfo：tocUrl 为空时用 baseUrl（详情页即目录页）
         toc_url: toc_url.clone().or_else(|| Some(base_url.to_string())),
         word_count: crate::service::search::opt_field_with_vars(
@@ -511,11 +556,17 @@ pub fn analyze_book_info(
         related_books: analyze_related_books(html, base_url, source),
         book_type: source.book_source_type,
     };
-    // 目录流程（getBookToc）只带 tocUrl，无 bookUrl——按两个键都存，保证命中
-    crate::parser::rule::save_book_vars(ns, &source.book_source_url, book_url, &vars);
-    if let Some(t) = &toc_url {
-        crate::parser::rule::save_book_vars(ns, &source.book_source_url, t, &vars);
-    }
+    // 目录流程（getBookToc）只带 tocUrl，无 bookUrl——按两个键都存，保证命中。
+    // two_level（root 语义，豁免同源去重③）：两键都是书级兜底键（量级=书数非洪流面）——
+    // 曾受③拦截：同源两本书持久化 JSON 相同（vars 只含搜索页共享 baseUrl + 恒定
+    // @put 值的书源）时第二本起不落库，LRU 逐出/重启后详情 @get 读穿透双 miss 断链
+    crate::parser::rule::save_book_vars_two_level(
+        ns,
+        &source.book_source_url,
+        book_url,
+        toc_url.as_deref().unwrap_or(book_url),
+        &vars,
+    );
     info
 }
 
@@ -640,10 +691,19 @@ pub async fn apply_login_check_js(
     vars.insert("cookie".to_string(), cookie);
     vars.insert("result".to_string(), body.to_string());
     vars.insert("url".to_string(), url.to_string());
-    let out = match bridge {
-        Some(b) => crate::parser::js::eval_js_with_bridge(js, &vars, b).unwrap_or_default(),
-        None => crate::parser::js::eval_js(js, &vars).unwrap_or_default(),
+    // 服务层调用点（详情/目录/正文/探索）传 None——曾裸 eval_js：loginCheckJs 引用
+    // jsLib 函数（书旗 Token() 等）ReferenceError → 空输出被当作「已登录」静默吞掉；
+    // 搜索流同语法带桥正常。与搜索流（search.rs:781 Some(&bridge)）对齐：此处兜底
+    // 构建同款书源桥（显式传入优先）
+    let owned_bridge;
+    let bridge = match bridge {
+        Some(b) => b,
+        None => {
+            owned_bridge = crate::parser::js::JsBridge::from_source(source, ns);
+            &owned_bridge
+        }
     };
+    let out = crate::parser::js::eval_js_with_bridge(js, &vars, bridge).unwrap_or_default();
     let out = out.trim();
     if out.is_empty() || out.eq_ignore_ascii_case("true") || out == "1" {
         body.to_string()
@@ -687,7 +747,11 @@ pub async fn analyze_toc_with_kind(
     book_url: &str,
     book_kind: Option<&str>,
 ) -> Result<Vec<BookChapter>> {
-    match analyze_toc_impl(ns, toc_url, source, max_pages, book_name, book_url, book_kind).await {
+    match analyze_toc_impl(
+        ns, toc_url, source, max_pages, book_name, book_url, book_kind,
+    )
+    .await
+    {
         Ok(v) => {
             crate::service::health::clear_source_invalid(ns, &source.book_source_url);
             Ok(v)
@@ -720,43 +784,62 @@ async fn analyze_toc_impl(
     // P1 双键合并：book_url 级作底、toc_url 级覆盖
     let mut vars =
         crate::parser::rule::load_book_vars_merged(ns, &source.book_source_url, book_url, toc_url);
+    crate::parser::js::attach_source_context(&mut vars, source, ns);
     vars.book_name = book_name.map(str::to_string);
     // 目录阶段 book.kind 实体引用（chapterUrl JS `BookID: book.kind`）——详情传入；
     // 缺省时从 tocUrl 的 bookId=\d+ 提取（QQ 型源通用形态）
-    let kind_fallback = book_kind
-        .map(str::to_string)
-        .or_else(|| {
-            static BOOK_ID_RE: std::sync::OnceLock<crate::util::regex::Regex> =
-                std::sync::OnceLock::new();
-            let re = BOOK_ID_RE.get_or_init(|| {
-                crate::util::regex::Regex::new(r"bookId=(\d+)").expect("bookId 正则")
-            });
-            re.captures_iter(toc_url)
-                .next()
-                .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
-        });
+    let kind_fallback = book_kind.map(str::to_string).or_else(|| {
+        static BOOK_ID_RE: std::sync::OnceLock<crate::util::regex::Regex> =
+            std::sync::OnceLock::new();
+        let re = BOOK_ID_RE
+            .get_or_init(|| crate::util::regex::Regex::new(r"bookId=(\d+)").expect("bookId 正则"));
+        re.captures_iter(toc_url)
+            .next()
+            .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
+    });
     if let Some(k) = kind_fallback {
         vars.insert("bookKind".to_string(), k);
     }
 
-    for _page in 0..max_pages {
-        let resp = fetch_url(ns, &current_url, source).await?;
+    // 规则解析一次即可（每页不变）；chapterList 缺失时无需抓取页面——
+    // 提前短路（曾先 fetch 后判空：空壳/坏源也要白等整轮抓取超时才返回空目录）
+    let rule: TocRule = source
+        .rule_toc
+        .as_ref()
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let Some(list_rule) = rule.chapter_list.clone() else {
+        return Ok(all);
+    };
+    // legado 目录列表前缀：`-` = 全部目录倒序；`+` = 仅去前缀
+    let (list_rule, page_reverse) = crate::service::search::strip_list_rule_prefix(&list_rule);
+    reverse |= page_reverse;
+    // 多页目录同 URL 循环防御：nextTocUrl 指回已访问页时提前终止（防同 URL
+    // 反复抓取占满 max_pages）
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    visited.insert(current_url.clone());
+
+    for page_idx in 0..max_pages {
+        // 第 ≥2 页抓取失败不再整单中断——保留已抓章返回（部分目录优于报错空手而归）
+        let resp = match fetch_url(ns, &current_url, source).await {
+            Ok(r) => r,
+            Err(e) => {
+                if page_idx == 0 {
+                    return Err(e);
+                }
+                tracing::warn!(
+                    "多页目录第 {} 页抓取失败，保留已抓 {} 章: {e:#}",
+                    page_idx + 1,
+                    all.len()
+                );
+                break;
+            }
+        };
         // legado WebBook.getChapterList：目录页抓取后执行 loginCheckJs
         let page_body = apply_login_check_js(ns, source, &resp.body, &resp.url, None).await;
         let base = resp.url.clone();
         // E10/AR5：真实页 URL → JS 求值绑定 baseUrl（push_js_context 透传）
         vars.insert("baseUrl".to_string(), base.clone());
-        let rule: TocRule = source
-            .rule_toc
-            .as_ref()
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        let Some(list_rule) = rule.chapter_list.clone() else {
-            break;
-        };
-        // legado 目录列表前缀：`-` = 全部目录倒序；`+` = 仅去前缀
-        let (list_rule, page_reverse) = crate::service::search::strip_list_rule_prefix(&list_rule);
-        reverse |= page_reverse;
 
         // legado init：目录上下文提取（每页应用）
         let mut page_html =
@@ -765,7 +848,10 @@ async fn analyze_toc_impl(
         if let Some(js) = &rule.pre_update_js {
             if !js.trim().is_empty() {
                 vars.insert("result".to_string(), page_html.clone());
-                page_html = crate::parser::js::eval_js(js.trim(), &vars).unwrap_or(page_html);
+                // vars 已 attach_source_context（737）——带桥求值（jsLib 的 GetUL 等
+                // 可用；曾裸 eval_js：爱丽丝书屋等源目录预处理静默失败返回未处理页）
+                page_html = crate::parser::rule::eval_rule_js(js.trim(), &vars, Some(&vars))
+                    .unwrap_or(page_html);
             }
         }
         // E10（目录路径补全）：src 绑定 = 当前页预处理后文档
@@ -798,8 +884,15 @@ async fn analyze_toc_impl(
         }
         // E7：翻页 URL 过模板/JS 管线后再绝对化
         let next = expand_next_url(&next, &base, source, ns);
-        current_url = to_abs(&next, &base);
-        crate::parser::rule::save_book_vars(ns, &source.book_source_url, &current_url, &vars);
+        let next_abs = to_abs(&next, &base);
+        // 循环回访（nextTocUrl 指回已访问页）→ 提前终止
+        if !visited.insert(next_abs.clone()) {
+            tracing::warn!("多页目录 nextTocUrl 循环回访 [{next_abs}]，提前终止");
+            break;
+        }
+        current_url = next_abs;
+        // 目录页级兜底键（量级=页数）：豁免同源去重，保证多页目录中途键在库
+        crate::parser::rule::save_book_vars_root(ns, &source.book_source_url, &current_url, &vars);
     }
 
     crate::parser::rule::save_book_vars_two_level(
@@ -834,6 +927,7 @@ pub async fn parse_toc_page(
     // P1 双键合并：book_url 级作底、当前页级覆盖
     let mut vars =
         crate::parser::rule::load_book_vars_merged(ns, &source.book_source_url, book_url, url);
+    crate::parser::js::attach_source_context(&mut vars, source, ns);
     vars.book_name = book_name.map(str::to_string);
     // E10/AR5：真实页 URL → JS 求值绑定 baseUrl
     vars.insert("baseUrl".to_string(), base.clone());
@@ -851,7 +945,9 @@ pub async fn parse_toc_page(
     if let Some(js) = &rule.pre_update_js {
         if !js.trim().is_empty() {
             vars.insert("result".to_string(), page_html.clone());
-            page_html = crate::parser::js::eval_js(js.trim(), &vars).unwrap_or(page_html);
+            // 带桥求值（vars 已 attach_source_context，868）
+            page_html = crate::parser::rule::eval_rule_js(js.trim(), &vars, Some(&vars))
+                .unwrap_or(page_html);
         }
     }
     let items = toc_items(&list_rule, &page_html);
@@ -962,7 +1058,15 @@ fn chapter_url_with_cascade(
     base: &str,
     vars: &mut crate::parser::rule::RuleVars,
 ) -> String {
-    println!("[cascade] rule_head={:?} has_nl={}", &rule[..rule.len().min(30)], rule.contains('\n'));
+    // 逐章节项调用（千次/目录）——仅 DBG_TOC 调试时输出
+    //（曾为裸 println：10h 刷 37 万行日志洪水，且绕过 tracing 级别与轮转）
+    if std::env::var("DBG_TOC").is_ok() {
+        println!(
+            "[cascade] rule_head={:?} has_nl={}",
+            &rule[..rule.len().min(30)],
+            rule.contains('\n')
+        );
+    }
     if !rule.contains('\n') {
         return crate::service::search::field_url_with_vars(item, Some(rule), "", base, vars);
     }
@@ -994,7 +1098,10 @@ fn chapter_url_with_cascade(
                 .replace("book.name", &format!("{bn:?}"))
                 .replace("book.bookUrl", &format!("{bu:?}"));
             vars.insert("result".to_string(), ctx.clone());
-            match crate::parser::js::eval_js_with_bridge(js.trim(), vars, &crate::parser::js::JsBridge::default()) {
+            // 带桥求值：vars 由 analyze_toc_impl attach_source_context 注入（听小说APP
+            // 等多行 chapterUrl 调 jsLib 的 nativeSign——曾用空 bridge 全部
+            // ReferenceError → 级联返回空串 → 章节 URL 回退目录页）
+            match crate::parser::rule::eval_rule_js(js.trim(), vars, Some(vars)) {
                 Ok(out) => ctx = out,
                 Err(e) => {
                     tracing::warn!("chapterUrl 多行级联 JS 段失败: {e}");
@@ -1008,9 +1115,15 @@ fn chapter_url_with_cascade(
             // chapterUrl 是 URL 字段——用 URL 语义求值（直判+{{}}展开+相对拼接），
             // 普通 field 会把 URL 模板当 JsonPath 解析成空（实测 🏷 源整条被解析为空
             // 后 ctx 残留 item 原文，拼出 /api/book/%7B... 乱码 URL）
-            let mut got = crate::service::search::field_url_with_vars(&ctx, Some(seg), "", base, vars);
+            let mut got =
+                crate::service::search::field_url_with_vars(&ctx, Some(seg), "", base, vars);
             if got.contains("{{") {
-                got = crate::service::search::expand_embedded_with_vars(&got, &ctx, vars);
+                // P2：展开值含规则控制标记（数据注入 {{}}）→ 不再二次展开
+                let (exp, unsafe_v) =
+                    crate::service::search::expand_embedded_with_vars_checked(&got, &ctx, vars);
+                if !unsafe_v {
+                    got = exp;
+                }
             }
             if !got.is_empty() {
                 ctx = got;
@@ -1043,7 +1156,12 @@ fn chapters_from_items(
                 None => String::new(),
             };
             if std::env::var("DBG_TOC").is_ok() && i < 2 {
-                println!("[toc-item {i}] item={:?} title={:?} url={:?}", &item[..item.len().min(120)], &title[..title.len().min(20)], &url[..url.len().min(160)]);
+                println!(
+                    "[toc-item {i}] item={:?} title={:?} url={:?}",
+                    &item[..item.len().min(120)],
+                    &title[..title.len().min(20)],
+                    &url[..url.len().min(160)]
+                );
             }
             if title.is_empty() && url.is_empty() {
                 return None;
@@ -1220,6 +1338,7 @@ pub async fn analyze_media_url(
         book_url,
         chapter_url,
     );
+    crate::parser::js::attach_source_context(&mut vars, source, ns);
     vars.chapter_title = chapter_title.map(str::to_string);
     vars.book_name = book_name.map(str::to_string);
     let resp = fetch_url(ns, chapter_url, source).await?;
@@ -1231,7 +1350,9 @@ pub async fn analyze_media_url(
     if let Some(js) = &rule.pre_update_js {
         if !js.trim().is_empty() {
             vars.insert("result".to_string(), page_html.clone());
-            page_html = crate::parser::js::eval_js(js.trim(), &vars).unwrap_or(page_html);
+            // 带桥求值（vars 已 attach_source_context，1248）
+            page_html = crate::parser::rule::eval_rule_js(js.trim(), &vars, Some(&vars))
+                .unwrap_or(page_html);
         }
     }
     for v in crate::parser::rule::apply_with_vars(&content_rule, &page_html, &mut vars) {
@@ -1289,6 +1410,7 @@ pub async fn analyze_comic_images(
         book_url,
         chapter_url,
     );
+    crate::parser::js::attach_source_context(&mut vars, source, ns);
     vars.chapter_title = chapter_title.map(str::to_string);
     vars.book_name = book_name.map(str::to_string);
     let resp = fetch_url(ns, chapter_url, source).await?;
@@ -1299,7 +1421,9 @@ pub async fn analyze_comic_images(
     if let Some(js) = &rule.pre_update_js {
         if !js.trim().is_empty() {
             vars.insert("result".to_string(), page_html.clone());
-            page_html = crate::parser::js::eval_js(js.trim(), &vars).unwrap_or(page_html);
+            // 带桥求值（vars 已 attach_source_context，1318）
+            page_html = crate::parser::rule::eval_rule_js(js.trim(), &vars, Some(&vars))
+                .unwrap_or(page_html);
         }
     }
     for v in crate::parser::rule::apply_with_vars(&content_rule, &page_html, &mut vars) {
@@ -1394,6 +1518,7 @@ async fn analyze_content_impl(
         book_url,
         chapter_url,
     );
+    crate::parser::js::attach_source_context(&mut vars, source, ns);
     vars.chapter_title = chapter_title.map(str::to_string);
     vars.book_name = book_name.map(str::to_string);
     // E10/AR5：章节上下文 → JS 绑定 chapter.url / title（legacy setChapter）
@@ -1433,7 +1558,8 @@ async fn analyze_content_impl(
         // E7：翻页 URL 过模板/JS 管线后再绝对化
         let next = expand_next_url(&next, &base, source, ns);
         current_url = to_abs(&next, &base);
-        crate::parser::rule::save_book_vars(ns, &source.book_source_url, &current_url, &vars);
+        // 目录页级兜底键（量级=页数）：豁免同源去重，保证多页目录中途键在库
+        crate::parser::rule::save_book_vars_root(ns, &source.book_source_url, &current_url, &vars);
     }
 
     // P1 双键回写：章节键 + book_url 键（后续其他章节直接取正文时 book 级仍可见——
@@ -1477,7 +1603,8 @@ pub fn analyze_content_from_with_vars(
     let html = if let Some(js) = &rule.pre_update_js {
         if !js.trim().is_empty() {
             vars.insert("result".to_string(), html.clone());
-            crate::parser::js::eval_js(js.trim(), vars).unwrap_or(html.clone())
+            // 带桥求值：vars 携带书源 bridge 时 jsLib 可用（与搜索流同语法同语义）
+            crate::parser::rule::eval_rule_js(js.trim(), vars, Some(vars)).unwrap_or(html.clone())
         } else {
             html
         }
@@ -1937,6 +2064,23 @@ mod init_rule_tests {
 mod tests {
     use super::*;
 
+    /// 详情页书名兜底：站点尾巴截断（实测样本：无分隔符整体粘连"笔趣阁无弹窗免费阅读"）
+    #[test]
+    fn test_fallback_title_site_tail() {
+        let t = |html: &str| fallback_title(html);
+        // 无分隔符整体粘连（156zwcc 实测样本）
+        assert_eq!(
+            t("<html><head><title>重生官场我真的不想再升职了笔趣阁无弹窗免费阅读</title></head><body></body></html>"),
+            "重生官场我真的不想再升职了"
+        );
+        // 常规分隔符截断仍优先
+        assert_eq!(t("<title>诡秘之主-笔趣阁</title>"), "诡秘之主");
+        // 无尾巴关键词 → 保留原文
+        assert_eq!(t("<title>赘婿</title>"), "赘婿");
+        // 尾巴关键词在开头（截后 <2 字符）→ 保留原文
+        assert_eq!(t("<title>笔趣阁</title>"), "笔趣阁");
+    }
+
     fn test_source() -> BookSource {
         BookSource {
             book_source_url: "http://127.0.0.1:9999".into(),
@@ -1992,6 +2136,108 @@ mod tests {
         let html = r#"<h1 class="bookname">测试书</h1><p class="author">作者X</p>"#;
         let info = analyze_book_info("default", html, base, &src, base, None);
         assert_eq!(info.toc_url.as_deref(), Some(base), "tocUrl 应回退 baseUrl");
+    }
+
+    /// 详情 tocUrl/coverUrl 多命中（JsonPath 数组）→ isUrl 取首值语义：
+    /// 不再 join("\n") 拼出 `url1\nurl2` 畸形 URL（波及大量 JsonPath 型源）
+    #[test]
+    fn test_info_toc_cover_multi_hit_first_only() {
+        let mut src = test_source();
+        src.rule_book_info = Some(serde_json::json!({
+            "name": "$.name",
+            "tocUrl": "$.tocs[*]",
+            "coverUrl": "$.covers[*]"
+        }));
+        let html = r#"{"name":"书","tocs":["/toc1","/toc2","/toc3"],"covers":["/c1.jpg","/c2.jpg"]}"#;
+        let base = "http://x.test/book/1";
+        let info = analyze_book_info("default", html, base, &src, base, None);
+        assert_eq!(
+            info.toc_url.as_deref(),
+            Some("http://x.test/toc1"),
+            "tocUrl 多命中应仅取首值: {:?}",
+            info.toc_url
+        );
+        assert_eq!(
+            info.cover_url.as_deref(),
+            Some("http://x.test/c1.jpg"),
+            "coverUrl 多命中应仅取首值: {:?}",
+            info.cover_url
+        );
+    }
+
+    /// 详情 tocUrl 求值结果含未展开 {{（未闭合模板）→ 视为失败：
+    /// 不把规则文本当 URL 外发，回退 baseUrl
+    #[test]
+    fn test_info_toc_unexpanded_template_falls_back() {
+        let mut src = test_source();
+        src.rule_book_info = Some(serde_json::json!({
+            "name": "$.name",
+            "tocUrl": "https://api.test/read?bid={{$.id"
+        }));
+        let html = r#"{"name":"书"}"#;
+        let base = "http://x.test/book/1";
+        let info = analyze_book_info("default", html, base, &src, base, None);
+        assert_eq!(
+            info.toc_url.as_deref(),
+            Some(base),
+            "未展开 {{ 的 tocUrl 应回退 baseUrl: {:?}",
+            info.toc_url
+        );
+    }
+
+    /// 多页目录：第 ≥2 页抓取失败不再整单中断——保留第 1 页已抓章返回
+    /// （nextTocUrl 指向拒绝连接的本地端口 1）
+    #[tokio::test]
+    async fn test_toc_second_page_failure_keeps_chapters() {
+        let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true);
+        // 第 1 页：2 章 + nextTocUrl 指向无监听端口（连接拒绝 → fetch Err）
+        let body = r#"{"data":[{"t":"第一章","u":"/c/1"},{"t":"第二章","u":"/c/2"}],"nextUrl":"http://127.0.0.1:1/toc2"}"#;
+        let base = serve(body).await;
+        let mut src = test_source();
+        src.book_source_url = format!("{base}/src");
+        src.rule_toc = Some(serde_json::json!({
+            "chapterList": "$.data",
+            "chapterName": "$.t",
+            "chapterUrl": "$.u",
+            "nextTocUrl": "$.nextUrl"
+        }));
+        let toc_url = format!("{base}/toc");
+        let chapters = analyze_toc("default", &toc_url, &src, 5, None, "")
+            .await
+            .unwrap();
+        assert_eq!(
+            chapters.len(),
+            2,
+            "第 2 页抓取失败应保留第 1 页已抓章"
+        );
+    }
+
+    /// 多页目录 nextTocUrl 同 URL 循环：visited 防御提前终止——
+    /// 服务器只被请求 1 次（无防御时将循环拉满 max_pages 页）
+    #[tokio::test]
+    async fn test_toc_next_url_cycle_terminates() {
+        let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true);
+        // 固定响应：1 章 + nextTocUrl 恒指回自身（相对 /toc → 绝对化即当前页）
+        let body = r#"{"data":[{"t":"第一章","u":"/c/1"}],"nextUrl":"/toc"}"#;
+        let (base, hits) = serve_counted(body).await;
+        let mut src = test_source();
+        src.book_source_url = format!("{base}-src");
+        src.rule_toc = Some(serde_json::json!({
+            "chapterList": "$.data",
+            "chapterName": "$.t",
+            "chapterUrl": "$.u",
+            "nextTocUrl": "$.nextUrl"
+        }));
+        let toc_url = format!("{base}/toc");
+        let chapters = analyze_toc("default", &toc_url, &src, 5, None, "")
+            .await
+            .unwrap();
+        assert_eq!(chapters.len(), 1, "循环页章节应去重为 1 章");
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "nextTocUrl 指回自身时应只请求 1 次（visited 防循环）"
+        );
     }
 
     /// legacy canReName：书源规则未声明 canReName 时保留书架已有书名/作者
@@ -2224,6 +2470,9 @@ mod tests {
         let src_key = "https://src.test/rt";
         let mut vars = crate::parser::rule::RuleVars::new();
         vars.insert("token".to_string(), "T0KEN-9".to_string());
+        // 预先以同源 leaf 键写入相同内容——模拟目录直达流程"逐章循环先于 two_level"
+        // 污染同源去重基线；随后 two_level 的 root 写必须豁免同源去重保证落库
+        crate::parser::rule::save_book_vars(&ns, src_key, "https://b.test/toc-poison", &vars);
         crate::parser::rule::save_book_vars_two_level(
             &ns,
             src_key,
@@ -2232,16 +2481,21 @@ mod tests {
             &vars,
         );
 
+        // two_level 双键均豁免同源去重（书/目录级兜底键必在库）——leaf 与 root 同内容
+        // 也不会被去重跳过（逐章 ch.url 循环才是去重对象）
         let leaf = storage
             .get_book_vars_cache(&ns, src_key, "https://b.test/c/1")
             .await
             .unwrap();
-        assert!(leaf.is_some(), "leaf 键应落库");
+        assert!(
+            leaf.is_some(),
+            "two_level 的 leaf（toc 级）键应落库（兜底键豁免去重）"
+        );
         let root = storage
             .get_book_vars_cache(&ns, src_key, "https://b.test/book")
             .await
             .unwrap();
-        assert!(root.is_some(), "root 键应落库");
+        assert!(root.is_some(), "root 键应落库（全书兜底键必在库）");
 
         crate::parser::rule::clear_book_vars_memory_cache_ns(&ns);
         let merged = crate::parser::rule::load_book_vars_merged(
@@ -2253,10 +2507,57 @@ mod tests {
         assert_eq!(
             merged.get("token").map(String::as_str),
             Some("T0KEN-9"),
-            "清内存后应读穿透 SQLite 回填"
+            "清内存后应读穿透 SQLite 回填（leaf 缺行经 root 命中）"
         );
         // 上下文字段不随持久化复活
         assert!(merged.chapter_title.is_none() && merged.book_name.is_none());
+
+        teardown_book_vars_db(storage, &dir);
+    }
+
+    /// 搜索/详情阶段书级写豁免同源去重③（root 语义）：同源两本书持久化 JSON 完全
+    /// 相同（vars 只含搜索页共享 baseUrl + 恒定 @put 值的书源形态）时第二本起同样
+    /// 落库——曾受③拦截，LRU 逐出（512 条）或重启后该书 @get 读穿透双 miss 断链。
+    /// 对照：章节级洪流面的普通 save_book_vars 同源同内容仍去重（既有语义不回退）
+    #[tokio::test]
+    async fn test_book_vars_root_write_same_source_two_books() {
+        let _guard = BOOK_VARS_DB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let ns = format!("p1root-{}", uuid::Uuid::new_v4());
+        let (storage, dir) = setup_book_vars_db("root").await;
+        let src_key = "https://src.test/root-dedup";
+        let mut vars = crate::parser::rule::RuleVars::new();
+        vars.insert("token".to_string(), "TK-1".to_string());
+
+        // 搜索/详情阶段同款 root 写：两本书 vars JSON 完全相同
+        crate::parser::rule::save_book_vars_root(&ns, src_key, "https://b.test/book/1", &vars);
+        crate::parser::rule::save_book_vars_root(&ns, src_key, "https://b.test/book/2", &vars);
+
+        // 重启模拟：清内存缓存（SQLite 保留）
+        crate::parser::rule::clear_book_vars_memory_cache_ns(&ns);
+
+        // 两本书的键都能读穿透（修复前第二本被③跳过 → miss）
+        let a = crate::parser::rule::load_book_vars(&ns, src_key, "https://b.test/book/1");
+        let b = crate::parser::rule::load_book_vars(&ns, src_key, "https://b.test/book/2");
+        assert_eq!(a.get("token").map(String::as_str), Some("TK-1"));
+        assert_eq!(
+            b.get("token").map(String::as_str),
+            Some("TK-1"),
+            "同源同内容第二本书的键应同样落库（root 写豁免去重③）"
+        );
+
+        // 对照：普通 save_book_vars（章节级洪流面）同源同内容第二键仍去重跳过
+        let ns2 = format!("p1root-{}", uuid::Uuid::new_v4());
+        crate::parser::rule::save_book_vars(&ns2, src_key, "https://b.test/ch/1", &vars);
+        crate::parser::rule::save_book_vars(&ns2, src_key, "https://b.test/ch/2", &vars);
+        crate::parser::rule::clear_book_vars_memory_cache_ns(&ns2);
+        let c2 = storage
+            .get_book_vars_cache(&ns2, src_key, "https://b.test/ch/2")
+            .await
+            .unwrap();
+        assert!(
+            c2.is_none(),
+            "普通写同源同内容仍应去重（章节级洪流面语义不变）"
+        );
 
         teardown_book_vars_db(storage, &dir);
     }
@@ -2267,6 +2568,30 @@ mod tests {
             r#"<html><div class="content">第一章正文内容测试。</div><script>干扰</script></html>"#;
         let content = analyze_content_from(html, &test_source());
         assert_eq!(content, "第一章正文内容测试。");
+    }
+
+    /// 残余 JS 求值点带书源桥（与搜索流同语法同语义）：preUpdateJs 引用 jsLib 定义的
+    /// 函数——vars 带 bridge（attach_source_context）时可用（曾裸 eval_js：
+    /// ReferenceError → 静默回退原文，同一书源「搜索可用、正文断」）；
+    /// 无桥 vars 保持旧行为（失败回退原文，不 panic）
+    #[test]
+    fn test_pre_update_js_uses_source_jslib_bridge() {
+        let mut src = test_source();
+        src.js_lib = Some("function TW(b){return b + '-T'}".to_string());
+        src.rule_content = Some(serde_json::json!({
+            "preUpdateJs": "TW(result)",
+            // 透传：断言对象即预处理后的文档本身
+            "content": "@js:result"
+        }));
+        let html = "正文内容";
+        // vars 带书源桥 → jsLib 函数可用，预处理生效（正文被 TW 重写）
+        let mut vars = crate::parser::rule::RuleVars::new();
+        crate::parser::js::attach_source_context(&mut vars, &src, "default");
+        let out = analyze_content_from_with_vars(html, &src, &mut vars);
+        assert_eq!(out, "正文内容-T", "preUpdateJs 应能调用 jsLib 定义的函数");
+        // 无桥 vars → JS 失败回退原文（与旧默认行为一致）
+        let plain = analyze_content_from(html, &src);
+        assert_eq!(plain, "正文内容", "无桥时 JS 失败应回退未预处理文档");
     }
 
     #[test]
@@ -2578,6 +2903,35 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    /// [`serve`] 带请求计数版（多页目录循环防御测试观察实际抓取次数）
+    async fn serve_counted(
+        body: &'static str,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits2 = hits.clone();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            for _ in 0..10 {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                hits2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let mut resp = head.into_bytes();
+                resp.extend_from_slice(body.as_bytes());
+                let _ = sock.write_all(&resp).await;
+            }
+        });
+        (format!("http://{addr}"), hits)
     }
 
     /// 音频书：ruleContent.content 提取音频 URL → analyze_media_url 返回音频流直链
@@ -2924,7 +3278,12 @@ RAR/ZIP.*|苹果端用户下载方式：.*";
 大小：1.2M
 更新：2025-01-01
 RAR/ZIP下载</p></div>"#;
-        let out = crate::service::search::field_with_vars(html, Some(rule), "", &mut crate::parser::rule::RuleVars::new());
+        let out = crate::service::search::field_with_vars(
+            html,
+            Some(rule),
+            "",
+            &mut crate::parser::rule::RuleVars::new(),
+        );
         // 多行清洗正则生效 → 元数据行全删，仅剩作者（后续 format_book_author 再 trim）
         assert_eq!(out.trim(), "金陵雪", "author 多行清洗 + 元数据行兜底");
     }
@@ -2948,9 +3307,21 @@ RAR/ZIP下载</p></div>"#;
 }"#;
         let item = r#"{"serialID":1,"serialName":"第1章 沙漠中的彼岸花"}"#;
         let mut vars = crate::parser::rule::RuleVars::new();
-        vars.insert("baseUrl".to_string(), "https://bookshelf.html5.qq.com/qbread/api/book/all-chapter?bookId=1114608738".to_string());
-        let url = chapter_url_with_cascade(rule, item, "https://bookshelf.html5.qq.com/qbread/api/book/all-chapter?bookId=1114608738", &mut vars);
-        println!("tag chapter url => {}", url.chars().take(260).collect::<String>());
+        vars.insert(
+            "baseUrl".to_string(),
+            "https://bookshelf.html5.qq.com/qbread/api/book/all-chapter?bookId=1114608738"
+                .to_string(),
+        );
+        let url = chapter_url_with_cascade(
+            rule,
+            item,
+            "https://bookshelf.html5.qq.com/qbread/api/book/all-chapter?bookId=1114608738",
+            &mut vars,
+        );
+        println!(
+            "tag chapter url => {}",
+            url.chars().take(260).collect::<String>()
+        );
     }
 
     /// 多行 chapterUrl 级联（「📚QQ浏览器」`$.serialID` 换行 `@js:` 独立行 + 多行 JS——
@@ -2974,8 +3345,16 @@ let option = {\"method\":\"POST\",\"body\":data}
         let mut vars = crate::parser::rule::RuleVars::new();
         vars.insert("bookKind".to_string(), "1134522101".to_string());
         vars.insert("bookName".to_string(), "测试书".to_string());
-        let out = chapter_url_with_cascade(rule, item, "https://novel.html5.qq.com/qbread/api/book/all-chapter?bookId=1134522101", &mut vars);
-        println!("cascade out => {}", out.chars().take(220).collect::<String>());
+        let out = chapter_url_with_cascade(
+            rule,
+            item,
+            "https://novel.html5.qq.com/qbread/api/book/all-chapter?bookId=1134522101",
+            &mut vars,
+        );
+        println!(
+            "cascade out => {}",
+            out.chars().take(220).collect::<String>()
+        );
     }
 
     /// bookUrl 相对书源规范化（legacy AnalyzeUrl baseUrl 语义——实测 156zwcc 搜索结果
@@ -3002,13 +3381,19 @@ let option = {\"method\":\"POST\",\"body\":data}
             book_source_url: "https://a.com/base/##备用".into(),
             ..Default::default()
         };
-        assert_eq!(normalize_with_source("x.html", &src2), "https://a.com/base/x.html");
+        assert_eq!(
+            normalize_with_source("x.html", &src2),
+            "https://a.com/base/x.html"
+        );
         // 绝对 URL / data: / ## 后缀书源 base 均不影响
         assert_eq!(
             normalize_with_source("https://other.com/p", &src),
             "https://other.com/p"
         );
-        assert_eq!(normalize_with_source("data:;base64,QUJD", &src), "data:;base64,QUJD");
+        assert_eq!(
+            normalize_with_source("data:;base64,QUJD", &src),
+            "data:;base64,QUJD"
+        );
         let src3 = BookSource {
             book_source_url: "http://b.com#标记".into(),
             ..Default::default()

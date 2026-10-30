@@ -137,7 +137,80 @@ export function parseEpubBytes(bytes: Uint8Array): EpubDoc {
     spine.push({ idref, linear })
   }
 
-  return { files, manifest, spine, opfDir, blobUrls: new Map() }
+  // spine 口径对齐后端章节表（#11：前后端下标域一致——EpubIframe 用后端目录下标
+  // 直接索引 spine）：后端建章节表时跳过 manifest 缺失/非 xhtml/html/读取失败/空文本
+  // 项（local_book.rs:448-463），前端原样保留全部 itemref → raw 模式从首个被后端
+  // 跳过的页（图片封面等）起整书错一章。此处按同口径过滤。
+  // 空文本判定与后端 html_to_text 同口径（见 isHtmlTextEmpty），不再用「块级标签
+  // 后紧跟非空白」的近似正则——\S 可匹配 '<' 本身，图片封面页（<p><img/></p>）
+  // 被误判非空保留，而后端剔除。
+  // 残留限制：后端 toc 骨架目录模式（toc+spin 等）下目录条目并非一一对应 spine，
+  // 前端无从对齐——该形态书籍不适用 raw 模式。
+  const alignedSpine = spine.filter((sp) => {
+    const item = manifest.get(sp.idref)
+    if (!item || !/x?html/i.test(item.mediaType)) return false
+    const data = files.get(item.href)
+    if (!data) return false
+    return !isHtmlTextEmpty(strFromU8(data))
+  })
+
+  return { files, manifest, spine: alignedSpine, opfDir, blobUrls: new Map() }
+}
+
+/**
+ * 实体解码（判空口径所需的最小集）：数字引用 + 解码结果为空白的命名实体
+ * （&nbsp;/&ensp;/&emsp;/&thinsp;/&Tab;/&NewLine;）。后端 html5ever 全量解码后
+ * 经 Rust trim（U+00A0 等属 White_Space）剔除；前端不解码则把 "&nbsp;" 字面量
+ * 误判为非空。其余命名实体解码与否不影响判空（字面量与解码值均非空白），
+ * 保持原样即可。
+ */
+function decodeEntitiesForBlankCheck(s: string): string {
+  return s.replace(/&(#[0-9]+;?|#x[0-9a-f]+;?|[a-z][a-z0-9]*;)/gi, (all, body: string) => {
+    if (body[0] === '#') {
+      const hex = body[1] === 'x' || body[1] === 'X'
+      const cp = parseInt(body.slice(hex ? 2 : 1), hex ? 16 : 10)
+      // HTML5：超范围码点替换为 U+FFFD（非空白，判空等价）
+      if (!Number.isFinite(cp) || cp < 0 || cp > 0x10ffff) return '\u{fffd}'
+      return String.fromCodePoint(cp)
+    }
+    const name = body.slice(0, -1).toLowerCase()
+    switch (name) {
+      case 'nbsp':
+        return '\u{a0}'
+      case 'ensp':
+        return '\u{2002}'
+      case 'emsp':
+        return '\u{2003}'
+      case 'thinsp':
+        return '\u{2009}'
+      case 'tab':
+        return '\t'
+      case 'newline':
+        return '\n'
+      default:
+        return all
+    }
+  })
+}
+
+/**
+ * 与后端 html_to_text（local_book.rs）同口径的「整页无文本」判定：
+ * 1) 块级元素（p|div|h1-h3|li）内文本：剥标签、实体解码、trim 后非空 → 页面非空；
+ * 2) 否则 fallback 全文档文本（html5ever 把 style/script 内容解析为原始文本节点，
+ *    后端 fallback 一并计入——故此处同样不剥 style/script）trim 后非空 → 非空；
+ * 3) 两者皆空 → 后端跳过该页（local_book.rs:461-463），前端同口径剔除。
+ * 返回 true 表示页面判空（应从 spine 剔除）。
+ */
+export function isHtmlTextEmpty(html: string): boolean {
+  const noComments = html.replace(/<!--[\s\S]*?-->/g, '')
+  const blockRe = /<(p|div|h[1-3]|li)\b[^>]*>([\s\S]*?)<\/\1\b[^>]*>/gi
+  for (const m of noComments.matchAll(blockRe)) {
+    const text = decodeEntitiesForBlankCheck(m[2].replace(/<[^>]*>/g, '')).trim()
+    if (text !== '') return false
+  }
+  // fallback：全文档文本（对齐后端 html_to_text 的 body 全文本兜底）
+  const all = decodeEntitiesForBlankCheck(noComments.replace(/<[^>]*>/g, '')).trim()
+  return all === ''
 }
 
 /** 取资源为 blob URL（缓存复用） */

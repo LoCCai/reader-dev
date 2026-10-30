@@ -75,9 +75,10 @@ export function sanitizeHtml(html: string): string {
     .replace(/<style[\s\S]*?<\/style>/gi, '')
     .replace(/<(iframe|object|embed|form)[\s\S]*?<\/(?:iframe|object|embed|form)>/gi, '')
     .replace(/<(iframe|object|embed|form)\b[^>]*\/?>/gi, '')
-    .replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    // 属性前缀 [\s/]：HTML5 允许 `/` 作属性分隔符（<img/src=x/onerror=...>），单 \s 可被绕过
+    .replace(/[\s/]on\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
     .replace(
-      /\s(?:href|src|xlink:href)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi,
+      /[\s/](?:href|src|xlink:href)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi,
       (m, raw: string) => {
         const unquoted = raw.replace(/^["']|["']$/g, '')
         return isDangerousUrl(decodeEntities(unquoted)) ? '' : m

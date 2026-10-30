@@ -76,7 +76,7 @@ pub fn invalid_snapshot(ns: &str) -> Vec<(String, i64, String)> {
 
 /// 单书源健康检测：HEAD 优先（405/501 或失败回退 GET 首页）
 /// 返回 (是否可用, 说明)
-pub async fn check_source(_ns: &str, source: &BookSource) -> (bool, String) {
+pub async fn check_source(ns: &str, source: &BookSource) -> (bool, String) {
     let base = source
         .book_source_url
         .split('#')
@@ -93,13 +93,20 @@ pub async fn check_source(_ns: &str, source: &BookSource) -> (bool, String) {
     let headers = source
         .header
         .as_deref()
-        .map(crawler::parse_header)
+        .map(|h| crawler::parse_header_for(h, source, ns))
         .unwrap_or_default();
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
-        .user_agent("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36")
-        .build()
-    {
+    // 统一走 build_http_client：与抓取链路同一出网策略（READER_HTTP_PROXY/书源代理），
+    // 避免"健康检测直连、实际抓取走代理"的判定口径分裂（巡检 R2：检测可用实际抓取全超时）
+    let client = match crawler::http_client_builder(
+        8,
+        reqwest::redirect::Policy::limited(3),
+    )
+    .or_else(|_| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .user_agent("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36")
+            .build()
+    }) {
         Ok(c) => c,
         Err(e) => return (false, format!("客户端构建失败: {e}")),
     };

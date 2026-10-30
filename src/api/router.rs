@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, Query, State};
+use axum::handler::Handler as _;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -97,7 +98,8 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
         // 弱网优化：响应压缩（gzip/brotli）
         .layer(tower_http::compression::CompressionLayer::new())
         .route("/opds", get(opds_dispatch))
-        .route("/opds-save", post(opds_save_post).get(opds_save_post))
+        // opds-save 只留 POST（GET 表单提交会把书架写库变成跨站简单请求面）
+        .route("/opds-save", post(opds_save_post))
         .route("/opds/*rest", get(opds_dispatch))
         // OPDS 独立账号设置（secure 模式外亦可配置，作用于 OPDS Basic 认证）
         .route(
@@ -164,13 +166,17 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
             get(crate::api::files::parse).post(crate::api::files::parse),
         )
         // R6b：文件管理器本地书导入预览 / zip 备份还原（legacy FileController 对齐）
-        .route("/reader3/file/importPreview", post(crate::api::files::import_preview))
         .route(
-            "/reader3/file/restore",
-            get(crate::api::files::restore).post(crate::api::files::restore),
+            "/reader3/file/importPreview",
+            post(crate::api::files::import_preview),
         )
+        // file/restore 只留 POST（GET 会让恢复备份变成可被 <img>/<a> 触发的简单请求）
+        .route("/reader3/file/restore", post(crate::api::files::restore))
         .route("/reader3/file/get", get(crate::api::files::get))
-        .route("/reader3/file/save", post(crate::api::files::save))
+        .route(
+            "/reader3/file/save",
+            post(crate::api::files::save).layer(axum::extract::DefaultBodyLimit::max(upload_limit)),
+        )
         .route("/reader3/file/mkdir", post(crate::api::files::mkdir))
         .route("/reader3/file/rename", post(crate::api::files::rename))
         .route("/reader3/file/download", get(crate::api::files::download))
@@ -238,7 +244,10 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
             get(get_replace_rules).post(get_replace_rules),
         )
         .route("/reader3/saveReplaceRule", post(save_replace_rule))
-        .route("/reader3/saveReplaceRules", post(save_replace_rules))
+        .route(
+            "/reader3/saveReplaceRules",
+            post(save_replace_rules).layer(axum::extract::DefaultBodyLimit::max(upload_limit)),
+        )
         .route(
             "/reader3/replaceRule/saveMulti",
             post(save_replace_rule_multi),
@@ -277,7 +286,12 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
         .route("/reader3/getSystemInfo", get(get_system_info))
         .route("/reader3/getServerStats", get(get_server_stats))
         .route("/reader3/exportBookSources", get(export_book_sources))
-        // SPA fallback：未匹配路由 → webdav 分流 / API 404 / 前端
+        // SPA fallback：未匹配路由 → webdav 分流 / API 404 / 前端。
+        // fallback_handler 以流式 Request 提取请求体（不预缓冲）：仅 WebDAV 分支
+        // 以 READER_UPLOAD_MAX_MB 限量读取（>2MB 的 WebDAV 大文件 PUT 不再 413）；
+        // 其余分支（API 404/静态资源/SPA）不消费请求体——若在提取器阶段无条件
+        // 缓冲（原 DefaultBodyLimit::max(upload_limit) + Bytes），免鉴权的未匹配
+        // 路径每个在途请求可占住最多 100MB 堆内存（并发可放大至 OOM）
         .fallback(fallback_handler)
         .route("/reader3/getBookshelf", get(get_bookshelf))
         .route(
@@ -288,8 +302,14 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
             "/reader3/getBookSource",
             get(get_book_source).post(get_book_source),
         )
-        .route("/reader3/saveBookSource", post(save_book_source))
-        .route("/reader3/saveBookSources", post(save_book_sources))
+        .route(
+            "/reader3/saveBookSource",
+            post(save_book_source).layer(axum::extract::DefaultBodyLimit::max(upload_limit)),
+        )
+        .route(
+            "/reader3/saveBookSources",
+            post(save_book_sources).layer(axum::extract::DefaultBodyLimit::max(upload_limit)),
+        )
         .route("/reader3/deleteBookSource", post(delete_book_source))
         .route("/reader3/deleteBookSources", post(delete_book_sources))
         .route(
@@ -385,6 +405,10 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
             "/reader3/bookSourceDebugSSE",
             get(book_source_debug_sse).post(book_source_debug_sse),
         )
+        .route(
+            "/reader3/debugBookSource",
+            get(debug_book_source).post(debug_book_source),
+        )
         .route("/reader3/cacheBookOnServer", post(cache_book_on_server))
         .route(
             "/reader3/getAllContents",
@@ -430,7 +454,10 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
         .route("/reader3/scanLocalBookDir", post(scan_local_book_dir))
         .route("/reader3/deleteBooks", post(delete_books))
         .route("/reader3/deleteBookmarks", post(delete_bookmarks))
-        .route("/reader3/saveRssSources", post(save_rss_sources))
+        .route(
+            "/reader3/saveRssSources",
+            post(save_rss_sources).layer(axum::extract::DefaultBodyLimit::max(upload_limit)),
+        )
         .route("/reader3/saveBookmarks", post(save_bookmarks))
         .route(
             "/reader3/getBookVariables",
@@ -505,6 +532,8 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
             post(upload_user_file).layer(axum::extract::DefaultBodyLimit::max(upload_limit)),
         )
         .route("/reader3/login", post(login))
+        // 机器人专用封装 API（七七等程序化客户端：专用 Key 鉴权 + 干净响应包）
+        .nest("/bot/v1", crate::api::bot::router())
         .with_state(state)
 }
 
@@ -627,8 +656,17 @@ async fn assets_proxy(
                 .as_deref()
                 .map(|ct| ct.starts_with("image/"))
                 .unwrap_or(false);
+            // 秒级 CPU（解码 + 纯 Rust WebP 编码）——spawn_blocking 避免阻塞 tokio worker
             let converted = if to_webp && is_raster {
-                crate::service::imaging::to_webp(&bytes, quality)
+                let bytes_for_webp = bytes.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::service::imaging::to_webp(&bytes_for_webp, quality)
+                })
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("WebP 转换任务失败: {e}");
+                    None
+                })
             } else {
                 None
             };
@@ -701,10 +739,15 @@ async fn login(
         return Json(ReturnData::err("请输入密码"));
     }
 
-    // GAP 61：登录限流（用户名+客户端 IP；锁定中直接拒绝）——
+    // GAP 61：登录限流（入口 login + 用户名 + 客户端 IP；锁定中直接拒绝）——
     // P1-2：客户端 IP 默认取直连 IP（XFF 可伪造），仅可信代理白名单内才信 XFF
     let ip = client_ip(&peer, &headers);
-    if let Err(msg) = crate::util::login_limit::check_allowed(&username, &ip) {
+    if let Err(msg) = crate::util::login_limit::check_allowed(
+        crate::util::login_limit::SCOPE_LOGIN,
+        &username,
+        &ip,
+    ) {
+        tracing::warn!("登录被限流拒绝 [{username}@{ip}]：{msg}");
         return Json(ReturnData::err(msg));
     }
 
@@ -719,10 +762,15 @@ async fn login(
     let Some(mut user) = user else {
         // 用户不存在
         if is_login {
-            crate::util::login_limit::record_failure(&username, &ip);
+            tracing::warn!("登录失败 [{username}@{ip}]：用户不存在");
+            crate::util::login_limit::record_failure(
+                crate::util::login_limit::SCOPE_LOGIN,
+                &username,
+                &ip,
+            );
             return Json(ReturnData::err("用户不存在"));
         }
-        return register(&state, &username, &password, body.code.clone()).await;
+        return register(&state, &username, &password, body.code.clone(), &ip).await;
     };
 
     // 用户已存在
@@ -731,10 +779,15 @@ async fn login(
     }
     // 统一密码校验：argon2id（PHC）优先，legacy 双 MD5 兼容；MD5 通过时自动升级为 argon2id
     if !crate::util::password::verify_password(&state.storage, &user, &password).await {
-        crate::util::login_limit::record_failure(&username, &ip);
+        tracing::warn!("登录失败 [{username}@{ip}]：密码错误");
+        crate::util::login_limit::record_failure(
+            crate::util::login_limit::SCOPE_LOGIN,
+            &username,
+            &ip,
+        );
         return Json(ReturnData::err("密码错误"));
     }
-    crate::util::login_limit::reset(&username, &ip); // GAP 59：生成新 token 并追加到 token_map（多设备会话，上限 5；uuid v4 随机防预测）
+    crate::util::login_limit::reset(crate::util::login_limit::SCOPE_LOGIN, &username, &ip); // GAP 59：生成新 token 并追加到 token_map（多设备会话，上限 5；uuid v4 随机防预测）
     let now = now_millis();
     let token = uuid::Uuid::new_v4().simple().to_string();
     if let Err(e) = state.storage.add_user_token(&username, &token, now).await {
@@ -743,16 +796,27 @@ async fn login(
     }
     user.token = token;
     user.last_login_at = now;
-    tracing::info!("用户登录: {username}");
+    tracing::info!("用户登录: {username} [ip={ip} ua={}]", client_ua(&headers));
     Json(ReturnData::ok(format_user(&user)))
 }
 
+/// 客户端 UA 简写（日志用：截断 64 字符，缺失 → "unknown"）
+fn client_ua(headers: &HeaderMap) -> String {
+    headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|ua| ua.chars().take(64).collect::<String>())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 /// 自动注册（校验顺序与错误消息兼容 legacy）
+/// ip：客户端 IP（日志用，来自 /login 调用方）
 async fn register(
     state: &AppState,
     username: &str,
     password: &str,
     code: Option<String>,
+    ip: &str,
 ) -> Json<ReturnData> {
     let config = &state.storage.config;
 
@@ -807,13 +871,17 @@ async fn register(
     let now = now_millis();
     // P1-7：注册初始 token 与登录一致——uuid v4 随机（原 md5(username+now) 可预测）
     let token = uuid::Uuid::new_v4().simple().to_string();
+    // 初始主 token 同步写入 token_map：登录会轮换主 token（users.token 列），
+    // 旧客户端此后仅靠 token_map 副本存活——若注册时不写入，账号在其他设备
+    // 登录一次后，持有注册 accessToken 的设备立即 401（被上限淘汰挤出）
+    let token_map = initial_token_map(&state.storage.config, &token, now);
     let user = User {
         username: username.to_string(),
         // 新用户密码：argon2id PHC（salt 列保留 legacy 8 位随机盐，兼容旧读取路径）
         password: crate::util::password::hash_password(password),
         salt,
         token: token.clone(),
-        token_map: None,
+        token_map,
         // 首个注册用户自动成为管理员（secure 模式可操作系统 default 配置）
         is_admin: count == 0,
         enable_webdav: config.default_user_enable_webdav,
@@ -831,8 +899,26 @@ async fn register(
         tracing::error!("创建用户 {username} 失败: {e}");
         return Json(ReturnData::err("系统错误"));
     }
-    tracing::info!("新用户注册: {username}");
+    tracing::info!("新用户注册: {username} [ip={ip}]");
     Json(ReturnData::ok(format_user(&user)))
+}
+
+/// 注册/建用户时的初始 token_map（对象形态 Map<token, expire_ms>，与 add_user_token
+/// 的过期规则一致：now + token_ttl_days 天，ttl<=0 永不过期）
+fn initial_token_map(
+    config: &crate::AppConfig,
+    token: &str,
+    now_ms: i64,
+) -> Option<serde_json::Value> {
+    let expire_ms = if config.token_ttl_days > 0 {
+        now_ms.saturating_add(config.token_ttl_days * 86_400_000)
+    } else {
+        i64::MAX
+    };
+    serde_json::from_str(&crate::model::user::token_map_push(
+        &None, token, expire_ms, now_ms,
+    ))
+    .ok()
 }
 
 /// POST /reader3/addUser：管理员创建用户（secure + secureKey 校验）。
@@ -919,12 +1005,14 @@ async fn add_user(
         .collect();
     let now = now_millis();
     let token = uuid::Uuid::new_v4().simple().to_string();
+    // 初始主 token 写入 token_map（同 register：防登录轮换主 token 后注册 token 失效）
+    let token_map = initial_token_map(config, &token, now);
     let user = User {
         username: username.clone(),
         password: crate::util::password::hash_password(&password),
         salt,
         token: token.clone(),
-        token_map: None,
+        token_map,
         is_admin: bool_param("isAdmin", false),
         enable_webdav: bool_param("enableWebdav", config.default_user_enable_webdav),
         enable_local_store: bool_param("enableLocalStore", config.default_user_enable_local_store),
@@ -1750,7 +1838,7 @@ async fn search_book_content(
     }
     match state
         .storage
-        .search_book_content(&book_url, &key, 100)
+        .search_book_content(&namespace, &book_url, &key, 100)
         .await
     {
         Ok(hits) => {
@@ -1799,11 +1887,22 @@ async fn search_file_book_content(
         .ok_or_else(|| anyhow::anyhow!("文件不存在"))?;
     let path_lower = path.to_string_lossy().to_lowercase();
     let imported = if path_lower.ends_with(".epub") {
-        let bytes = std::fs::read(&path)?;
-        crate::service::local_book::parse_epub(&bytes, &book.toc_url)?
+        // EPUB 解析秒级 CPU——spawn_blocking（书内全文搜索每次调用都触发）
+        let bytes = tokio::fs::read(&path).await?;
+        let toc_url = book.toc_url.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::service::local_book::parse_epub(&bytes, &toc_url)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("解析任务失败: {e}"))??
     } else {
         let user_rules = txt_toc_rule_regexes(state, namespace).await;
-        crate::service::local_book::parse_txt_file_with_rules(&path, &user_rules)?
+        let path_c = path.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::service::local_book::parse_txt_file_with_rules(&path_c, &user_rules)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("解析任务失败: {e}"))??
     };
     let key_lower = key.to_lowercase();
     let mut hits: Vec<serde_json::Value> = Vec::new();
@@ -2424,17 +2523,17 @@ async fn search_book(
     }
     // 参数解析（POST body JSON 优先，GET query 兜底）
     let mut key = params.get("key").cloned().unwrap_or_default();
-    // legacy "=" 前缀 = 精确搜索（accurate）
-    let mut key_exact_prefix = false;
-    if key.starts_with('=') {
-        key_exact_prefix = true;
-        key.remove(0);
-    }
     let mut page = params
         .get("page")
         .and_then(|v| v.parse().ok())
         .unwrap_or(1i64);
-    let mut book_source_param = params.get("bookSource").cloned().unwrap_or_default();
+    let mut book_source_param = params
+        .get("bookSource")
+        .or_else(|| params.get("bookSourceUrl"))
+        .or_else(|| params.get("sourceUrl"))
+        .or_else(|| params.get("origin"))
+        .cloned()
+        .unwrap_or_default();
     if let Some(body) = body {
         if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body) {
             if let Some(v) = json.get("key").and_then(|v| v.as_str()) {
@@ -2448,9 +2547,16 @@ async fn search_book(
             }
         }
     }
+    // legacy "=" 前缀 = 精确搜索（accurate）——body key 覆盖后对最终 key 剥离
+    // （对齐 legacy BookController 在最终 key 上剥离的语义；曾只剥 query key——
+    // POST {"key":"=书名"} 把 "=" 当字面量搜索且不触发精确过滤）
+    let mut key_exact_prefix = false;
+    strip_search_exact_prefix(&mut key, &mut key_exact_prefix);
     if key.is_empty() {
         return Json(ReturnData::err("请输入搜索关键字"));
     }
+    // legacy 参数别名 + 尾斜杠（bookSourceUrl/sourceUrl/origin；实测带尾斜杠报"未配置书源"）
+    let book_source_param = book_source_param.trim().trim_end_matches('/').to_string();
     if book_source_param.is_empty() {
         return Json(ReturnData::err("未配置书源"));
     }
@@ -2493,6 +2599,39 @@ async fn search_book(
     }
 }
 
+/// 每源搜索超时秒数（与 bot 搜索链路 SEARCH_SOURCE_TIMEOUT_SE 同值）：
+/// 防个别慢源长期占住并发许可拖垮整批搜索
+const SEARCH_SOURCE_TIMEOUT_SE: u64 = 45;
+
+/// 单源搜索任务（超时包装）：超时返回空列表并告警——慢源不再占满 24 许可
+/// （时长参数化便于单测注入短超时验证生效）
+async fn search_one_source_with_timeout(
+    storage: &crate::storage::Storage,
+    ns: &str,
+    source: crate::model::BookSource,
+    key: &str,
+    page: i64,
+    timeout: std::time::Duration,
+) -> Vec<crate::service::search::SearchBook> {
+    match tokio::time::timeout(
+        timeout,
+        crate::service::search::search_one_source(storage, ns, &source, key, page),
+    )
+    .await
+    {
+        Ok(r) => r.unwrap_or_default(),
+        Err(_) => {
+            tracing::warn!(
+                "搜索源超时（{}s）[{}] {}",
+                timeout.as_secs(),
+                source.book_source_name,
+                source.book_source_url
+            );
+            Vec::new()
+        }
+    }
+}
+
 /// POST/GET /reader3/searchBookMulti：多书源并发搜索（可选 bookSourceGroup 过滤）
 async fn search_book_multi(
     State(state): State<AppState>,
@@ -2509,12 +2648,6 @@ async fn search_book_multi(
         return Json(ret);
     }
     let mut key = params.get("key").cloned().unwrap_or_default();
-    // legacy "=" 前缀 = 精确搜索（accurate）
-    let mut key_exact_prefix = false;
-    if key.starts_with('=') {
-        key_exact_prefix = true;
-        key.remove(0);
-    }
     let mut page = params
         .get("page")
         .and_then(|v| v.parse().ok())
@@ -2555,6 +2688,10 @@ async fn search_book_multi(
             }
         }
     }
+    // legacy "=" 前缀 = 精确搜索（accurate）——body key 覆盖后对最终 key 剥离
+    // （对齐 legacy BookController 在最终 key 上剥离的语义）
+    let mut key_exact_prefix = false;
+    strip_search_exact_prefix(&mut key, &mut key_exact_prefix);
     // legacy "=" 前缀强制精确
     if key_exact_prefix {
         exact = true;
@@ -2599,9 +2736,16 @@ async fn search_book_multi(
         let storage = storage.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await;
-            crate::service::search::search_one_source(&storage, &ns, &source, &key, page)
-                .await
-                .unwrap_or_default()
+            // 每源 45s 超时（bot 搜索链路同款）：防慢源占满 24 许可拖垮整批搜索
+            search_one_source_with_timeout(
+                &storage,
+                &ns,
+                source,
+                &key,
+                page,
+                std::time::Duration::from_secs(SEARCH_SOURCE_TIMEOUT_SE),
+            )
+            .await
         }));
     }
     let mut all: Vec<crate::service::search::SearchBook> = Vec::new();
@@ -2619,6 +2763,16 @@ async fn search_book_multi(
     Json(ReturnData::ok(
         serde_json::to_value(all).unwrap_or(serde_json::Value::Null),
     ))
+}
+
+/// legacy "=" 前缀 = 精确搜索约定：对**最终 key**（body JSON key 覆盖 query 之后）
+/// 统一剥离一次并置精确标志——对齐 legacy BookController（POST 取 body key 后在
+/// 最终 key 上 startsWith("=") 剥离）的语义
+fn strip_search_exact_prefix(key: &mut String, exact_prefix: &mut bool) {
+    if key.starts_with('=') {
+        *exact_prefix = true;
+        key.remove(0);
+    }
 }
 
 /// 多源搜索结果去重：按 (书名, 作者) 键，保留首个书源命中
@@ -2980,13 +3134,20 @@ async fn book_cover_legacy(
 }
 
 /// GET/POST /reader3/deleteFile（legacy 对齐）：删除 /assets/{ns}/ 下用户文件/目录。
-/// 防穿越：规范化后必须仍位于 assets/{ns} 内
+/// 防穿越：规范化后必须仍位于 assets/{ns} 内。
+/// secure 模式必须带有效 accessToken（GET 删除是跨站可触发面——resolve_namespace
+/// 已隐式校验，此处显式 resolve_current_user 前置，语义自包含）；非 secure 保持匿名。
 async fn delete_file(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
     body: Option<axum::body::Bytes>,
 ) -> Json<ReturnData> {
+    if state.storage.config.secure {
+        if let Err(ret) = resolve_current_user(&state, &params, &headers).await {
+            return Json(ret);
+        }
+    }
     let namespace = match resolve_namespace(&state, &params, &headers).await {
         Ok(ns) => ns,
         Err(ret) => return Json(ret),
@@ -3402,12 +3563,14 @@ async fn get_book_info(
     };
     // 书名回退链：书架已知名 > 调用方显式 name 参数（搜索点开时携带搜索结果书名——
     // 「基本中文」类源 ruleBookInfo 无 name 规则，不回退则详情页「未知书名」）
-    let name_fallback = shelf_match
-        .map(|b| b.name.clone())
-        .or_else(|| {
-            let n = param_of(&params, body_json.as_ref(), "name");
-            if n.trim().is_empty() { None } else { Some(n) }
-        });
+    let name_fallback = shelf_match.map(|b| b.name.clone()).or_else(|| {
+        let n = param_of(&params, body_json.as_ref(), "name");
+        if n.trim().is_empty() {
+            None
+        } else {
+            Some(n)
+        }
+    });
     match crate::service::book::fetch_book_info(
         &namespace,
         &url,
@@ -3573,18 +3736,26 @@ async fn get_book_toc(
             }
         }
     }
-    let bs_param = param_of(&params, body_json.as_ref(), "bookSource");
+    let mut bs_param = param_of(&params, body_json.as_ref(), "bookSource");
+    // 兜底：客户端未带 bookSource → 沿用书架书 origin（书籍详情/正文链路同语义）——
+    // 曾直接报「未配置书源」，书架书 origin 明明可用
+    if bs_param.trim().is_empty() {
+        if let Ok(Some(b)) = state.storage.find_book(&namespace, &url_param).await {
+            bs_param = b.origin.clone();
+        }
+    }
     let Some(source) = resolve_book_source(&state, &namespace, &bs_param).await else {
-        // legacy getChapterList：非本地书且无可用书源 → 未配置书源
-        return Json(ReturnData::err("未配置书源"));
+        // 快速失败：bookSource 参数指名（URL/JSON 均含）但库中不存在/解析无效 →
+        // 直接报错，不再拖入抓取流程空等（实测坏参数可阻塞 41s 后返回空目录）；
+        // 未带参数且书架兜底无 origin → 维持 legacy「未配置书源」
+        if bs_param.trim().is_empty() {
+            return Json(ReturnData::err("未配置书源"));
+        }
+        return Json(ReturnData::err("书源不存在"));
     };
-    // F8：目录回写目标书架书——url 参数或 toc_url 对应的书
-    let shelf_for_write = state
-        .storage
-        .find_book(&namespace, &url_param)
-        .await
-        .ok()
-        .flatten();
+    // F8：目录回写目标书架书——url 参数或 toc_url 对应的书。
+    // 不再二次绑定：上方 shelf_for_write 已含 url→toc_url 兜底，此前被只查 url_param
+    // 的同名绑定遮蔽——web-ui 请求从不带 url 参数，三项回写（totalChapterNum 等）全部失效
     match crate::service::book::analyze_toc(
         &namespace,
         &toc_url,
@@ -3596,11 +3767,16 @@ async fn get_book_toc(
     .await
     {
         Ok(chapters) => {
-            // F-10：抓取成功后缓存目录（book_url 未知时以 toc_url 为键）
+            // F-10：抓取成功后缓存目录。book_url 列写真值（书架书 book_url；未知时退
+            // toc_url）——配合 get_toc_cache 的 OR 反查，两侧键都可命中
             if let Ok(json) = serde_json::to_string(&chapters) {
+                let book_key = shelf_for_write
+                    .as_ref()
+                    .map(|b| b.book_url.clone())
+                    .unwrap_or_else(|| toc_url.clone());
                 let _ = state
                     .storage
-                    .cache_toc(&namespace, &toc_url, &toc_url, &json)
+                    .cache_toc(&namespace, &toc_url, &book_key, &json)
                     .await;
             }
             // F8：成功回写 latestChapterTitle/totalChapterNum/lastCheckTime，清 lastCheckError
@@ -4134,16 +4310,28 @@ async fn export_book(
         // @font-face + OEBPS/fonts/*.woff2 + 章节链接样式表）
         "epub" => {
             let cover = book_cover_bytes(&state, &namespace, &url).await;
-            let epub = crate::service::export_book::build_epub_full(
-                &title,
-                &author,
-                &crate::service::export_book::EpubMeta {
-                    cover,
-                    font,
-                    ..Default::default()
-                },
-                &export_chapters,
-            );
+            // 整书 zip Deflate 压缩为秒级 CPU——spawn_blocking 避免阻塞 tokio worker
+            let meta = crate::service::export_book::EpubMeta {
+                cover,
+                font,
+                ..Default::default()
+            };
+            let title_c = title.clone();
+            let author_c = author.clone();
+            let chapters_c = export_chapters.clone();
+            let epub = tokio::task::spawn_blocking(move || {
+                crate::service::export_book::build_epub_full(
+                    &title_c,
+                    &author_c,
+                    &meta,
+                    &chapters_c,
+                )
+            })
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("EPUB 导出任务失败: {e}");
+                Vec::new()
+            });
             (epub, "application/epub+zip".to_string(), "epub")
         }
         "html" => (
@@ -4315,12 +4503,13 @@ async fn collect_export_chapters(
         let path = resolve_export_file_path(&state.storage.config.storage_dir(), url)
             .ok_or_else(|| "本地书文件不存在".to_string())?;
         let user_rules = txt_toc_rule_regexes(state, ns).await;
-        let imported = crate::service::local_book::parse_loc_book_path(
+        let imported = crate::service::local_book::parse_loc_book_path_blocking(
             &path,
             &user_rules,
             &book.toc_url,
             book.split_long_chapter,
         )
+        .await
         .map_err(|e| format!("解析失败: {e}"))?;
         let name = if book.name.is_empty() {
             imported.meta.title.clone()
@@ -4421,6 +4610,87 @@ fn sanitize_filename(name: &str) -> String {
         .chars()
         .take(80)
         .collect()
+}
+
+/// POST/GET /reader3/debugBookSource：legacy 薄路由——一次性返回全部调试步骤
+/// （bookSourceDebugSSE 的非流式等价；参数相同）
+async fn debug_book_source(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let action = param_of(&params, body_json.as_ref(), "action");
+    let key = param_of(&params, body_json.as_ref(), "key");
+    let mut target = param_of(&params, body_json.as_ref(), "chapterUrl");
+    if target.is_empty() {
+        target = param_of(&params, body_json.as_ref(), "url");
+    }
+    if !matches!(action.as_str(), "search" | "explore" | "toc" | "content") {
+        return Json(ReturnData::err(
+            "请输入调试动作（search|explore|toc|content）",
+        ));
+    }
+    if action == "search" && key.is_empty() {
+        return Json(ReturnData::err("请输入搜索关键字"));
+    }
+    let bs_param = param_of(&params, body_json.as_ref(), "bookSource");
+    let Some(source) = resolve_book_source(&state, &namespace, &bs_param).await else {
+        return Json(ReturnData::err("书源不存在"));
+    };
+    let steps: std::sync::Mutex<Vec<serde_json::Value>> = std::sync::Mutex::new(Vec::new());
+    let result =
+        crate::service::debug::run_debug(&namespace, &source, &action, &key, &target, |step| {
+            if let Ok(mut g) = steps.lock() {
+                g.push(serde_json::to_value(step).unwrap_or(serde_json::Value::Null));
+            }
+        })
+        .await;
+    match result {
+        Ok(data) => Json(ReturnData::ok(json!({
+            "steps": steps.into_inner().unwrap_or_default(),
+            "result": data,
+        }))),
+        Err(e) => Json(ReturnData::ok(json!({
+            "steps": steps.into_inner().unwrap_or_default(),
+            "error": format!("{e:#}"),
+        }))),
+    }
+}
+
+/// POST /reader3/addInvalidBookSource：客户端上报失效书源
+/// （legacy 语义：body/参数 bookSource=URL + error-msg；加入后 searchBookWithSource 类
+/// 全源流程跳过该源，600s 内快照去重）
+async fn add_invalid_book_source(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let url = param_of(&params, body_json.as_ref(), "bookSource");
+    let msg = {
+        let m = param_of(&params, body_json.as_ref(), "errorMsg");
+        if m.is_empty() {
+            param_of(&params, body_json.as_ref(), "error-msg")
+        } else {
+            m
+        }
+    };
+    if url.is_empty() {
+        return Json(ReturnData::err("请输入书源 URL"));
+    }
+    crate::service::health::mark_source_invalid(&namespace, &url, &msg);
+    Json(ReturnData::ok(serde_json::Value::Null))
 }
 
 /// 文件型本地书路径解析（严格防穿越 + legacy 目录式兜底）
@@ -4683,18 +4953,48 @@ async fn get_book_cache_chapters(
         }
     };
     let mut selected: Vec<serde_json::Value> = Vec::new();
+    // 书源书缓存行键 = md5(chapterUrl)（60 位大整数）——前端目录标记与 from/to 范围
+    // 都按目录 0..N 位置比对，且 60 位超出 JS Number 精度，必须在此反解为目录位置。
+    // 反查表来源：toc_cache（#13 修复后按 book_url/toc_url 均可命中）
+    let mut md5_to_pos: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+    let is_local = url.starts_with("local://") || is_loc_book_file_chapter(&url);
+    if !is_local {
+        if let Ok(Some(toc_json)) = state
+            .storage
+            .get_toc_cache(&namespace, &url, TOC_CACHE_TTL_MS)
+            .await
+        {
+            if let Ok(toc) = serde_json::from_str::<Vec<serde_json::Value>>(&toc_json) {
+                for (pos, c) in toc.iter().enumerate() {
+                    if let Some(u) = c.get("url").and_then(|v| v.as_str()) {
+                        md5_to_pos.insert(crate::util::md5::chapter_url_hash(u), pos);
+                    }
+                }
+            }
+        }
+    }
     for (index, title, content) in chapters {
+        // 非本地书：md5 键 → 目录位置（映射缺失的行保留原键，由前端忽略）
+        let display_index = if is_local {
+            index
+        } else {
+            md5_to_pos
+                .get(&index)
+                .copied()
+                .map(|p| p as i64)
+                .unwrap_or(index)
+        };
         if let Some(f) = from {
-            if index < f {
+            if display_index < f {
                 continue;
             }
         }
         if let Some(t) = to {
-            if index > t {
+            if display_index > t {
                 continue;
             }
         }
-        selected.push(json!({ "index": index, "title": title, "content": content }));
+        selected.push(json!({ "index": display_index, "title": title, "content": content }));
         if selected.len() >= MAX_CACHE_CHAPTERS_PER_FETCH {
             break;
         }
@@ -4984,12 +5284,14 @@ async fn refresh_local_book(
         match found {
             Some(path) => {
                 source_file = Some(path.clone());
-                match crate::service::local_book::parse_loc_book_path(
+                match crate::service::local_book::parse_loc_book_path_blocking(
                     &path,
                     &user_rules,
                     &book.toc_url,
                     book.split_long_chapter,
-                ) {
+                )
+                .await
+                {
                     Ok(b) => b,
                     Err(e) => return Json(ReturnData::err(format!("解析失败：{e}"))),
                 }
@@ -5002,12 +5304,14 @@ async fn refresh_local_book(
             None => return Json(ReturnData::err("本地书文件不存在")),
         };
         source_file = Some(path.clone());
-        match crate::service::local_book::parse_loc_book_path(
+        match crate::service::local_book::parse_loc_book_path_blocking(
             &path,
             &user_rules,
             &book.toc_url,
             book.split_long_chapter,
-        ) {
+        )
+        .await
+        {
             Ok(b) => b,
             Err(e) => return Json(ReturnData::err(format!("解析失败：{e}"))),
         }
@@ -5272,7 +5576,9 @@ async fn get_book_variables(
     for (k, v) in vars.iter() {
         m.insert(k.clone(), json!(v));
     }
-    Json(ReturnData::ok(json!({ "variables": serde_json::Value::Object(m) })))
+    Json(ReturnData::ok(
+        json!({ "variables": serde_json::Value::Object(m) }),
+    ))
 }
 
 /// POST /reader3/saveBookVariables：书籍变量整体覆盖保存（body {bookUrl, bookSource,
@@ -5741,12 +6047,14 @@ async fn migrate_loc_book(
             skipped.push(json!({ "bookUrl": book.book_url, "error": "文件不存在" }));
             continue;
         };
-        let imported = match crate::service::local_book::parse_loc_book_path(
+        let imported = match crate::service::local_book::parse_loc_book_path_blocking(
             &path,
             &user_rules,
             &book.toc_url,
             book.split_long_chapter,
-        ) {
+        )
+        .await
+        {
             Ok(i) => i,
             Err(e) => {
                 skipped
@@ -6051,7 +6359,7 @@ async fn get_bookshelf(
     }
     match state.storage.list_books(&namespace).await {
         Ok(books) => {
-            tracing::info!("getBookshelf [{}]: {} 本", namespace, books.len());
+            tracing::debug!("getBookshelf [{}]: {} 本", namespace, books.len());
             let arr: Vec<serde_json::Value> = books.iter().map(book_json_with_group_ids).collect();
             Json(ReturnData::ok(serde_json::Value::Array(arr)))
         }
@@ -6437,6 +6745,14 @@ async fn reset_user_password(
     }
     if username.is_empty() || password.is_empty() {
         return Json(ReturnData::err("参数错误"));
+    }
+    // 最短密码校验（与注册/改密同规格，复用 config.min_user_password_length）——
+    // 此前 resetUserPassword 可把密码重置为 1 位，绕过注册时的长度门槛
+    if (password.len() as i64) < state.storage.config.min_user_password_length {
+        return Json(ReturnData::err(format!(
+            "密码不能低于{}位",
+            state.storage.config.min_user_password_length
+        )));
     }
     // 新 salt（与注册一致：8 位随机字母数字；argon2id 哈希自带随机盐，此列仅 legacy 兼容）
     use rand::Rng;
@@ -6956,7 +7272,9 @@ async fn restore_from_zip(
         )),
         Err(e) => {
             tracing::error!("restoreFromZip 失败 [{namespace}]: {e}");
-            Json(ReturnData::err(format!("恢复失败：{e}")))
+            Json(ReturnData::err(format!(
+                "恢复失败（可能已部分恢复，建议修正后重试）：{e}"
+            )))
         }
     }
 }
@@ -7028,7 +7346,9 @@ async fn restore_from_webdav(
         )),
         Err(e) => {
             tracing::error!("restoreFromWebdav 失败 [{namespace}] {path}: {e}");
-            Json(ReturnData::err(format!("恢复失败：{e}")))
+            Json(ReturnData::err(format!(
+                "恢复失败（可能已部分恢复，建议修正后重试）：{e}"
+            )))
         }
     }
 }
@@ -7067,6 +7387,8 @@ pub(crate) async fn resolve_namespace(
 /// 解析当前登录用户（secure 模式）：从 query/header 解析 accessToken（username:token）
 /// 并校验 token，返回完整用户行（logout/用户管理自检等需要真实用户名的场景用）。
 /// GAP 59：主 token 或 users.token_map（多设备）中任一 token 均可通过
+/// 滑动续期：校验通过且该 token 的 expire 进入后半程时刷新（详见 touch_user_token），
+/// 活跃会话不再于签发后第 30 天硬过期，上限淘汰随之变为 LRU（丢最久未使用）。
 pub(crate) async fn resolve_current_user(
     state: &AppState,
     params: &HashMap<String, String>,
@@ -7076,31 +7398,82 @@ pub(crate) async fn resolve_current_user(
         return Err(login_required());
     }
     let Some(access_token) = access_token_of(params, headers) else {
+        tracing::warn!(
+            "鉴权失败：请求未携带 accessToken [{}]",
+            request_source(headers)
+        );
         return Err(login_required());
     };
     let Some((username, token)) = access_token.split_once(':') else {
+        tracing::warn!("鉴权失败：accessToken 格式非法（缺 username:token 分隔）");
         return Err(login_required());
     };
     if username.is_empty() || token.is_empty() {
+        tracing::warn!("鉴权失败：accessToken 的用户名或 token 为空 [{username}]");
         return Err(login_required());
     }
+    let now = now_millis();
     match state.storage.find_user(username).await {
         Ok(Some(user)) => {
             let token_ok = (!user.token.is_empty() && user.token == token)
-                || crate::model::user::token_map_valid(&user.token_map, token, now_millis());
+                || crate::model::user::token_map_valid(&user.token_map, token, now);
             if !token_ok {
+                // 观测盲区修复：此前所有 401 分支零日志，多客户端互踢完全不可见
+                tracing::warn!(
+                    "鉴权失败 [{username}@{}]：token 无效或已被挤出（token={}…，现有会话 {} 个）",
+                    request_source(headers),
+                    token.get(..8).unwrap_or(token),
+                    crate::model::user::token_map_list(&user.token_map).len(),
+                );
                 return Err(login_required());
             }
             // GAP 118：token 过期——基于 users.last_login_at + READER_TOKEN_TTL_DAYS（默认 30 天）；
             // 过期（或 legacy 用户 last_login_at=0 从未登录）→ NEED_LOGIN 重新登录；ttl<=0 永不过期
+            //（滑动续期会刷新活跃用户的 last_login_at，此分支只拦真正 30 天未活跃的账号）
             let ttl_days = state.storage.config.token_ttl_days;
-            if ttl_days > 0 && now_millis() - user.last_login_at > ttl_days * 86_400_000 {
+            if ttl_days > 0 && now - user.last_login_at > ttl_days * 86_400_000 {
+                tracing::warn!(
+                    "鉴权失败 [{username}@{}]：账号整体过期（{} 天未活跃）",
+                    request_source(headers),
+                    ttl_days
+                );
                 return Err(login_required());
+            }
+            // 滑动续期（节流前置判断在内存快照上做——不满足时零额外 DB 开销；
+            // 写失败不影响本次请求，下次校验会再触发）
+            let ttl_ms = ttl_days * 86_400_000;
+            if ttl_days > 0
+                && crate::model::user::token_needs_renewal(
+                    &user.token_map,
+                    token,
+                    user.last_login_at,
+                    now,
+                    ttl_ms,
+                )
+            {
+                if let Err(e) = state.storage.touch_user_token(username, token, now).await {
+                    tracing::warn!("会话滑动续期失败 [{username}]: {e}");
+                }
             }
             Ok(user)
         }
-        _ => Err(login_required()),
+        Ok(None) => {
+            tracing::warn!(
+                "鉴权失败 [{username}@{}]：用户不存在",
+                request_source(headers)
+            );
+            Err(login_required())
+        }
+        Err(e) => {
+            tracing::error!("鉴权失败 [{username}]：查询用户出错: {e}");
+            Err(login_required())
+        }
     }
+}
+
+/// 鉴权日志来源标注：客户端 IP 不可得（handler 层才有 ConnectInfo），用 UA 简写区分多端
+fn request_source(headers: &HeaderMap) -> String {
+    client_ua(headers)
 }
 
 /// 从 query/header 提取 accessToken（query → accessToken 头 → Authorization: Bearer）
@@ -7255,26 +7628,46 @@ async fn opds_ns(
         let decoded = String::from_utf8(opds_base64_decode(creds)).unwrap_or_default();
         if let Some((username, password)) = decoded.split_once(':') {
             // P1-1：锁定中直接拒绝 Basic 校验（不泄露锁定状态，统一 401）
-            if crate::util::login_limit::check_allowed(username, client_ip).is_err() {
+            if crate::util::login_limit::check_allowed(
+                crate::util::login_limit::SCOPE_OPDS,
+                username,
+                client_ip,
+            )
+            .is_err()
+            {
+                tracing::warn!("OPDS Basic 认证被限流拒绝 [{username}@{client_ip}]");
                 return Err(opds_unauthorized());
             }
             // 独立 OPDS 账号（配置后优先）
             if let Ok(Some((opds_user, stored))) = state.storage.get_opds_account().await {
                 if username == opds_user && crate::util::sha256::verify_password(password, &stored)
                 {
-                    crate::util::login_limit::reset(&opds_user, client_ip);
+                    crate::util::login_limit::reset(
+                        crate::util::login_limit::SCOPE_OPDS,
+                        &opds_user,
+                        client_ip,
+                    );
                     return Ok(opds_user);
                 }
             }
             // 系统用户账号（users 表；argon2id 或 legacy 双 md5——统一校验，MD5 通过自动升级）
             if let Ok(Some(user)) = state.storage.find_user(username).await {
                 if crate::util::password::verify_password(&state.storage, &user, password).await {
-                    crate::util::login_limit::reset(&user.username, client_ip);
+                    crate::util::login_limit::reset(
+                        crate::util::login_limit::SCOPE_OPDS,
+                        &user.username,
+                        client_ip,
+                    );
                     return Ok(user.username);
                 }
             }
             // 密码错误 / 账号不存在 → 计入失败次数（与 /reader3/login 一致）
-            crate::util::login_limit::record_failure(username, client_ip);
+            tracing::warn!("OPDS Basic 认证失败 [{username}@{client_ip}]：密码错误或账号不存在");
+            crate::util::login_limit::record_failure(
+                crate::util::login_limit::SCOPE_OPDS,
+                username,
+                client_ip,
+            );
         }
     }
     // ② accessToken（query/header，username:token，与 /reader3 一致）
@@ -7398,7 +7791,7 @@ async fn opds_dispatch(
                 .header("Content-Type", "text/plain; charset=utf-8")
                 .header(
                     "Content-Disposition",
-                    format!("inline; filename=\"{}\"", name),
+                    format!("inline; filename={}", urlencoding::encode(&name)),
                 )
                 .body(Body::from(bytes))
                 .unwrap(),
@@ -7421,7 +7814,7 @@ async fn opds_dispatch(
                     .header("Content-Type", ct)
                     .header(
                         "Content-Disposition",
-                        format!("attachment; filename=\"{}\"", name),
+                        format!("attachment; filename={}", urlencoding::encode(&name)),
                     )
                     .body(Body::from(bytes))
                     .unwrap(),
@@ -7892,6 +8285,23 @@ async fn save_book(
             loc_migrated = true;
         }
     }
+    // 安全校验：本地书 bookUrl/local_file 均为客户端可控字段——存在但位于 storage
+    // 容器外（或 env 书仓根外）/保留名（reader.db 等）的路径拒绝入库，防止任意
+    // 路径入库后经 OPDS download/acquire 读服务器任意文件；悬挂路径（文件不存在）
+    // 放行保持 legacy「迁移降级不阻断保存」语义（读取面由硬化后的解析函数兜底）。
+    // 仅新入架或 bookUrl 变化时校验（存量书编辑不动路径，保持兼容）。
+    if (!exists || existing.as_ref().is_some_and(|ex| ex.book_url != book_url)) && !loc_migrated {
+        let storage_dir = state.storage.config.storage_dir();
+        if !crate::api::opds::local_book_save_allowed(
+            &storage_dir,
+            &book_url,
+            &book.origin,
+            book.local_file.as_deref(),
+        ) {
+            tracing::warn!("saveBook 本地书路径非法，拒绝入库 [{namespace}] {book_url}");
+            return Json(ReturnData::err("本地书路径非法"));
+        }
+    }
     let result = if let Some(ex) = existing {
         // 编辑：按 body 出现的字段增量更新。
         // legacy：saveBook 不允许改进度——dur 三字段以库内为准（客户端走 saveBookProgress）
@@ -8077,7 +8487,8 @@ async fn save_book_progress(
         }
     }
     if let Some(len) = toc_len {
-        if index >= len {
+        // 负 index 同拒（曾只查上界：畸形值把进度静默重置为第 0 章并返回成功）
+        if index < 0 || index >= len {
             return Json(ReturnData::err("章节不存在"));
         }
     }
@@ -8196,7 +8607,8 @@ async fn get_explore_urls(
     // legado 语义：exploreUrl 可能是 @js:/<js> 脚本（执行后返回 [{title,url}]）或普通 URL 集合；
     // 脚本经真实书源 bridge 执行——source.getBookSourceUrl() 等书源引用才能取到真实值
     let raw = source.explore_url.as_deref().unwrap_or("");
-    let entries = crate::service::explore::parse_explore_entries_for_source(raw, &source, &namespace);
+    let entries =
+        crate::service::explore::parse_explore_entries_for_source(raw, &source, &namespace);
     Json(ReturnData::ok(
         serde_json::to_value(entries).unwrap_or(serde_json::Value::Null),
     ))
@@ -8222,12 +8634,21 @@ async fn explore_book(
         return Json(ret);
     }
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-    let url = param_of(&params, body_json.as_ref(), "url");
-    let url = if url.is_empty() {
+    let raw_url = param_of(&params, body_json.as_ref(), "url");
+    let mut url = if raw_url.is_empty() {
         param_of(&params, body_json.as_ref(), "ruleFindUrl")
     } else {
-        url
+        raw_url
     };
+    // 客户端可能整段透传书源的 exploreUrl 条目（legado「标题::URL」格式）——
+    // 剥离标题前缀再抓取，否则整行当 URL 报「目标 URL 非法」。
+    // 前缀以 ':' 结尾 = IPv6 字面量（http://[::1] 的 "http:"）——是 URL 本体，不剥
+    if let Some((prefix, real)) = url.trim().split_once("::") {
+        let real = real.trim();
+        if !real.is_empty() && !prefix.ends_with(':') && !prefix.contains("://") {
+            url = real.to_string();
+        }
+    }
     if url.is_empty() {
         return Json(ReturnData::err("参数错误"));
     }
@@ -8274,12 +8695,6 @@ async fn search_book_multi_sse(
 ) -> Response {
     // 参数解析（POST body JSON 优先，GET query 兜底）
     let mut key = params.get("key").cloned().unwrap_or_default();
-    // legacy "=" 前缀 = 精确搜索（accurate）
-    let mut key_exact_prefix = false;
-    if key.starts_with('=') {
-        key_exact_prefix = true;
-        key.remove(0);
-    }
     let mut group = params.get("bookSourceGroup").cloned().unwrap_or_default();
     // P1-4 单源指定：精确匹配 bookSourceUrl（非空时只搜该源）
     let mut single_source_url = params.get("bookSourceUrl").cloned().unwrap_or_default();
@@ -8323,6 +8738,10 @@ async fn search_book_multi_sse(
             }
         }
     }
+    // legacy "=" 前缀 = 精确搜索（accurate）——body key 覆盖后对最终 key 剥离
+    // （对齐 legacy BookController 在最终 key 上剥离的语义）
+    let mut key_exact_prefix = false;
+    strip_search_exact_prefix(&mut key, &mut key_exact_prefix);
     // legacy "=" 前缀强制精确
     if key_exact_prefix {
         exact = true;
@@ -9034,9 +9453,16 @@ async fn import_book_preview(
     }
     // 解析（parse_loc_book_path 按扩展名分派；核心逻辑在可测的纯函数中）
     let user_rules = txt_toc_rule_regexes(&state, &namespace).await;
-    match import_preview_from_bytes(&bytes, &safe_name, &ext, &user_rules) {
-        Ok(json) => Json(ReturnData::ok(json)),
-        Err(e) => Json(ReturnData::err(format!("解析失败：{e}"))),
+    // 解析为秒级 CPU 工作（EPUB/PDF 解压解析）——spawn_blocking 避免阻塞 tokio worker
+    let preview = tokio::task::spawn_blocking(move || {
+        import_preview_from_bytes(&bytes, &safe_name, &ext, &user_rules)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("导入预览任务失败: {e}"));
+    match preview {
+        Ok(Ok(json)) => Json(ReturnData::ok(json)),
+        Ok(Err(e)) => Json(ReturnData::err(format!("解析失败：{e}"))),
+        Err(e) => Json(ReturnData::err(format!("系统错误：{e}"))),
     }
 }
 
@@ -9201,7 +9627,21 @@ async fn save_book_content(
     if content.is_empty() {
         return Json(ReturnData::err("正文不能为空"));
     }
-    let idx = crate::util::md5::chapter_url_hash(&chapter_url);
+    // 键语义分流（#12）：本地书 chapterUrl 内嵌数值下标（local://id/N、本地文件#N），
+    // 按真实下标写章节表——此前一律写 md5 幽灵行：本地书读取按 0..N 直读永不命中
+    //（编辑"保存成功"但跨设备不回读），幽灵行还会混进本地书目录列表
+    let idx = if let Some(rest) = chapter_url.strip_prefix("local://") {
+        rest.rsplit_once('/')
+            .and_then(|(_, s)| s.parse::<i64>().ok())
+            .unwrap_or_else(|| crate::util::md5::chapter_url_hash(&chapter_url))
+    } else if is_loc_book_file_chapter(&chapter_url) {
+        chapter_url
+            .rsplit_once('#')
+            .and_then(|(_, s)| s.parse::<i64>().ok())
+            .unwrap_or_else(|| crate::util::md5::chapter_url_hash(&chapter_url))
+    } else {
+        crate::util::md5::chapter_url_hash(&chapter_url)
+    };
     match state
         .storage
         .cache_chapter_content(&namespace, &book_url, idx, &title, &content)
@@ -9334,12 +9774,14 @@ async fn get_chapter_list_by_rule(
         let entries: Vec<serde_json::Value> = match &path {
             Some(p) => {
                 let user_rules = txt_toc_rule_regexes(&state, &namespace).await;
-                match crate::service::local_book::parse_loc_book_path(
+                match crate::service::local_book::parse_loc_book_path_blocking(
                     p,
                     &user_rules,
                     &bk.toc_url,
                     bk.split_long_chapter,
-                ) {
+                )
+                .await
+                {
                     Ok(imported) => imported
                         .chapters
                         .iter()
@@ -10042,10 +10484,16 @@ async fn import_default_txt_toc_rules(
 /// online/bookSource（与 getServerStats 相同聚合）。
 async fn get_system_info(
     State(state): State<AppState>,
-    Query(_params): Query<HashMap<String, String>>,
+    Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Json<ReturnData> {
-    let _ = headers;
+    // secure 模式要求登录（任一有效 accessToken）：系统信息含用户/书/书源计数与
+    // 监控聚合（在线会话数等），不暴露给匿名；非 secure 保持匿名（单机部署）
+    if state.storage.config.secure
+        && resolve_current_user(&state, &params, &headers).await.is_err()
+    {
+        return Json(login_required());
+    }
     let user_count = state.storage.count_users().await.unwrap_or(0);
     let book_count = state.storage.count_books().await.unwrap_or(0);
     let source_count = state.storage.count_all_book_sources().await.unwrap_or(0);
@@ -10069,7 +10517,18 @@ async fn get_system_info(
 /// 内存（总量/可用/已用/进程，MB + 百分比）、CPU（短采样 ~200ms）、请求计数
 /// （总数/今日/按接口 Top10）、在线会话（有效 token 数）、书源成功率（最近一次检测
 /// 结果，未检测则 successRate=null + 说明）、uptime。
-async fn get_server_stats(State(state): State<AppState>) -> Json<ReturnData> {
+async fn get_server_stats(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Json<ReturnData> {
+    // secure 模式要求登录（与 getSystemInfo 同规格）：监控聚合不暴露给匿名；
+    // 非 secure 保持匿名
+    if state.storage.config.secure
+        && resolve_current_user(&state, &params, &headers).await.is_err()
+    {
+        return Json(login_required());
+    }
     let agg = crate::service::monitor::collect(&state.storage).await;
     let mut data = agg.to_json();
     data["version"] = json!(env!("CARGO_PKG_VERSION"));
@@ -10216,12 +10675,14 @@ async fn scan_local_book_dir(
             .unwrap_or_else(|_| target.clone())
             .to_string_lossy()
             .into_owned();
-        let imported_book = match crate::service::local_book::parse_loc_book_path(
+        let imported_book = match crate::service::local_book::parse_loc_book_path_blocking(
             &target,
             &user_rules,
             crate::service::local_book::DEFAULT_EPUB_TOC_MODE,
             false,
-        ) {
+        )
+        .await
+        {
             Ok(b) => b,
             Err(e) => {
                 failed += 1;
@@ -10371,8 +10832,16 @@ async fn upload_local_book(
     // 用户自定义 TXT 目录规则（启用 + 按 serialNumber 排序）；无则用内置默认规则（仅 TXT 使用）
     let user_rules = txt_toc_rule_regexes(&state, &namespace).await;
     let imported = if ext == "txt" {
-        // TXT 解析失败保持静默回退（与旧行为一致：空书 → “未解析到章节内容”）
-        crate::service::local_book::parse_txt_with_rules(&bytes, &user_rules).unwrap_or_else(|e| {
+        // 大体积 TXT 的编码探测+分章为秒级 CPU——spawn_blocking 避免阻塞 tokio worker
+        // （与下方 EPUB/PDF 分支同款；解析失败保持静默回退：空书 → “未解析到章节内容”）
+        let parse_bytes = bytes.clone();
+        let parse_user_rules = user_rules.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::service::local_book::parse_txt_with_rules(&parse_bytes, &parse_user_rules)
+        })
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!("解析任务失败: {e}")))
+        .unwrap_or_else(|e| {
             tracing::error!("TXT 解析失败: {e}");
             crate::service::local_book::ImportedBook {
                 meta: Default::default(),
@@ -10382,13 +10851,22 @@ async fn upload_local_book(
             }
         })
     } else {
-        match crate::service::local_book::parse_file_bytes(
-            &bytes,
-            &ext,
-            &user_rules,
-            crate::service::local_book::DEFAULT_EPUB_TOC_MODE,
-            false,
-        ) {
+        // 100MB 级文件的 EPUB/PDF 解析为秒级 CPU——spawn_blocking 避免阻塞 tokio worker
+        let parse_bytes = bytes.clone();
+        let parse_user_rules = user_rules.clone();
+        let ext_c = ext.clone();
+        match tokio::task::spawn_blocking(move || {
+            crate::service::local_book::parse_file_bytes(
+                &parse_bytes,
+                &ext_c,
+                &parse_user_rules,
+                crate::service::local_book::DEFAULT_EPUB_TOC_MODE,
+                false,
+            )
+        })
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!("解析任务失败: {e}")))
+        {
             Ok(b) => b,
             Err(e) => {
                 return Json(ReturnData::err(format!(
@@ -10493,7 +10971,10 @@ fn resolve_storage_path(
     let root = storage_dir
         .canonicalize()
         .unwrap_or_else(|_| storage_dir.to_path_buf());
-    if abs.starts_with(&root) && abs.is_file() {
+    if abs.starts_with(&root)
+        && abs.is_file()
+        && !crate::api::opds::is_reserved_db_file(&abs, &root)
+    {
         Some(abs)
     } else {
         None
@@ -10620,7 +11101,10 @@ fn resolve_loc_book_file(
     let root = storage_dir
         .canonicalize()
         .unwrap_or_else(|_| storage_dir.to_path_buf());
-    if abs.starts_with(&root) && abs.is_file() {
+    if abs.starts_with(&root)
+        && abs.is_file()
+        && !crate::api::opds::is_reserved_db_file(&abs, &root)
+    {
         Some(abs)
     } else {
         None
@@ -10670,12 +11154,14 @@ async fn get_book_toc_loc_book(
     } else {
         book.toc_url.as_str()
     };
-    let imported = match crate::service::local_book::parse_loc_book_path(
+    let imported = match crate::service::local_book::parse_loc_book_path_blocking(
         &path,
         &[],
         toc_mode,
         book.split_long_chapter,
-    ) {
+    )
+    .await
+    {
         Ok(b) => b,
         Err(e) => {
             tracing::debug!("loc_book toc: 解析失败 [{path_lower}] {e}");
@@ -10722,9 +11208,14 @@ async fn get_book_toc_file(state: &AppState, ns: &str, book_url: &str) -> Option
         .map(|b| b.split_long_chapter)
         .unwrap_or(false);
     let user_rules = txt_toc_rule_regexes(state, ns).await;
-    let imported =
-        crate::service::local_book::parse_loc_book_path(&path, &user_rules, &toc_mode, split_long)
-            .ok()?;
+    let imported = crate::service::local_book::parse_loc_book_path_blocking(
+        &path,
+        &user_rules,
+        &toc_mode,
+        split_long,
+    )
+    .await
+    .ok()?;
     let list: Vec<serde_json::Value> = imported
         .chapters
         .iter()
@@ -10808,9 +11299,14 @@ async fn get_book_content_file(
         .map(|b| b.split_long_chapter)
         .unwrap_or(false);
     let user_rules = txt_toc_rule_regexes(state, ns).await;
-    let imported =
-        crate::service::local_book::parse_loc_book_path(&path, &user_rules, &toc_mode, split_long)
-            .ok()?;
+    let imported = crate::service::local_book::parse_loc_book_path_blocking(
+        &path,
+        &user_rules,
+        &toc_mode,
+        split_long,
+    )
+    .await
+    .ok()?;
     let content = imported.chapters.get(index as usize)?.content.clone();
     let content = if is_epub {
         wrap_epub_html(&content)
@@ -10940,14 +11436,22 @@ fn encode_url_path_segments(rel: &str) -> String {
         .join("/")
 }
 
-/// img 标签列表 → {content} 返回（legacy getBookContent 漫画/PDF 页图模式形态）
+/// img 标签列表 → {content, images} 返回（legacy getBookContent 漫画/PDF 页图模式形态）：
+/// content 为 `<img>` 标签串（legacy 契约）；images 为同序 URL 数组——web-ui 漫画分支
+/// 只读 data.images（ReaderView.vue），本地 CBZ 页图必须同返 images 才能渲染
 fn image_list_content(base_href: String, files: &[String]) -> Json<ReturnData> {
-    let html = files
+    let urls: Vec<String> = files
         .iter()
-        .map(|rel| format!("<img src=\"{base_href}{}\">", encode_url_path_segments(rel)))
+        .map(|rel| format!("{base_href}{}", encode_url_path_segments(rel)))
+        .collect();
+    let html = urls
+        .iter()
+        .map(|u| format!("<img src=\"{u}\">"))
         .collect::<Vec<_>>()
         .join("\n");
-    Json(ReturnData::ok(serde_json::json!({ "content": html })))
+    Json(ReturnData::ok(
+        serde_json::json!({ "content": html, "images": urls }),
+    ))
 }
 
 /// 本地书非文本文型内容（legacy getBookContent 三模式最小对齐）：
@@ -11012,7 +11516,17 @@ async fn local_book_image_content(
     let mut files = crate::service::local_book::list_image_files(&chapter_dir);
     if files.is_empty() {
         let bytes = tokio::fs::read(&src).await.ok()?;
-        match crate::service::local_book::extract_cbz_chapter_images(&bytes, &chapter_dir) {
+        // CBZ 解压（最多 500MB 图片落盘）为秒级 CPU/IO——spawn_blocking
+        let cbz_bytes = bytes.clone();
+        let cbz_dir = chapter_dir.clone();
+        match tokio::task::spawn_blocking(move || {
+            crate::service::local_book::extract_cbz_chapter_images(&cbz_bytes, &cbz_dir)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("CBZ 解压任务失败: {e}");
+            Err(anyhow::anyhow!("CBZ 解压任务失败"))
+        }) {
             Ok(list) => {
                 files = list;
                 if files.is_empty() {
@@ -11032,13 +11546,40 @@ async fn local_book_image_content(
 }
 
 /// fallback：webdav 分流 / API 404 JSON / 前端 SPA（index.html）
+///
+/// 请求体流式提取（`Request` 最后一位——不触发 DefaultBodyLimit 预缓冲）：
+/// 仅 WebDAV 分支以 upload_limit 限量读取（对齐原 DefaultBodyLimit 语义，超限
+/// 413）；其余分支不消费请求体——未匹配路径免鉴权，无条件整读会让每个在途
+/// 请求占住最多 READER_UPLOAD_MAX_MB 堆内存（DoS 放大面）。
+
+/// 百分号解码（UTF-8 无效序列按原样保留）；`+` 不转空格（路径语义）
+fn percent_decode_str(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(v) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+            {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 async fn fallback_handler(
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     State(state): State<AppState>,
     method: axum::http::Method,
     uri: axum::http::Uri,
     headers: HeaderMap,
-    body: axum::body::Bytes,
+    request: axum::extract::Request,
 ) -> Response {
     let path = uri.path();
     tracing::debug!("fallback: {} {}", method, path);
@@ -11046,7 +11587,33 @@ async fn fallback_handler(
     if path.starts_with("/reader3/webdav") {
         // P1-2：客户端 IP（直连优先，可信代理白名单内才信 XFF）——WebDAV Basic 限流键
         let ip = client_ip(&peer, &headers);
-        return crate::api::webdav::handle(&state.storage, method, path, &headers, body, &ip).await;
+        // HIGH-四轮：预认证——在 to_bytes 缓冲请求体**之前**先做 Basic 认证（复用
+        // webdav::authenticate），未认证直接 401。否则未认证请求也会整读 body
+        // （最多 upload_limit 字节堆内存），20 个并发 100MB PUT 即可打 OOM
+        // （实测 12 秒 OOMKilled）。OPTIONS 预检不校验认证（CORS/客户端探测）
+        if method != axum::http::Method::OPTIONS
+            && crate::api::webdav::authenticate(&state.storage, &headers, &ip)
+                .await
+                .is_none()
+        {
+            return Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .header("WWW-Authenticate", "Basic realm=\"reader\"")
+                .body(Body::empty())
+                .unwrap();
+        }
+        let upload_limit = state.storage.config.upload_max_bytes();
+        return match axum::body::to_bytes(request.into_body(), upload_limit).await {
+            Ok(body) => {
+                crate::api::webdav::handle(&state.storage, method, path, &headers, body, &ip).await
+            }
+            // 超过 READER_UPLOAD_MAX_MB：对齐 DefaultBodyLimit 413（UploadLimitLayer
+            // 外层会转换为 JSON 错误体）
+            Err(_) => Response::builder()
+                .status(StatusCode::PAYLOAD_TOO_LARGE)
+                .body(Body::empty())
+                .unwrap(),
+        };
     }
     // 其他 /reader3 未匹配 → JSON 404
     if path.starts_with("/reader3") {
@@ -11061,7 +11628,19 @@ async fn fallback_handler(
     // 前端静态资源（/static/** 等构建产物——按扩展名 MIME，防路径穿越）
     // 内嵌资产优先（rust-embed——发布单文件免外部 dist）；磁盘目录回退
     // （READER_APP_WEB_ROOT 自定义主题 / 开发热更）
-    let rel = path.trim_start_matches('/');
+    // percent-decode：浏览器对非 ASCII 路径（如 /bg/午后沙滩.jpg）自动百分号编码，
+    // 而内嵌/磁盘文件名是原文——不解码则未命中后落 SPA fallback 返回 index.html
+    // 冒充图片（实测 14 张内置阅读背景全部中招）
+    let rel = {
+        let raw = path.trim_start_matches('/');
+        let decoded = percent_decode_str(raw);
+        if decoded != raw && !decoded.contains("..") && !decoded.contains('\\') {
+            decoded
+        } else {
+            raw.to_string()
+        }
+    };
+    let rel = rel.as_str();
     if let Some((bytes, mime)) = crate::web_assets::get(rel) {
         return Response::builder()
             .status(StatusCode::OK)
@@ -11145,6 +11724,13 @@ async fn serve_data_file(
     let Some(rel) = uri_path.strip_prefix(prefix).and_then(safe_data_rel_path) else {
         return webdav_status_404();
     };
+    // 私有目录排除：data/{ns}/webdav（WebDAV 文件 + 自动备份 zip）与
+    // data/{ns}/opds_files（上传本地书原文件）为用户私有数据。该路由无 accessToken
+    // 鉴权（<img>/EPUB 资源请求无法携带请求头），只能按目录段拦截——否则 secure
+    // 多用户模式下任何人可匿名跨租户读他人 WebDAV 备份/上传书
+    if is_private_data_rel(&rel) {
+        return webdav_status_404();
+    }
     let root = state.storage.config.storage_dir().join("data");
     let file = root.join(&rel);
     // 防穿越兜底：规范化后必须仍位于 data 根内（符号链接/盘符等），且必须是普通文件
@@ -11223,6 +11809,18 @@ fn safe_data_rel_path(tail: &str) -> Option<std::path::PathBuf> {
     } else {
         Some(rel)
     }
+}
+
+/// data/{ns}/ 下的用户私有目录段（首段为命名空间，不参与判定）：
+/// webdav（WebDAV 文件/自动备份 zip）、opds_files（上传本地书原文件）、
+/// bot-exports（bot 导出文件）——不得经无鉴权的 /book-assets、/epub 静态路由读出
+fn is_private_data_rel(rel: &std::path::Path) -> bool {
+    rel.components().skip(1).any(|c| {
+        matches!(
+            c.as_os_str().to_string_lossy().as_ref(),
+            "webdav" | "opds_files" | "bot-exports"
+        )
+    })
 }
 
 /// ASCII 大小写不敏感子串查找（返回字节偏移——不能用 to_lowercase 的偏移映射回原文：
@@ -11315,6 +11913,78 @@ mod tests {
             "bookSourceUrl": format!("https://s{i}.com"),
             "bookSourceName": format!("源{i}"),
         })
+    }
+
+    /// searchBookMulti 每源 45s 超时生效验证：挂起源（accept 后不响应）→
+    /// 短超时注入（50ms）先于 fetch 的 15s 超时触发 → 返回空列表不 panic
+    #[tokio::test]
+    async fn test_search_source_timeout_returns_empty() {
+        // 挂起服务器：接受连接但从不响应
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock); // 持有连接不响应
+            }
+        });
+        let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true);
+        let (state, dir) = test_state("srchto").await;
+        let mut source = crate::model::BookSource::default();
+        source.book_source_url = format!("http://{addr}");
+        source.book_source_name = "挂起源".into();
+        source.enabled = true;
+        source.search_url = Some(format!("http://{addr}/search?q={{{{key}}}}"));
+        source.rule_search = Some(serde_json::json!({
+            "bookList": "$.list", "name": "$.n", "bookUrl": "$.u"
+        }));
+        let started = std::time::Instant::now();
+        let out = search_one_source_with_timeout(
+            &state.storage,
+            "default",
+            source,
+            "k",
+            1,
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+        assert!(out.is_empty(), "超时应返回空列表");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "50ms 超时应快速返回（实测 {:?}）",
+            started.elapsed()
+        );
+        cleanup(state, dir).await;
+    }
+
+    /// getBookToc：bookSource 参数指名但库中不存在 → 快速失败「书源不存在」
+    /// （不拖入抓取流程阻塞数十秒后返回空目录）
+    #[tokio::test]
+    async fn test_get_book_toc_missing_source_fast_fail() {
+        let (state, dir) = test_state("tocmiss").await;
+        let params = HashMap::from([
+            ("url".to_string(), "https://slow.test/book/1".to_string()),
+            (
+                "bookSource".to_string(),
+                "https://no-such-source.test".to_string(),
+            ),
+        ]);
+        let started = std::time::Instant::now();
+        let ret = get_book_toc(
+            AxumState(state.clone()),
+            Query(params),
+            HeaderMap::new(),
+            None,
+        )
+        .await;
+        assert!(!ret.0.is_success);
+        assert_eq!(ret.0.error_msg, "书源不存在");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "书源不存在应快速失败（实测 {:?}）",
+            started.elapsed()
+        );
+        cleanup(state, dir).await;
     }
 
     /// F-7：saveBookSource / saveBookSources 书源数上限（users.book_source_limit）
@@ -12804,9 +13474,217 @@ mod tests {
             assert_eq!(ret.0.error_msg, "密码错误");
         }
         assert!(
-            crate::util::login_limit::check_allowed("bob", "198.51.100.8").is_ok(),
+            crate::util::login_limit::check_allowed(
+                crate::util::login_limit::SCOPE_LOGIN,
+                "bob",
+                "198.51.100.8"
+            )
+            .is_ok(),
             "成功登录已重置计数"
         );
+
+        cleanup(state, dir).await;
+    }
+
+    /// 滑动续期 + LRU 淘汰：活跃会话 expire 被刷新为「最近使用 + ttl」，
+    /// 上限淘汰丢最久未使用（而非最早登录）——后登录者不再挤出活跃会话；
+    /// GAP 118 整体过期用户与过期条目由后台清理回收。
+    #[tokio::test]
+    async fn test_token_sliding_renewal_and_lru_eviction() {
+        let (state, dir) = test_state("sliding").await;
+        let mut state = state;
+        state.storage.config.secure = true;
+        state.storage.config.token_ttl_days = 30;
+        let day = 86_400_000i64;
+        let now = now_millis();
+        let t0 = now - 25 * day; // 25 天前：5 台设备先后登录（token_map 满 5）
+        state
+            .storage
+            .insert_user(&User {
+                username: "multi".into(),
+                token: "main".into(),
+                last_login_at: t0,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        for i in 1..=5i64 {
+            state
+                .storage
+                .add_user_token("multi", &format!("dev{i}"), t0 + i * day / 10)
+                .await
+                .unwrap();
+        }
+        // dev1（最早登录）5 天前仍在活跃 → 滑动续期，expire 刷新为 t0+20d+30d
+        state
+            .storage
+            .touch_user_token("multi", "dev1", t0 + 20 * day)
+            .await
+            .unwrap();
+        // 现在第 6 台设备登录 → 上限淘汰应丢最久未使用的 dev2，而非最早登录但活跃的 dev1
+        state
+            .storage
+            .add_user_token("multi", "dev6", now)
+            .await
+            .unwrap();
+        let auth = |t: &str| {
+            let params: HashMap<String, String> = [("accessToken".into(), format!("multi:{t}"))]
+                .into_iter()
+                .collect();
+            params
+        };
+        assert!(
+            resolve_namespace(&state, &auth("dev1"), &HeaderMap::new())
+                .await
+                .is_ok(),
+            "活跃会话不应被后登录者挤出（LRU）"
+        );
+        assert!(resolve_namespace(&state, &auth("dev6"), &HeaderMap::new())
+            .await
+            .is_ok());
+        assert!(
+            resolve_namespace(&state, &auth("dev2"), &HeaderMap::new())
+                .await
+                .is_err(),
+            "最久未使用的会话应被淘汰"
+        );
+        // 滑动续期防硬过期：6 天后（距 dev1 登录已 31 天）dev1 仍可用——
+        // 未续期的 dev3 已自然过期（expire = 登录 + 30 天）
+        let later = t0 + 31 * day;
+        assert!(
+            crate::model::user::token_map_valid(
+                &state
+                    .storage
+                    .find_user("multi")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .token_map,
+                "dev1",
+                later
+            ),
+            "续期后的活跃 token 不应于签发后第 30 天硬过期"
+        );
+        assert!(
+            !crate::model::user::token_map_valid(
+                &state
+                    .storage
+                    .find_user("multi")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .token_map,
+                "dev3",
+                later
+            ),
+            "未活跃的 token 应按自身 expire 过期"
+        );
+        // 后台清理：过期条目（dev3/dev4/dev5）被回收；整体过期用户（30 天未活跃）全清
+        let mut gone_user = User {
+            username: "gone".into(),
+            token: "gt".into(),
+            last_login_at: t0 - 40 * day, // 从未活跃到整体过期
+            ..Default::default()
+        };
+        gone_user.token_map = serde_json::json!({
+            "g1": later - 1000, // 条目未过期但用户整体过期 → 应全清
+            "g2": later + 86_400_000,
+        })
+        .into();
+        state.storage.insert_user(&gone_user).await.unwrap();
+        let pruned = state
+            .storage
+            .prune_expired_user_tokens(later)
+            .await
+            .unwrap();
+        // multi：dev3/dev4/dev5 三条自然过期；gone：整体过期全清 2 条
+        assert_eq!(pruned, 5);
+        let gone = state.storage.find_user("gone").await.unwrap().unwrap();
+        assert!(
+            crate::model::user::token_map_list(&gone.token_map).is_empty(),
+            "整体过期用户 token_map 应全清"
+        );
+
+        cleanup(state, dir).await;
+    }
+
+    /// 注册初始 token 写入 token_map：登录会轮换主 token（users.token 列），
+    /// 持有注册 accessToken 的设备在账号于其他设备登录后仍可用（不被上限淘汰挤出）
+    #[tokio::test]
+    async fn test_register_initial_token_in_token_map() {
+        let (state, dir) = test_state("regtok").await;
+        let mut state = state;
+        state.storage.config.secure = true;
+        state.storage.config.token_ttl_days = 30;
+        let ret = register(&state, "regman", "pass1234", None, "203.0.113.99").await;
+        assert!(ret.0.is_success, "注册应成功: {}", ret.0.error_msg);
+        let user = state.storage.find_user("regman").await.unwrap().unwrap();
+        let reg_token = user.token.clone();
+        assert!(
+            crate::model::user::token_map_contains(&user.token_map, &reg_token),
+            "注册初始主 token 应写入 token_map"
+        );
+        // 另一设备登录 → 主 token 轮换，注册 token 仍通过校验
+        state
+            .storage
+            .add_user_token("regman", "dev2tok", now_millis())
+            .await
+            .unwrap();
+        let params: HashMap<String, String> =
+            [("accessToken".into(), format!("regman:{reg_token}"))]
+                .into_iter()
+                .collect();
+        assert_eq!(
+            resolve_namespace(&state, &params, &HeaderMap::new())
+                .await
+                .unwrap(),
+            "regman",
+            "轮换主 token 后注册 accessToken 应仍有效"
+        );
+
+        cleanup(state, dir).await;
+    }
+
+    /// 并发登录不丢 token：token_map 读-改-写在 BEGIN IMMEDIATE 事务内串行化，
+    /// 同一用户并发登录（各持新 token）的结果全部保留——原先无事务的
+    /// 「读快照→内存改→整列写回」会互相覆盖，先完成登录方的 token 直接丢失。
+    #[tokio::test]
+    async fn test_concurrent_logins_keep_all_tokens() {
+        let (state, dir) = test_state("conclogin").await;
+        let mut state = state;
+        state.storage.config.secure = true;
+        state.storage.config.token_ttl_days = 30;
+        state
+            .storage
+            .insert_user(&User {
+                username: "conc".into(),
+                token: "main".into(),
+                last_login_at: now_millis(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let now = now_millis();
+        let mut handles = Vec::new();
+        for i in 0..4 {
+            let storage = state.storage.clone();
+            handles.push(tokio::spawn(async move {
+                storage
+                    .add_user_token("conc", &format!("ctok{i}"), now + i * 1000)
+                    .await
+                    .unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        let user = state.storage.find_user("conc").await.unwrap().unwrap();
+        for i in 0..4 {
+            assert!(
+                crate::model::user::token_map_contains(&user.token_map, &format!("ctok{i}")),
+                "并发登录的 ctok{i} 不应丢失"
+            );
+        }
 
         cleanup(state, dir).await;
     }
@@ -13886,7 +14764,12 @@ mod tests {
         // 模拟最近一次书源检测
         crate::service::monitor::record_book_source_check("default", 10, 3);
 
-        let ret = get_server_stats(AxumState(state.clone())).await;
+        let ret = get_server_stats(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+        )
+        .await;
         assert!(ret.0.is_success, "{} {}", ret.0.error_msg, ret.0.data);
         let d = &ret.0.data;
         // 版本/端口
@@ -15176,6 +16059,195 @@ mod tests {
         assert_eq!(info.toc_cache_count, 0);
 
         cleanup(state, dir).await;
+    }
+
+    /// legacy "=" 前缀精确搜索契约：body JSON key 覆盖 query 后同样剥离（三接口统一
+    /// strip_search_exact_prefix——曾只剥 query key，POST {"key":"=斗破"} 把 "="
+    /// 当字面量搜索且不触发精确过滤，偏离 legacy 在最终 key 上剥离的语义）
+    #[tokio::test]
+    async fn test_search_book_multi_exact_prefix_from_body_key() {
+        let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true); // mock 绑定 127.0.0.1（P1 SSRF 校验放行，仅测试）
+        let (state, dir) = test_state("exact-prefix").await;
+        // mock 书源搜索服务：书名 = 回显 key 参数原文（'=' 泄漏与否的直接 oracle）
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = vec![0u8; 65536];
+                let Ok(n) = sock.read(&mut buf).await else {
+                    return;
+                };
+                let raw = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let target = raw.split_whitespace().nth(1).unwrap_or("");
+                let query = target.split_once('?').map(|(_, q)| q).unwrap_or(target);
+                let echoed = url::form_urlencoded::parse(query.as_bytes())
+                    .find(|(k, _)| k == "key")
+                    .map(|(_, v)| v.into_owned())
+                    .unwrap_or_default();
+                let body = format!(
+                    r#"{{"data":[{{"name":"{echoed}","bookUrl":"https://book.test/1"}}]}}"#
+                );
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                if sock.write_all(resp.as_bytes()).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let src: crate::model::BookSource = serde_json::from_value(serde_json::json!({
+            "bookSourceUrl": "https://src.test/exact-prefix",
+            "bookSourceName": "精确前缀测试源",
+            "searchUrl": format!("http://{addr}/search?key={{{{key}}}}"),
+            "ruleSearch": {"bookList": "$.data", "name": "$.name", "bookUrl": "$.bookUrl"},
+            "enabled": true
+        }))
+        .unwrap();
+        state
+            .storage
+            .save_book_source("default", &src)
+            .await
+            .unwrap();
+
+        // POST body {"key":"=斗破"}：'=' 从最终 key 剥离 + exact 生效——书源收到
+        // key=斗破（书名回显"斗破"），精确过滤保留该书（修复前书名"=斗破"且不过滤）
+        let ret = search_book_multi(
+            AxumState(state.clone()),
+            axum::extract::Query(HashMap::new()),
+            HeaderMap::new(),
+            Some(Bytes::from(r#"{"key":"=斗破"}"#)),
+        )
+        .await;
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+        let books = ret.0.data.as_array().unwrap();
+        assert_eq!(
+            books.len(),
+            1,
+            "POST body '=' 前缀应剥离并触发精确过滤: {books:?}"
+        );
+        assert_eq!(books[0]["name"], "斗破");
+
+        // GET query 变体同样剥离（既有语义不回退）
+        let params: HashMap<String, String> =
+            [("key".into(), "=斗破".into())].into_iter().collect();
+        let ret = search_book_multi(
+            AxumState(state.clone()),
+            axum::extract::Query(params),
+            HeaderMap::new(),
+            None,
+        )
+        .await;
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+        let books = ret.0.data.as_array().unwrap();
+        assert_eq!(books.len(), 1, "GET query '=' 前缀剥离语义不变: {books:?}");
+        assert_eq!(books[0]["name"], "斗破");
+
+        cleanup(state, dir).await;
+    }
+
+    /// fallback 请求体处理（DoS 面收敛）：非 WebDAV 未匹配路径不再经 Bytes 提取器
+    /// 预缓冲请求体（曾 fallback 挂 DefaultBodyLimit::max(upload_limit)，免鉴权
+    /// 路径每个在途请求可占住最多 READER_UPLOAD_MAX_MB 堆内存、并发可放大至 OOM）；
+    /// WebDAV 分支仍按 upload_max_mb 限量读取——超限 413、限额内大文件 PUT 正常落盘
+    /// （不回退 axum 默认 2MB——那正是当初放开上限要修的回归）
+    #[tokio::test]
+    async fn test_fallback_body_handling() {
+        let dir = std::env::temp_dir().join(format!("reader-router-fb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut config = crate::AppConfig::from_env();
+        config.work_dir = dir.to_string_lossy().into_owned();
+        config.token_ttl_days = 0;
+        config.upload_max_mb = 1; // 1MB 上限：3MB 体走限量读取的 413 路径
+        let storage = crate::storage::init(&config).await.unwrap();
+        let image_cache = crate::service::image_cache::ImageCache::with_capacity(
+            dir.join("storage").join("cache").join("images"),
+            1024 * 1024,
+        );
+        let state = AppState {
+            storage,
+            image_cache,
+        };
+        let peer = ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 40000)));
+        let big = vec![b'x'; 3 * 1024 * 1024];
+
+        // ① 未匹配路径（免鉴权）：3MB 请求体不消费不缓冲 → SPA/404 正常返回
+        let req = axum::extract::Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/nonexistent-path-xyz")
+            .body(axum::body::Body::from(big.clone()))
+            .unwrap();
+        let resp = fallback_handler(
+            peer,
+            AxumState(state.clone()),
+            axum::http::Method::POST,
+            "/nonexistent-path-xyz".parse().unwrap(),
+            HeaderMap::new(),
+            req,
+        )
+        .await;
+        assert!(
+            resp.status() == StatusCode::OK || resp.status() == StatusCode::NOT_FOUND,
+            "未匹配路径应正常回退（不因请求体处理失败）: {}",
+            resp.status()
+        );
+
+        // ② WebDAV PUT 超 upload_max_mb（1MB）→ 限量读取超限 → 413
+        std::fs::create_dir_all(dir.join("storage/data/default/webdav")).unwrap();
+        let req = axum::extract::Request::builder()
+            .method(axum::http::Method::PUT)
+            .uri("/reader3/webdav/big.bin")
+            .body(axum::body::Body::from(big))
+            .unwrap();
+        let resp = fallback_handler(
+            peer,
+            AxumState(state.clone()),
+            axum::http::Method::PUT,
+            "/reader3/webdav/big.bin".parse().unwrap(),
+            HeaderMap::new(),
+            req,
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "WebDAV PUT 超过 READER_UPLOAD_MAX_MB 应 413"
+        );
+
+        // ③ WebDAV PUT 500KB（< 上限）→ 正常落盘（大文件上传能力不回退）
+        let body_500k = vec![b'y'; 500 * 1024];
+        let req = axum::extract::Request::builder()
+            .method(axum::http::Method::PUT)
+            .uri("/reader3/webdav/ok.txt")
+            .body(axum::body::Body::from(body_500k))
+            .unwrap();
+        let resp = fallback_handler(
+            peer,
+            AxumState(state.clone()),
+            axum::http::Method::PUT,
+            "/reader3/webdav/ok.txt".parse().unwrap(),
+            HeaderMap::new(),
+            req,
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "限额内 WebDAV PUT 应创建成功"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("storage/data/default/webdav/ok.txt"))
+                .unwrap()
+                .len(),
+            500 * 1024
+        );
+
+        state.storage.pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 全书搜索 API：本地书命中（chapterIndex/title/snippet）/ 书源书提示 / 参数校验
@@ -21855,6 +22927,18 @@ mod tests {
             html.find(&t10).expect("缺 10.png"),
         );
         assert!(p1 < p2 && p2 < p10, "页图按文件名自然序: {html}");
+        // images 数组与 content 同返（web-ui 漫画分支只读 data.images——本地 CBZ 必须有）
+        let images = ret.0.data["images"].as_array().expect("应返回 images 数组");
+        let img_urls: Vec<&str> = images.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(
+            img_urls,
+            vec![
+                format!("{base_href}1.png"),
+                format!("{base_href}2.jpg"),
+                format!("{base_href}10.png"),
+            ],
+            "images 与 content 同序"
+        );
         let chapter_dir = state
             .storage
             .config
@@ -22642,6 +23726,80 @@ mod tests {
         cleanup(state, dir).await;
     }
 
+    /// P0：saveBook 安全校验——origin=loc_book 的 bookUrl 指向 storage 根内保留名
+    /// （reader.db 整库/凭证文件）或容器外存在文件（绝对路径逃逸）→ 拒绝入库，
+    /// 防止经 OPDS download/acquire 读服务器任意文件；悬挂路径保持 legacy 降级入架
+    #[tokio::test]
+    async fn test_save_book_rejects_unsafe_local_url() {
+        let (state, dir) = test_state("savereject").await;
+        let save = |state: AppState, body: serde_json::Value| {
+            Box::pin(async move {
+                save_book(
+                    AxumState(state),
+                    Query(HashMap::new()),
+                    HeaderMap::new(),
+                    Some(Bytes::from(body.to_string())),
+                )
+                .await
+            })
+        };
+        // ① storage 根内保留名（reader.db 整库）→ 拒绝
+        let ret = save(
+            state.clone(),
+            serde_json::json!({
+                "bookUrl": "reader.db",
+                "name": "整库书",
+                "author": "X",
+                "origin": "loc_book",
+            }),
+        )
+        .await;
+        assert!(!ret.0.is_success, "保留名整库路径应拒绝入库");
+        assert!(state
+            .storage
+            .find_book("default", "reader.db")
+            .await
+            .unwrap()
+            .is_none());
+
+        // ② 容器外存在的文件（绝对路径逃逸）→ 拒绝
+        let outside =
+            std::env::temp_dir().join(format!("reader-save-reject-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"top secret").unwrap();
+        let ret = save(
+            state.clone(),
+            serde_json::json!({
+                "bookUrl": outside.join("secret.txt").to_string_lossy(),
+                "name": "逃逸书",
+                "author": "X",
+                "origin": "loc_book",
+            }),
+        )
+        .await;
+        assert!(!ret.0.is_success, "容器外路径应拒绝入库");
+
+        // ③ 悬挂路径（文件不存在，legacy 迁移降级语义）→ 放行照常入架
+        let ret = save(
+            state.clone(),
+            serde_json::json!({
+                "bookUrl": "/assets/default/book/ghost.epub",
+                "name": "幽灵书X",
+                "author": "X",
+                "origin": "loc_book",
+            }),
+        )
+        .await;
+        assert!(
+            ret.0.is_success,
+            "悬挂路径应保持 legacy 降级入架: {}",
+            ret.0.error_msg
+        );
+
+        let _ = std::fs::remove_dir_all(&outside);
+        cleanup(state, dir).await;
+    }
+
     /// 缓存淘汰与隔离：ns 隔离、FIFO 插入序淘汰（容量 200）、过期条目清除
     /// （用独立 store 实例验证逻辑——不污染全局缓存，避免并行测试互相干扰）
     #[test]
@@ -22788,6 +23946,66 @@ mod tests {
             let resp = app.clone().oneshot(req(uri.into())).await.unwrap();
             assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri} 应拒绝");
         }
+
+        // ⑦ 私有目录排除：data/{ns}/webdav（WebDAV 文件/自动备份）与
+        //    data/{ns}/opds_files（上传本地书）为用户私有——无鉴权静态路由必须 404
+        let wdv = data.join("alice/webdav/legado");
+        std::fs::create_dir_all(&wdv).unwrap();
+        std::fs::write(wdv.join("auto-20260930.zip"), b"PK\x03\x04backup").unwrap();
+        let opds = data.join("alice/opds_files");
+        std::fs::create_dir_all(&opds).unwrap();
+        std::fs::write(opds.join("u1.epub"), b"uploaded").unwrap();
+        std::fs::write(data.join("alice/webdav/plain.txt"), b"w").unwrap();
+        for uri in [
+            "/book-assets/alice/webdav/legado/auto-20260930.zip",
+            "/epub/alice/webdav/legado/auto-20260930.zip",
+            "/book-assets/alice/webdav/plain.txt",
+            "/book-assets/alice/opds_files/u1.epub",
+        ] {
+            let resp = app.clone().oneshot(req(uri.into())).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{uri} 应 404（私有目录）"
+            );
+        }
+        cleanup(state, dir).await;
+    }
+
+    /// P0：WebDAV PUT 请求体上限——fallback_handler 以 Bytes 提取请求体（WebDAV PUT
+    /// 落盘），未放开 axum 默认 2MB 上限的话 >2MB 大文件上传一律 413
+    /// （READER_UPLOAD_MAX_MB 只作用于 multipart 上传路由）。验证 2MB+1 字节
+    /// PUT 正常落盘（非 413）——恰好越过 DEFAULT_LIMIT=2_097_152 边界
+    #[tokio::test]
+    async fn test_webdav_put_body_limit_above_2mb() {
+        use tower::ServiceExt as _;
+        let (state, dir) = test_state("webdavbig").await;
+        let config = state.storage.config.clone();
+        // 非 secure：webdav 根 data/default/webdav（put_file 要求父目录存在）
+        std::fs::create_dir_all(config.storage_dir().join("data/default/webdav")).unwrap();
+        let app = crate::api::router::router(config, state.storage.clone());
+
+        let body = vec![0x61u8; 2_097_153];
+        let mut req = axum::http::Request::builder()
+            .method(axum::http::Method::PUT)
+            .uri("/reader3/webdav/big.bin")
+            .header("host", "srv.example:8080")
+            .body(Body::from(body))
+            .unwrap();
+        // ConnectInfo 提取器依赖请求扩展注入（oneshot 无真实 socket）
+        req.extensions_mut().insert(ConnectInfo(
+            "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        assert_ne!(status, StatusCode::PAYLOAD_TOO_LARGE, "不得 413");
+        assert_eq!(status, StatusCode::CREATED, "大文件 PUT 应正常落盘");
+        let written = state
+            .storage
+            .config
+            .storage_dir()
+            .join("data/default/webdav/big.bin");
+        assert_eq!(std::fs::metadata(&written).unwrap().len(), 2_097_153);
         cleanup(state, dir).await;
     }
 
@@ -22889,5 +24107,202 @@ mod tests {
         // find_ascii_ci：大小写不敏感且偏移正确
         assert_eq!(find_ascii_ci("ab</Body>cd", "</body>"), Some(2));
         assert_eq!(find_ascii_ci("abc", "xyz"), None);
+    }
+
+    /// HIGH-四轮 3：resetUserPassword 最短密码校验——短于 min_user_password_length
+    /// 拒绝（原先可重置为 1 位绕过注册门槛）；达标密码正常重置并踢全部会话
+    #[tokio::test]
+    async fn test_reset_user_password_min_length() {
+        let (state, dir) = test_state("resetpw-min").await;
+        let mut state = state;
+        state.storage.config.secure = true;
+        state.storage.config.secure_key = "sk".into();
+        state.storage.config.min_user_password_length = 8;
+        state
+            .storage
+            .insert_user(&User {
+                username: "alice".into(),
+                token: "pre-tok".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let q = |extra: &[(&str, &str)]| -> HashMap<String, String> {
+            extra
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .chain([
+                    ("secureKey".to_string(), "sk".to_string()),
+                    ("accessToken".to_string(), "alice:pre-tok".to_string()),
+                ])
+                .collect()
+        };
+
+        // 短密码（"123" < 8 位）→ 拒绝，文案与注册同规格
+        let ret = reset_user_password(
+            AxumState(state.clone()),
+            Query(q(&[])),
+            HeaderMap::new(),
+            Some(Bytes::from(
+                serde_json::json!({"username": "alice", "password": "123"}).to_string(),
+            )),
+        )
+        .await;
+        assert!(!ret.0.is_success, "短密码应拒绝");
+        assert_eq!(ret.0.error_msg, "密码不能低于8位");
+
+        // 恰好达标 → 成功
+        let ret = reset_user_password(
+            AxumState(state.clone()),
+            Query(q(&[])),
+            HeaderMap::new(),
+            Some(Bytes::from(
+                serde_json::json!({"username": "alice", "newPassword": "ok-pass-8"})
+                    .to_string(),
+            )),
+        )
+        .await;
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+        let alice = state.storage.find_user("alice").await.unwrap().unwrap();
+        assert!(
+            crate::util::password::verify_argon2id("ok-pass-8", &alice.password),
+            "新密码应可校验"
+        );
+
+        cleanup(state, dir).await;
+    }
+
+    /// MEDIUM-5：getSystemInfo/getServerStats——secure 模式匿名（无/错 accessToken）
+    /// 返回 NEED_LOGIN；带有效 accessToken 正常；非 secure 保持匿名可用
+    #[tokio::test]
+    async fn test_system_info_secure_requires_login() {
+        let (state, dir) = test_state("sysinfo-secure").await;
+        let mut state = state;
+        state.storage.config.secure = true;
+        state
+            .storage
+            .insert_user(&User {
+                username: "alice".into(),
+                token: "t1".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        // 匿名 → NEED_LOGIN
+        let ret = get_system_info(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+        )
+        .await;
+        assert!(!ret.0.is_success, "secure 匿名 getSystemInfo 应拒绝");
+        assert_eq!(ret.0.data, json!("NEED_LOGIN"));
+        let ret = get_server_stats(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+        )
+        .await;
+        assert!(!ret.0.is_success, "secure 匿名 getServerStats 应拒绝");
+        assert_eq!(ret.0.data, json!("NEED_LOGIN"));
+
+        // 错误 token → 拒绝
+        let params: HashMap<String, String> =
+            [("accessToken".into(), "alice:wrong".into())].into_iter().collect();
+        let ret = get_system_info(AxumState(state.clone()), Query(params), HeaderMap::new()).await;
+        assert!(!ret.0.is_success, "错误 token 应拒绝");
+
+        // 有效 token → 正常
+        let params: HashMap<String, String> =
+            [("accessToken".into(), "alice:t1".into())].into_iter().collect();
+        let ret = get_system_info(
+            AxumState(state.clone()),
+            Query(params.clone()),
+            HeaderMap::new(),
+        )
+        .await;
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+        let ret = get_server_stats(AxumState(state.clone()), Query(params), HeaderMap::new()).await;
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+
+        // 非 secure → 匿名保持可用（单机部署语义）
+        state.storage.config.secure = false;
+        let ret = get_system_info(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+        )
+        .await;
+        assert!(ret.0.is_success, "非 secure 匿名 getSystemInfo 应可用");
+
+        cleanup(state, dir).await;
+    }
+
+    /// HIGH-四轮 2：WebDAV 预认证——secure 模式下未认证 PUT 在缓冲请求体之前
+    /// 即 401（带 WWW-Authenticate），不再进入 to_bytes 限量读取（防未认证
+    /// 并发大 PUT 打 OOM）；OPTIONS 预检仍免认证
+    #[tokio::test]
+    async fn test_fallback_webdav_preauth() {
+        let dir = std::env::temp_dir().join(format!("reader-router-davpre-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut config = crate::AppConfig::from_env();
+        config.work_dir = dir.to_string_lossy().into_owned();
+        config.token_ttl_days = 0;
+        config.secure = true;
+        let storage = crate::storage::init(&config).await.unwrap();
+        let image_cache = crate::service::image_cache::ImageCache::with_capacity(
+            dir.join("storage").join("cache").join("images"),
+            1024 * 1024,
+        );
+        let state = AppState {
+            storage,
+            image_cache,
+        };
+        let peer = ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 40001)));
+
+        // 未认证 PUT（无 Authorization 头）→ 401 + WWW-Authenticate
+        let req = axum::extract::Request::builder()
+            .method(axum::http::Method::PUT)
+            .uri("/reader3/webdav/attack.bin")
+            .body(axum::body::Body::from(vec![b'x'; 1024]))
+            .unwrap();
+        let resp = fallback_handler(
+            peer,
+            AxumState(state.clone()),
+            axum::http::Method::PUT,
+            "/reader3/webdav/attack.bin".parse().unwrap(),
+            HeaderMap::new(),
+            req,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "未认证应 401");
+        assert_eq!(
+            resp.headers().get("WWW-Authenticate").and_then(|v| v.to_str().ok()),
+            Some("Basic realm=\"reader\"")
+        );
+        assert!(
+            !dir.join("storage/data/default/webdav/attack.bin").exists(),
+            "未认证不得落盘"
+        );
+
+        // OPTIONS 预检仍免认证（CORS/客户端探测）
+        let req = axum::extract::Request::builder()
+            .method(axum::http::Method::OPTIONS)
+            .uri("/reader3/webdav/")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = fallback_handler(
+            peer,
+            AxumState(state.clone()),
+            axum::http::Method::OPTIONS,
+            "/reader3/webdav/".parse().unwrap(),
+            HeaderMap::new(),
+            req,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "OPTIONS 预检免认证");
+
+        cleanup(state, dir).await;
     }
 }

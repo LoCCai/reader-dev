@@ -68,7 +68,10 @@ pub fn count_explore_entries_offline(explore_url: &str) -> usize {
             return list
                 .iter()
                 .filter(|i| {
-                    i.get("url").and_then(|u| u.as_str()).map(|u| !u.is_empty()).unwrap_or(false)
+                    i.get("url")
+                        .and_then(|u| u.as_str())
+                        .map(|u| !u.is_empty())
+                        .unwrap_or(false)
                 })
                 .count();
         }
@@ -114,7 +117,9 @@ fn expand_braced_templates(code: &str, bridge: Option<&crate::parser::js::JsBrid
     }
     let mut result = code.to_string();
     loop {
-        let Some(start) = result.find("{{") else { break };
+        let Some(start) = result.find("{{") else {
+            break;
+        };
         let Some(end_rel) = result[start + 2..].find("}}") else {
             break;
         };
@@ -218,7 +223,9 @@ fn parse_explore_entries_impl(
             // eval 直接取结构化结果（数组/对象递归 JSON 转换——避免 ToString 的
             // "[object Object]" 导致条目解析为空；JSON.stringify 字符串出口自动解析）
             let evaluated = match bridge {
-                Some(b) => crate::parser::js::eval_js_json_with_bridge(&code, &Default::default(), b),
+                Some(b) => {
+                    crate::parser::js::eval_js_json_with_bridge(&code, &Default::default(), b)
+                }
                 None => crate::parser::js::eval_js_json_with_bridge(
                     &code,
                     &Default::default(),
@@ -393,7 +400,7 @@ pub async fn explore_url(
     let mut headers = source
         .header
         .as_deref()
-        .map(crawler::parse_header)
+        .map(|h| crawler::parse_header_for(h, source, ns))
         .unwrap_or_default();
     if let Some(extra) = &suffix.headers {
         for (k, v) in extra {
@@ -825,16 +832,22 @@ mod tests {
         let json = r#"[{"title":"排行","url":"","style":{}},{"title":"月票榜","url":"/api/rank?p={{page}}"},{"title":"新书榜","url":"/api/new?p={{page}}"}]"#;
         assert_eq!(cnt(json), 2);
         // @js: 型 → 计 1（标记"有探索"，真实分类点进后执行）
-        assert_eq!(cnt("@js:
-java.ajax(source.getKey())"), 1);
+        assert_eq!(
+            cnt("@js:
+java.ajax(source.getKey())"),
+            1
+        );
         assert_eq!(cnt("js:var u = key"), 1);
         assert_eq!(cnt("<js>1</js>"), 1);
         // 多行格式 → 非空非注释行数
-        assert_eq!(cnt("/a/1
+        assert_eq!(
+            cnt("/a/1
 /a/2
 
 # 注释
-/a/3"), 3);
+/a/3"),
+            3
+        );
         // 空 → 0
         assert_eq!(cnt(""), 0);
         assert_eq!(cnt("   "), 0);
@@ -853,15 +866,19 @@ java.ajax(source.getKey())"), 1);
         let entries = parse_explore_entries_for_source(script, &src, "default");
         // G()/W() 条目无 url 应跳过；B() 条目 url = 书源 URL + 相对路径
         assert!(
-            entries.iter().any(|e| e.title == "最近更新" && e.url == "https://albums.test/albums-index-page-1.html"),
+            entries.iter().any(|e| e.title == "最近更新"
+                && e.url == "https://albums.test/albums-index-page-1.html"),
             "模板应展开为书源 URL: {entries:?}"
         );
         assert!(
-            entries.iter().any(|e| e.title == "日榜" && e.url == "https://albums.test/albums-favorite_ranking-page-1-type-day.html"),
+            entries.iter().any(|e| e.title == "日榜"
+                && e.url == "https://albums.test/albums-favorite_ranking-page-1-type-day.html"),
             "{entries:?}"
         );
         assert!(
-            !entries.iter().any(|e| e.title == "🛠 维护" || e.title == "🆕 更新"),
+            !entries
+                .iter()
+                .any(|e| e.title == "🛠 维护" || e.title == "🆕 更新"),
             "分组标题/按钮条目（无 url）不应出现: {entries:?}"
         );
     }
@@ -900,7 +917,11 @@ java.ajax(source.getKey())"), 1);
             "http://{addr}/api/rank/details,{{\"method\":\"POST\",\"body\":\"pageNum={{{{page}}}}\"}}"
         );
         let books = explore_url("default", &url, 1, &src).await.unwrap();
-        println!("mock full-chain books: {} -> {:?}", books.len(), books.iter().map(|b| b.name.clone()).collect::<Vec<_>>());
+        println!(
+            "mock full-chain books: {} -> {:?}",
+            books.len(),
+            books.iter().map(|b| b.name.clone()).collect::<Vec<_>>()
+        );
         assert!(!books.is_empty(), "全链路 mock 应解析出书");
     }
 }

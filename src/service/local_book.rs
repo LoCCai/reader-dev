@@ -301,6 +301,9 @@ fn merge_epub_chapters<R: std::io::Read + std::io::Seek>(
     spin_chapters: Vec<(String, Chapter)>,
     toc_mode: &str,
 ) -> Vec<Chapter> {
+    // 累计解压上限（与 opf_chapters 同语义）：toc 骨架模式的章节读取点也纳入预算
+    const EPUB_CHAPTERS_TOTAL_MAX: usize = 256 * 1024 * 1024;
+    let mut total_text: usize = 0;
     let mode = if is_epub_toc_mode(toc_mode) {
         toc_mode
     } else {
@@ -353,6 +356,16 @@ fn merge_epub_chapters<R: std::io::Read + std::io::Seek>(
                     let html = String::from_utf8_lossy(&bytes);
                     let text = html_to_text(&html);
                     if !text.trim().is_empty() {
+                        // 累计解压上限（与 opf_chapters 同语义）：高压缩比/重复条目
+                        // EPUB 的 toc 骨架逐条重读 zip，曾无上限可撑爆内存
+                        total_text = total_text.saturating_add(text.len());
+                        if total_text > EPUB_CHAPTERS_TOTAL_MAX {
+                            tracing::warn!(
+                                "EPUB toc 骨架章节文本累计超过 {}MB，截断后续章节",
+                                EPUB_CHAPTERS_TOTAL_MAX / 1024 / 1024
+                            );
+                            break;
+                        }
                         out.push(Chapter {
                             title,
                             content: text,
@@ -381,6 +394,15 @@ fn merge_epub_chapters<R: std::io::Read + std::io::Seek>(
                     let html = String::from_utf8_lossy(&bytes);
                     let text = html_to_text(&html);
                     if !text.trim().is_empty() {
+                        // 累计解压上限（与 opf_chapters/toc+spin 分支同语义）
+                        total_text = total_text.saturating_add(text.len());
+                        if total_text > EPUB_CHAPTERS_TOTAL_MAX {
+                            tracing::warn!(
+                                "EPUB toc 骨架章节文本累计超过 {}MB，截断后续章节",
+                                EPUB_CHAPTERS_TOTAL_MAX / 1024 / 1024
+                            );
+                            break;
+                        }
                         out.push(Chapter {
                             title: title.clone(),
                             content: text,
@@ -439,6 +461,9 @@ fn opf_chapters<R: std::io::Read + std::io::Seek>(
     let spine_refs: Vec<String> = extract_all_attr(opf_str, "itemref", "idref");
     let manifest: std::collections::HashMap<String, (String, String)> = extract_manifest(opf_str);
     let mut chapters = Vec::new();
+    // 累计解压上限：高压缩比 EPUB（单条目限 500MB 但可上千条目）曾可撑爆内存
+    const EPUB_CHAPTERS_TOTAL_MAX: usize = 256 * 1024 * 1024;
+    let mut total_text: usize = 0;
     for idref in &spine_refs {
         let Some((href, mediatype)) = manifest.get(idref) else {
             continue;
@@ -454,6 +479,14 @@ fn opf_chapters<R: std::io::Read + std::io::Seek>(
         let text = html_to_text(&html);
         if text.trim().is_empty() {
             continue;
+        }
+        total_text = total_text.saturating_add(text.len());
+        if total_text > EPUB_CHAPTERS_TOTAL_MAX {
+            tracing::warn!(
+                "EPUB 章节文本累计超过 {}MB，截断后续章节",
+                EPUB_CHAPTERS_TOTAL_MAX / 1024 / 1024
+            );
+            break;
         }
         let title = extract_title(&html).unwrap_or_else(|| format!("第 {} 节", chapters.len() + 1));
         chapters.push((
@@ -2562,6 +2595,14 @@ impl<'a> UmdCursor<'a> {
     }
 
     fn bytes(&mut self, n: usize) -> std::io::Result<Vec<u8>> {
+        // 先校验再分配：n 来自文件内 u32（恶意 UMD 一次附加块即可要求 ~4GB 零化
+        // 分配——cgroup 容器内直接 OOM-abort）
+        if n > self.data.len() - self.pos.min(self.data.len()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("UMD 附加块长度 {n} 超出文件余量"),
+            ));
+        }
         let mut buf = vec![0u8; n];
         self.read_exact(&mut buf)?;
         Ok(buf)
@@ -2656,6 +2697,24 @@ pub fn parse_loc_book_path(
     let bytes = std::fs::read(path)?;
     let ext = file_ext(&path.to_string_lossy());
     parse_file_bytes(&bytes, &ext, user_rules, toc_mode, split_long)
+}
+
+/// CPU 密集（EPUB/PDF/zip 解压解析）——spawn_blocking 版：避免秒级解析阻塞
+/// tokio worker（#20；本地书目录/正文/导出/导入预览等全部热路径经此）
+pub async fn parse_loc_book_path_blocking(
+    path: &std::path::Path,
+    user_rules: &[String],
+    toc_mode: &str,
+    split_long: bool,
+) -> Result<ImportedBook> {
+    let path = path.to_path_buf();
+    let user_rules = user_rules.to_vec();
+    let toc_mode = toc_mode.to_string();
+    tokio::task::spawn_blocking(move || {
+        parse_loc_book_path(&path, &user_rules, &toc_mode, split_long)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("本地书解析任务失败: {e}"))?
 }
 
 /// 兼容旧签名：默认 EPUB 目录模式、不拆长章节
@@ -3051,6 +3110,10 @@ mod tests {
         assert_eq!(plain.chapters.len(), 1, "关闭时保持单章");
     }
 
+    /// 六种 toc_mode 解析口径（含 toc 骨架分支——total_text 累计上限改动的回归覆盖）。
+    /// 注：此前该函数漏挂 #[test] 从未运行；256MB 截断阈值本身需 >256MB 文本，
+    /// 单测不可达——此处锁定各模式章节顺序/内容/标题语义不被截断逻辑破坏。
+    #[test]
     fn parse_epub_toc_modes() {
         let bytes = build_test_epub();
         // 默认 spin+toc：spine 顺序，标题用 spine 的（spine 标题非空不覆盖）

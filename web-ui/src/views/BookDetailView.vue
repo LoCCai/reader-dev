@@ -753,9 +753,12 @@ async function switchSource(r: SearchBook) {
     // A1：POST /setBookSource——服务端完成新源详情拉取、书架主键/origin/tocUrl
     // 切换与目录预取缓存（legacy BookController 同名语义）
     let viaMainApi = false
+    let newBookUrl = ''
     try {
       const res = await setBookSource(b.bookUrl, r.bookUrl, r.origin, { silent: true })
       viaMainApi = res.isSuccess
+      // 服务端已把书架主键换成新源 bookUrl（响应为更新后的 Book），重定位进度须用新主键
+      newBookUrl = res.data?.bookUrl || r.bookUrl
     } catch {
       viaMainApi = false
     }
@@ -768,7 +771,7 @@ async function switchSource(r: SearchBook) {
       sourceOpen.value = false
       document.body.style.overflow = ''
       // GAP 6：换源后阅读位置保留（重定位写回服务端进度，失败静默）
-      await relocateProgressAfterSwitch(r)
+      await relocateProgressAfterSwitch(r, newBookUrl)
       await router.replace({
         path: `/book/${encodeURIComponent(r.bookUrl)}`,
         query: {
@@ -803,7 +806,8 @@ async function switchSource(r: SearchBook) {
     }
     // GAP 6：换源后阅读位置保留——新源章节目录索引可能失效，拉新目录重定位 durChapterIndex
     // （标题跨源匹配优先，越界就近钳制；重定位后写回服务端进度，阅读器续读不丢位置）
-    await relocateProgressAfterSwitch(r)
+    // 降级路径 saveBook 不换主键，进度仍写回书架原 bookUrl
+    await relocateProgressAfterSwitch(r, b.bookUrl)
     ElMessage.success(`已切换到「${r.originName || r.origin}」`)
     closeSource()
   } catch {
@@ -818,8 +822,10 @@ async function switchSource(r: SearchBook) {
  * 旧源 durChapterIndex 在新源目录中可能越界/指向卷标行——拉新目录后
  * 用 relocateChapterIndex（标题匹配 → 就近钳制）算新索引，并 POST saveBookProgress
  * 写回服务端（失败静默——阅读器内还有范围守卫兜底）。
+ * @param effectiveBookUrl 进度写回的书架主键：主接口换源后为新源 bookUrl（服务端已换主键），
+ *                         saveBook 降级路径不换主键，仍是原 b.bookUrl——写错主键必报「书籍未加入书架」。
  */
-async function relocateProgressAfterSwitch(r: SearchBook) {
+async function relocateProgressAfterSwitch(r: SearchBook, effectiveBookUrl: string) {
   const b = shelfBook.value
   if (!b) return
   const oldIdx = typeof b.durChapterIndex === 'number' ? b.durChapterIndex : -1
@@ -833,7 +839,7 @@ async function relocateProgressAfterSwitch(r: SearchBook) {
     b.durChapterIndex = newIdx
     b.durChapterTitle = newTitle
     await post('/saveBookProgress', {
-      bookUrl: b.bookUrl,
+      bookUrl: effectiveBookUrl,
       durChapterIndex: newIdx,
       durChapterPos: 0,
       durChapterTime: Date.now(),

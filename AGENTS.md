@@ -59,24 +59,28 @@ jar tf C:\Users\chong\Downloads\reader-pro-3.2.14.jar | findstr "controller"
 2. 在 Rust 中按 legacy 语义实现（细节逐项对齐，不是近似）
 3. 每项修复配测试 → cargo test 全绿 → 提交推送 master
 
-## 当前状态（2026-08-23 更新）
+## 当前状态（2026-09-29 更新）
 
 ### 后端对齐：✅ 完成
-- P0 全部 17 项清零
-- 引擎 E1-E16 + AR1-AR5 全部完成
-- F 批 F2-F12 基本完成
-- 路由全量对齐（110+ 条，含别名）
-- WebDAV RFC 合规修复
-- 测试 699 全绿；CI 全绿基线
-- 审计报告固化于 docs/audit/
+- P0 全部 17 项清零；引擎 E1-E16 + AR1-AR5；路由 177 条全对齐
+- 测试 760 lib + 15 集成全绿；审计报告固化于 docs/audit/
 
-### 下一步：UI 大项
-web-ui 设计语言已与 archive/master-v5.2.4 一致（diff 仅 5 文件）。
-剩余为**前端功能组件开发**：
-1. EPUB 阅读模式（消费 getBookContent epubContent=1 的 HTML 响应）
-2. CBZ 漫画阅读模式（消费 img 标签列表响应）
-3. TTS 面板完善（对接 type=api 按名解析的听书源）
-4. 书源管理页增强（分组过滤、调试面板改进）
+### 运维加固（2026-09-22~29，PR fix/book-vars-cache #1）
+- book_vars_cache 无界膨胀治理（35GB 事故）：src 不落库、写入节流、
+  同源内容去重、canonical JSON（BTreeMap）、root/toc 兜底键豁免、
+  每小时 prune（TTL 14 天 + 上限 20 万行）
+- camoufox 全链修复：python3.12 基底、UBO 插件（AMO 451 → GitHub Releases +
+  构建期校验）、GTK3、solver 浏览器死亡自愈 + Rust spawn 失败 60s TTL 重试
+- jsLib 注入：header/搜索/目录/正文/探索全链 eval 带 js_lib（ReferenceError 清零）
+- cache.putFile/putFileAsBase64/getFile（legado 大值语义，文件 + 哨兵行）
+- 日志治理：[cascade] DBG_TOC 门控、html5ever=off、getBookshelf 降 debug
+- 备份：保留 3 份 + 启动守卫（库未变跳过全量拷贝）
+
+### UI 大项：✅ 已完成（原 4 项全部落地）
+1. EPUB 阅读模式 ✅（ReaderView epubMode + EpubIframe 沙箱渲染）
+2. CBZ 漫画模式 ✅（bookType=2 comic-stage）
+3. TTS 面板 ✅（edge/textToSpeechCn/type=api 按名解析 + 选中文本朗读）
+4. 书源管理页 ✅（调试面板 bookSourceDebugSSE 四动作 + 分组筛选/管理）
 
 ### 积压清单
 详见 docs/AUDIT-BACKLOG.md 和 docs/audit/ 目录。

@@ -342,13 +342,43 @@ _browser_ready = False
 SESSIONS = {}
 
 
+def browser_alive(b) -> bool:
+    """探活：Browser.is_connected()（is_closed 是 Page 的方法——曾误用：AttributeError
+    被兜底吞掉后健康浏览器恒判死，每次请求重启 + /health 恒 false）。
+    BrowserContext 经 .browser 间连；API 异常按死亡处理（宁可重启不挂死请求）。"""
+    try:
+        target = getattr(b, "browser", None) or b
+        return bool(target.is_connected())
+    except Exception:
+        return False
+
+
+_browser_lock = asyncio.Lock()
+
+
 async def get_browser():
-    """惰性启动常驻 camoufox 浏览器（进程生命周期内复用；并发请求经锁排队）"""
+    """惰性启动常驻 camoufox 浏览器（进程生命周期内复用；并发请求经锁排队——
+    此前 docstring 声称有锁实际无锁：冷启动数秒窗口内并发请求会双启动浏览器，
+    后完成者覆盖 _browser，先启动的泄漏为孤儿进程）。
+    验活：浏览器进程死亡（崩溃/OOM-kill）时 _browser 对象仍残留——只判 None 会
+    永远返回僵死对象，请求静默失败且 /health 误报 ready；死亡则关闭残壳并重启。
+    双检：持锁后再次探活（等锁期间可能已被其他请求重启）。
+    """
     global _browser, _browser_ready
-    if _browser is None:
+    async with _browser_lock:
+        if _browser is not None and browser_alive(_browser):
+            return _browser
+        dead = _browser is not None
+        if dead:
+            try:
+                await _browser.close()
+            except Exception:
+                pass
+            _browser = None
+            _browser_ready = False
         _browser = await AsyncCamoufox(headless=True, humanize=True).__aenter__()
         _browser_ready = True
-    return _browser
+        return _browser
 
 
 def cookies_for_host(cookies, host):
@@ -1036,6 +1066,14 @@ async def handle_screenshot(reader, payload):
             pass
 
 
+def _cookie_of_host(c, host):
+    """cookie 是否属于登录页主机域（domain 缺省视为属于——playwright ctx 域内 cookie）"""
+    d = str(c.get("domain") or "").lstrip(".")
+    if not d or not host:
+        return True
+    return host == d or host.endswith("." + d)
+
+
 async def handle_probe(reader, payload):
     """POST /probe：导航 → 检测验证码类型（image/slider/click/none）+ 图片截图"""
     try:
@@ -1064,8 +1102,14 @@ async def handle_probe(reader, payload):
         await asyncio.sleep(1.0)
         det = await detect_captcha(page)
         page_url = page.url
+        # 会话 cookie 回传（仅登录页主机域下——第三方域不进书源 cookie 串）
+        try:
+            cookies_out = [c for c in await ctx.cookies() if _cookie_of_host(c, host)]
+        except Exception:
+            cookies_out = []
         if not det or det.get("kind") not in ("image", "slider", "click"):
-            return 200, {"captchaType": "none", "pageUrl": page_url, "message": "未检测到验证码"}
+            return 200, {"captchaType": "none", "pageUrl": page_url,
+                         "message": "未检测到验证码", "cookies": cookies_out}
         kind = det.get("kind")
         if kind == "image":
             x = float(det.get("x") or 0)
@@ -1080,10 +1124,12 @@ async def handle_probe(reader, payload):
                     "base64": base64.b64encode(png).decode("ascii") if png else "",
                     "x": x, "y": y, "w": w, "h": h,
                 },
+                "cookies": cookies_out,
             }
         return 200, {"captchaType": kind, "pageUrl": page_url,
                      "message": "滑块验证码（请重新调用登录自动处理）" if kind == "slider"
-                     else "点选类验证码（无法自动识别）"}
+                     else "点选类验证码（无法自动识别）",
+                     "cookies": cookies_out}
     finally:
         try:
             await ctx.close()
@@ -1105,10 +1151,12 @@ async def handle_client(reader, writer):
         if method == "POST":
             payload = await read_json_body(reader)
         if method == "GET" and path in ("/health", "/health/"):
+            # browserReady 反映真实存活（曾为一次性置位标志：浏览器死后仍误报 true）
+            alive = _browser is not None and browser_alive(_browser)
             status, payload = 200, {
                 "ok": True,
                 "camoufoxVersion": "0.5.4",
-                "browserReady": _browser_ready,
+                "browserReady": alive,
                 "port": PORT,
                 "sessions": len(SESSIONS),
             }
@@ -1139,8 +1187,26 @@ async def handle_client(reader, writer):
             ).encode("latin-1")
             + data
         )
-    except Exception:
-        pass
+    except Exception as e:
+        # 曾为裸 pass：异常时连接被静默关闭（调用方只看到 RemoteDisconnected）——
+        # 回 500 JSON 让 Rust 侧拿到可归因的错误
+        try:
+            data = json.dumps(
+                {"error": f"solver internal error: {type(e).__name__}: {e}"},
+                ensure_ascii=False,
+            ).encode("utf-8")
+            writer.write(
+                (
+                    "HTTP/1.1 500 ERROR\r\n"
+                    "Content-Type: application/json; charset=utf-8\r\n"
+                    f"Content-Length: {len(data)}\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                ).encode("latin-1")
+                + data
+            )
+        except Exception:
+            pass
     finally:
         try:
             await writer.drain()

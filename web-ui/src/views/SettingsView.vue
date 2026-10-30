@@ -585,8 +585,8 @@ async function loadServerPref() {
   prefMsgError.value = false
   try {
     const res = await getUserConfig()
-    // 后端返回 { ns, config }（config 为配置 JSON 或 null）
-    const cfg = res.data && typeof res.data === 'object' ? (res.data as Record<string, unknown>).config : undefined
+    // F12：后端裸对象直出（不再包 {ns,config} 一层），res.data 即配置 JSON 或 null
+    const cfg = res.data && typeof res.data === 'object' ? res.data : undefined
     const server = fromServerConfig(cfg)
     const merged = { ...loadReaderConfig(), ...server }
     applyReaderConfig(merged)
@@ -601,10 +601,16 @@ async function loadServerPref() {
     }
     prefMsg.value = '已从服务器同步阅读偏好（服务器优先）'
   } catch (err) {
-    prefMsg.value = isNotImplemented(err)
-      ? '配置同步接口后端暂未提供（GET /reader3/getUserConfig）· 当前仅保存在本机'
-      : `同步失败：${err instanceof Error ? err.message : '请稍后重试'}`
-    prefMsgError.value = true
+    const errMsg = err instanceof Error ? err.message : ''
+    if (errMsg.includes('没有备份文件')) {
+      // 后端缺配置走 legacy err「没有备份文件」（首次使用属正常态）：静默，仅用本地配置
+      prefMsg.value = ''
+    } else if (isNotImplemented(err)) {
+      prefMsg.value = '配置同步接口后端暂未提供（GET /reader3/getUserConfig）· 当前仅保存在本机'
+    } else {
+      prefMsg.value = `同步失败：${errMsg || '请稍后重试'}`
+      prefMsgError.value = true
+    }
   }
 }
 
@@ -621,11 +627,9 @@ async function savePref() {
     let existing: Record<string, unknown> = {}
     try {
       const res = await getUserConfig()
-      const cfg =
-        res.data && typeof res.data === 'object'
-          ? (res.data as Record<string, unknown>).config
-          : undefined
-      if (cfg && typeof cfg === 'object') existing = cfg as Record<string, unknown>
+      // F12：后端裸对象直出，res.data 即配置 JSON（首次无配置会 err，由下方 catch 静默吞掉）
+      const cfg = res.data && typeof res.data === 'object' ? res.data : undefined
+      if (cfg) existing = cfg
     } catch {
       /* 读取失败：仅保存已知字段 */
     }

@@ -65,6 +65,17 @@ fn login_required() -> ReturnData {
     }
 }
 
+/// 保留文件名拦截（复用 opds::is_reserved_db_file）：home=__STORAGE__ 时 file API
+/// 的 base 即 storage 根，reader.db 及 -wal/-shm/-journal 副作用文件、reader.db.bak-*
+/// 备份均为整库（users 表含全部用户凭证）或其副本——读/写/删/改名/上传一律拒绝。
+/// 仅命中 storage 根内精确名/备份前缀（is_reserved_db_file 校验 parent==root），
+/// 其余 home（data/{ns} 等）下同名文件不受影响。
+fn reserved_db_rejected(config: &AppConfig, file: &Path) -> bool {
+    let root = config.storage_dir();
+    let root = root.canonicalize().unwrap_or(root);
+    crate::api::opds::is_reserved_db_file(file, &root)
+}
+
 /// 安全路径解析（防穿越）：rel 视为 base 下相对路径（去除前导 / 或 \，与 legacy
 /// removePrefix 一致）；组件级处理 `..`（弹出一级，越出 base 即拒绝）；返回路径保证
 /// 位于 base 内
@@ -265,6 +276,10 @@ pub async fn get(
     let Some(file) = resolve_secure_path(&base, &path) else {
         return Json(ReturnData::err("参数错误"));
     };
+    // 保留文件名拦截（__STORAGE__ home 下 reader.db 等整库文件不可读出）
+    if reserved_db_rejected(&state.storage.config, &file) {
+        return Json(ReturnData::err("非法访问"));
+    }
     if !file.exists() {
         return Json(ReturnData::err("路径不存在"));
     }
@@ -315,6 +330,10 @@ pub async fn save(
     let Some(file) = resolve_secure_path(&base, &path) else {
         return Json(ReturnData::err("参数错误"));
     };
+    // 保留文件名拦截（__STORAGE__ home 下不可覆盖 reader.db 等整库文件）
+    if reserved_db_rejected(&state.storage.config, &file) {
+        return Json(ReturnData::err("非法访问"));
+    }
     if let Some(parent) = file.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -415,6 +434,11 @@ pub async fn rename(
     let Some(old_path) = resolve_secure_path(&base, &path) else {
         return Json(ReturnData::err("参数错误"));
     };
+    // 保留文件名拦截：源/目标任一为 storage 根内保留名（reader.db 等）均拒绝——
+    // 改名离开同样属于绕过读取拦截的通道
+    if reserved_db_rejected(&state.storage.config, &old_path) {
+        return Json(ReturnData::err("非法访问"));
+    }
     if !old_path.exists() {
         return Json(ReturnData::err("文件不存在"));
     }
@@ -422,6 +446,9 @@ pub async fn rename(
     let Some(new_path) = resolve_secure_path(parent, &name) else {
         return Json(ReturnData::err("参数错误"));
     };
+    if reserved_db_rejected(&state.storage.config, &new_path) {
+        return Json(ReturnData::err("非法访问"));
+    }
     if new_path.exists() {
         return Json(ReturnData::err("路径已存在"));
     }
@@ -553,6 +580,10 @@ pub async fn download(
     let Some(file) = resolve_secure_path(&base, &path) else {
         return Json(ReturnData::err("参数错误")).into_response();
     };
+    // 保留文件名拦截（__STORAGE__ home 下 reader.db 等整库文件不可下载）
+    if reserved_db_rejected(&state.storage.config, &file) {
+        return Json(ReturnData::err("非法访问")).into_response();
+    }
     if !file.exists() || !file.is_file() {
         return Json(ReturnData::err("路径不存在")).into_response();
     }
@@ -738,6 +769,11 @@ pub async fn upload(
         let Some(dest) = resolve_secure_path(&target_dir, &safe_name) else {
             continue;
         };
+        // 保留文件名拦截：跳过 storage 根内保留名（__STORAGE__ home 上传 reader.db
+        // 覆盖整库/备份副本）
+        if reserved_db_rejected(&state.storage.config, &dest) {
+            continue;
+        }
         if let Some(parent) = dest.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -789,6 +825,10 @@ pub async fn delete(
     let Some(file) = resolve_secure_path(&base, &path) else {
         return Json(ReturnData::err("参数错误"));
     };
+    // 保留文件名拦截（__STORAGE__ home 下 reader.db 等整库文件不可删除）
+    if reserved_db_rejected(&state.storage.config, &file) {
+        return Json(ReturnData::err("非法访问"));
+    }
     if !file.exists() {
         return Json(ReturnData::err("路径不存在"));
     }
@@ -1034,15 +1074,14 @@ pub async fn import_preview(
         } else {
             bname
         };
-        let titles: Vec<String> =
-            crate::service::local_book::parse_loc_book_path(
-                &file,
-                &user_rules,
-                crate::service::local_book::DEFAULT_EPUB_TOC_MODE,
-                false,
-            )
-            .map(|imported| imported.chapters.iter().map(|c| c.title.clone()).collect())
-            .unwrap_or_default();
+        let titles: Vec<String> = crate::service::local_book::parse_loc_book_path(
+            &file,
+            &user_rules,
+            crate::service::local_book::DEFAULT_EPUB_TOC_MODE,
+            false,
+        )
+        .map(|imported| imported.chapters.iter().map(|c| c.title.clone()).collect())
+        .unwrap_or_default();
         let chapters: Vec<Value> = titles
             .iter()
             .enumerate()
@@ -1071,8 +1110,9 @@ pub async fn import_preview(
     Json(ReturnData::ok(Value::Array(out)))
 }
 
-/// R6b：GET+POST /reader3/file/restore（legacy FileController.restore）
-/// path（POST body / GET query，默认 "/"）指向 file home 内的 zip 备份文件 →
+/// R6b：POST /reader3/file/restore（legacy FileController.restore；GET 已移除——
+/// 恢复备份不应是可被 <img>/<a> 触发的简单请求）
+/// path（POST body，默认 "/"）指向 file home 内的 zip 备份文件 →
 /// 复用 restore_backup_zip 核心恢复。非 zip 报「路径不是zip备份文件」；缺失报「路径不存在」。
 pub async fn restore(
     State(state): State<AppState>,
@@ -1199,10 +1239,14 @@ pub async fn delete_multi(
         if path.is_empty() {
             continue;
         }
-        // 非法（防穿越）路径静默跳过（legacy：resolveSecurePath 失败即跳过）
+        // 非法（防穿越）路径静默跳过（legacy：resolveSecurePath 失败即跳过）；
+        // storage 根内保留名（reader.db 等）同样静默跳过（与 delete 同规格拦截）
         let Some(file) = resolve_secure_path(&base, &path) else {
             continue;
         };
+        if reserved_db_rejected(&state.storage.config, &file) {
+            continue;
+        }
         if !file.exists() {
             continue;
         }
@@ -1948,7 +1992,11 @@ mod tests {
             .join("data")
             .join("default");
         std::fs::create_dir_all(&base).unwrap();
-        std::fs::write(base.join("mybook.txt"), "第一章 开端\n正文一\n\n第二章 发展\n正文二\n").unwrap();
+        std::fs::write(
+            base.join("mybook.txt"),
+            "第一章 开端\n正文一\n\n第二章 发展\n正文二\n",
+        )
+        .unwrap();
         std::fs::write(base.join("bad.exe"), "MZ").unwrap();
 
         // importPreview：txt → [{book, chapters}]（章节标题解析 + bookUrl 相对 storage 根）
@@ -1960,7 +2008,11 @@ mod tests {
             Some(body),
         )
         .await;
-        assert!(ret.0.is_success, "importPreview 应成功: {}", ret.0.error_msg);
+        assert!(
+            ret.0.is_success,
+            "importPreview 应成功: {}",
+            ret.0.error_msg
+        );
         let arr = ret.0.data.as_array().cloned().unwrap_or_default();
         assert_eq!(arr.len(), 1, "缺失文件应跳过: {arr:?}");
         assert_eq!(arr[0]["book"]["origin"], "loc_book");
@@ -2013,6 +2065,134 @@ mod tests {
         .await;
         assert!(!ret.0.is_success);
         assert_eq!(ret.0.error_msg, "路径不存在");
+
+        cleanup(state, dir).await;
+    }
+
+    /// HIGH-1：home=__STORAGE__ 下保留文件名拦截——reader.db / -wal / bak-* 在
+    /// get/save/download/delete/rename/deleteMulti 各路径一律拒绝（防整库下载/覆盖/
+    /// 删除）；其余 home 下同名文件不误伤
+    #[tokio::test]
+    async fn test_reserved_db_file_block() {
+        let (state, dir) = test_state("reserved").await;
+        let storage_root = state.storage.config.storage_dir();
+        std::fs::write(storage_root.join("reader.db"), b"FAKE-DB-Secrets").unwrap();
+        std::fs::write(storage_root.join("reader.db-wal"), b"FAKE-WAL").unwrap();
+        std::fs::write(storage_root.join("reader.db.bak-20260101-000000"), b"FAKE-BAK").unwrap();
+        std::fs::write(storage_root.join("normal.txt"), b"plain").unwrap();
+        // 用户目录下同名文件（非 storage 根）不应误伤
+        std::fs::create_dir_all(storage_root.join("data/default")).unwrap();
+        std::fs::write(storage_root.join("data/default/reader.db"), b"user own").unwrap();
+
+        let headers = HeaderMap::new();
+        let q = |path: &str| -> HashMap<String, String> {
+            [("home".into(), "__STORAGE__".into()), ("path".into(), path.into())]
+                .into_iter()
+                .collect()
+        };
+
+        // get：整库读出拒绝（含 -wal 副作用与 bak- 备份前缀）
+        for p in [
+            "/reader.db",
+            "/reader.db-wal",
+            "/reader.db.bak-20260101-000000",
+        ] {
+            let ret = get(State(state.clone()), Query(q(p)), headers.clone(), None).await;
+            assert!(!ret.0.is_success, "get {p} 应拒绝");
+            assert_eq!(ret.0.error_msg, "非法访问", "get {p} 文案");
+        }
+
+        // download：不返回文件字节（ReturnData JSON 错误体，非 octet-stream 附件）
+        let resp = download(State(state.clone()), Query(q("/reader.db")), headers.clone(), None)
+            .await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_ne!(
+            resp.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            "application/octet-stream",
+            "download reader.db 不应走文件字节响应"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("非法访问"), "download 错误体: {text}");
+        assert!(!text.contains("FAKE-DB-Secrets"), "整库内容不得泄出");
+
+        // save：覆盖 reader.db 拒绝，原内容不变
+        let ret = save(
+            State(state.clone()),
+            Query(q("/reader.db")),
+            headers.clone(),
+            Some(Bytes::from(r#"{"path":"/reader.db","content":"pwned"}"#)),
+        )
+        .await;
+        assert!(!ret.0.is_success);
+        assert_eq!(ret.0.error_msg, "非法访问");
+        assert_eq!(
+            std::fs::read(storage_root.join("reader.db")).unwrap(),
+            b"FAKE-DB-Secrets",
+            "reader.db 不得被覆盖"
+        );
+
+        // delete：拒绝且文件仍在
+        let ret = delete(State(state.clone()), Query(q("/reader.db")), headers.clone(), None)
+            .await;
+        assert!(!ret.0.is_success);
+        assert_eq!(ret.0.error_msg, "非法访问");
+        assert!(storage_root.join("reader.db").exists());
+
+        // rename：改名离开保留名（绕过读取拦截）与改名进入保留名均拒绝
+        let ret = rename(
+            State(state.clone()),
+            Query(q("/reader.db")),
+            headers.clone(),
+            Some(Bytes::from(r#"{"path":"/reader.db","name":"stolen.txt"}"#)),
+        )
+        .await;
+        assert!(!ret.0.is_success, "reader.db 改名离开应拒绝");
+        let ret = rename(
+            State(state.clone()),
+            Query(q("/normal.txt")),
+            headers.clone(),
+            Some(Bytes::from(
+                r#"{"path":"/normal.txt","name":"reader.db"}"#,
+            )),
+        )
+        .await;
+        assert!(!ret.0.is_success, "改名进入 reader.db 应拒绝");
+        assert_eq!(
+            std::fs::read(storage_root.join("normal.txt")).unwrap(),
+            b"plain"
+        );
+
+        // deleteMulti：保留名静默跳过（与非法路径同规格），普通文件正常删除
+        let ret = delete_multi(
+            State(state.clone()),
+            Query(HashMap::new()),
+            headers.clone(),
+            Some(Bytes::from(
+                r#"{"paths":["/reader.db","/normal.txt"],"home":"__STORAGE__"}"#,
+            )),
+        )
+        .await;
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+        assert_eq!(ret.0.data["deleted"], 1, "仅 normal.txt 被删: {}", ret.0.data);
+        assert!(storage_root.join("reader.db").exists());
+        assert!(!storage_root.join("normal.txt").exists());
+
+        // 不误伤：__HOME__（用户目录）下同名 reader.db 正常读写
+        let q_home: HashMap<String, String> =
+            [("home".into(), "__HOME__".into()), ("path".into(), "/reader.db".into())]
+                .into_iter()
+                .collect();
+        let ret = get(State(state.clone()), Query(q_home), headers.clone(), None).await;
+        assert!(ret.0.is_success, "用户目录同名文件不应误伤: {}", ret.0.error_msg);
+        assert_eq!(ret.0.data, json!("user own"));
+
+        // 不误伤：storage 根普通文件正常读取
+        let ret = get(State(state.clone()), Query(q("/no-such.txt")), headers.clone(), None).await;
+        assert!(!ret.0.is_success);
+        assert_eq!(ret.0.error_msg, "路径不存在", "普通缺失路径文案不变");
 
         cleanup(state, dir).await;
     }
