@@ -13,6 +13,50 @@ pub mod migrate;
 // Keep the same predicate for statistics and clearing so the displayed scope is exact.
 const REGENERABLE_CHAPTERS: &str = "book_url NOT LIKE 'local://%' AND book_url NOT LIKE 'storage/%' AND NOT EXISTS (SELECT 1 FROM books b WHERE b.book_url = book_chapters.book_url AND b.user_namespace = book_chapters.user_namespace AND b.origin IN ('local', 'loc_book'))";
 
+const MAX_CACHE_CHAPTERS_PER_PAGE: usize = 200;
+
+// Select only keys through the covering primary-key index. Body columns are
+// fetched separately after the 200-row page and its one-key probe are known.
+const TOC_CACHE_PAGE_KEYS_SQL: &str = r#"
+    SELECT json_extract(toc.value, '$[0]'),
+           COALESCE(hashed.chapter_index, legacy.chapter_index),
+           json_extract(toc.value, '$[2]')
+    FROM json_each(?3) AS toc
+    LEFT JOIN book_chapters AS hashed
+      ON hashed.book_url = ?2 AND hashed.user_namespace = ?1
+     AND hashed.chapter_index = json_extract(toc.value, '$[1]')
+    LEFT JOIN book_chapters AS legacy
+      ON legacy.book_url = ?2 AND legacy.user_namespace = ?1
+     AND legacy.chapter_index = json_extract(toc.value, '$[0]')
+     AND hashed.chapter_index IS NULL
+    WHERE COALESCE(hashed.chapter_index, legacy.chapter_index) IS NOT NULL
+      AND (?4 IS NULL OR json_extract(toc.value, '$[0]') >= ?4)
+      AND (?5 IS NULL OR json_extract(toc.value, '$[0]') <= ?5)
+    ORDER BY json_extract(toc.value, '$[0]')
+    LIMIT ?6
+"#;
+
+const CACHE_PAGE_BODIES_SQL: &str = r#"
+    SELECT json_extract(page.value, '$[0]'),
+           CASE WHEN COALESCE(json_extract(page.value, '$[2]'), '') != ''
+                THEN json_extract(page.value, '$[2]') ELSE body.title END,
+           body.content
+    FROM json_each(?3) AS page
+    JOIN book_chapters AS body
+      ON body.book_url = ?2 AND body.user_namespace = ?1
+     AND body.chapter_index = json_extract(page.value, '$[1]')
+    ORDER BY CAST(page.key AS INTEGER)
+"#;
+
+/// One cache-only page. Positions refer to the full real-chapter directory,
+/// including gaps left by uncached bodies, rather than offsets within this page.
+#[derive(Debug)]
+pub struct CachedChapterPage {
+    pub chapters: Vec<(i64, String, String)>,
+    pub has_more: bool,
+    pub next_from: Option<i64>,
+}
+
 /// 存储句柄
 #[derive(Clone)]
 pub struct Storage {
@@ -2323,6 +2367,82 @@ impl Storage {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
+    }
+
+    /// Bounded cache-only pagination. Directory metadata may cover the whole book;
+    /// only the selected page (at most 200 bodies) crosses the SQLite boundary.
+    /// Keep key selection and body retrieval in one WAL read snapshot so clearing
+    /// or refreshing a directory between queries cannot invalidate the cursor.
+    pub async fn cached_chapters_page(
+        &self,
+        ns: &str,
+        book_url: &str,
+        from: Option<i64>,
+        to: Option<i64>,
+    ) -> Result<CachedChapterPage> {
+        let mut tx = self.pool.begin().await?;
+        let book: Option<(String, String)> = sqlx::query_as(
+            "SELECT origin, toc_url FROM books WHERE user_namespace = ?1 AND book_url = ?2",
+        )
+        .bind(ns)
+        .bind(book_url)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let local = book_url.starts_with("local://") || book_url.starts_with("storage/")
+            || book.as_ref().is_some_and(|b| {
+                crate::service::local_book::is_local_book(book_url, &b.0)
+            });
+        let probe_limit = (MAX_CACHE_CHAPTERS_PER_PAGE + 1) as i64;
+        let mut keys: Vec<(i64, i64, Option<String>)> = if local {
+            sqlx::query_as(
+                "SELECT chapter_index, chapter_index, NULL FROM book_chapters WHERE user_namespace = ?1 AND book_url = ?2 AND (?3 IS NULL OR chapter_index >= ?3) AND (?4 IS NULL OR chapter_index <= ?4) ORDER BY chapter_index LIMIT ?5",
+            )
+            .bind(ns).bind(book_url).bind(from).bind(to).bind(probe_limit)
+            .fetch_all(&mut *tx).await?
+        } else {
+            let toc_url = book.as_ref().map(|b| b.1.as_str()).unwrap_or("");
+            let json: Option<String> = sqlx::query_scalar(
+                "SELECT chapters_json FROM toc_cache WHERE user_namespace = ?1 AND (book_url = ?2 OR toc_url = ?2 OR (?3 != '' AND (book_url = ?3 OR toc_url = ?3))) ORDER BY CASE WHEN ?3 != '' AND (toc_url = ?3 OR book_url = ?3) THEN 0 ELSE 1 END, updated_at DESC LIMIT 1",
+            )
+            .bind(ns).bind(book_url).bind(toc_url)
+            .fetch_optional(&mut *tx).await?;
+            if let Some(json) = json {
+                let toc: Vec<crate::model::book_chapter::BookChapter> = serde_json::from_str(&json)?;
+                let directory: Vec<_> = toc.into_iter().filter(|c| !c.is_volume)
+                    .enumerate().map(|(pos, c)| {
+                        (pos as i64, crate::util::md5::chapter_url_hash(&c.url), c.title)
+                    }).collect();
+                sqlx::query_as(TOC_CACHE_PAGE_KEYS_SQL)
+                    .bind(ns).bind(book_url).bind(serde_json::to_string(&directory)?)
+                    .bind(from).bind(to).bind(probe_limit)
+                    .fetch_all(&mut *tx).await?
+            } else {
+                // As with the full-book view, even an out-of-range ambiguous hash
+                // requires a directory refresh rather than silently hiding data.
+                let ambiguous: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM book_chapters WHERE user_namespace = ?1 AND book_url = ?2 AND chapter_order IS NULL AND chapter_index >= 1000000)",
+                )
+                .bind(ns).bind(book_url).fetch_one(&mut *tx).await?;
+                if ambiguous {
+                    anyhow::bail!("目录缓存缺失，请先刷新目录");
+                }
+                sqlx::query_as(
+                    "SELECT COALESCE(chapter_order, chapter_index), chapter_index, NULL FROM book_chapters WHERE user_namespace = ?1 AND book_url = ?2 AND (?3 IS NULL OR COALESCE(chapter_order, chapter_index) >= ?3) AND (?4 IS NULL OR COALESCE(chapter_order, chapter_index) <= ?4) ORDER BY COALESCE(chapter_order, chapter_index) LIMIT ?5",
+                )
+                .bind(ns).bind(book_url).bind(from).bind(to).bind(probe_limit)
+                .fetch_all(&mut *tx).await?
+            }
+        };
+        let has_more = keys.len() > MAX_CACHE_CHAPTERS_PER_PAGE;
+        keys.truncate(MAX_CACHE_CHAPTERS_PER_PAGE);
+        let next_from = if has_more {
+            keys.last().and_then(|(index, _, _)| index.checked_add(1))
+        } else { None };
+        let chapters = sqlx::query_as::<_, (i64, String, String)>(CACHE_PAGE_BODIES_SQL)
+            .bind(ns).bind(book_url).bind(serde_json::to_string(&keys)?)
+            .fetch_all(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(CachedChapterPage { chapters, has_more, next_from })
     }
 
     /// Cache-only view in real chapter order. Network rows retain their URL-hash keys
@@ -9798,6 +9918,165 @@ mod tests {
         storage.clear_cache("alice", "toc").await.unwrap();
         assert_eq!(storage.ordered_cached_chapters("alice", book, false).await.unwrap_err().to_string(), "目录缓存缺失，请先刷新目录");
         cleanup(storage, "audit-order-backfill").await;
+    }
+
+    async fn assert_cached_page_matches_full_view(
+        storage: &Storage, ns: &str, url: &str, from: Option<i64>, to: Option<i64>,
+    ) -> CachedChapterPage {
+        let all: Vec<_> = storage.ordered_cached_chapters(ns, url, false).await.unwrap()
+            .into_iter().filter(|(i, _, _)| {
+                from.is_none_or(|f| *i >= f) && to.is_none_or(|t| *i <= t)
+            }).collect();
+        let page = storage.cached_chapters_page(ns, url, from, to).await.unwrap();
+        assert_eq!(page.chapters, all.iter().take(200).cloned().collect::<Vec<_>>());
+        assert_eq!(page.has_more, all.len() > 200);
+        let next = if page.has_more { all[199].0.checked_add(1) } else { None };
+        assert_eq!(page.next_from, next);
+        page
+    }
+
+    #[tokio::test]
+    async fn cached_chapters_page_matches_toc_order_gaps_duplicates_and_namespaces() {
+        let storage = test_storage("audit-page-toc").await;
+        let url = "https://page.test/book";
+        let current_toc = "https://page.test/current-directory";
+        let mut toc = vec![serde_json::json!({"title":"volume", "url":"volume", "isVolume":true})];
+        for i in 0..413 {
+            if i == 150 {
+                toc.push(serde_json::json!({"title":"volume 2", "url":"volume2", "isVolume":true}));
+            }
+            let chapter = if i == 203 || i == 409 { 0 } else { i };
+            toc.push(serde_json::json!({
+                "title": if i % 5 == 0 { String::new() } else { format!("目录 {i} \"quoted\"") },
+                "url": format!("https://page.test/ch/{chapter}"),
+            }));
+        }
+        for ns in ["alice", "bob"] {
+            storage.upsert_book(ns, &Book {
+                book_url: url.into(), toc_url: current_toc.into(), ..Default::default()
+            }).await.unwrap();
+            // The current toc_url wins even when this snapshot is expired and a
+            // direct book_url snapshot is newer. Its cache key may be another URL.
+            storage.cache_toc(ns, url, "https://page.test/old-directory", "[]").await.unwrap();
+            storage.cache_toc(ns, "https://page.test/alternate-cache-key", current_toc,
+                &serde_json::to_string(&toc).unwrap()).await.unwrap();
+            sqlx::query("UPDATE toc_cache SET updated_at = CASE WHEN toc_url = ?1 THEN 1 ELSE 9999999999999 END WHERE user_namespace = ?2")
+                .bind(current_toc).bind(ns).execute(&storage.pool).await.unwrap();
+            for i in 0..413 {
+                if i == 203 || i == 409 || i % 17 == 7 { continue; }
+                let key = crate::util::md5::chapter_url_hash(&format!("https://page.test/ch/{i}"));
+                if i % 11 != 0 || i == 0 {
+                    let body = if i == 5 { String::new() } else { format!("{ns} hash body {i}") };
+                    storage.cache_chapter_content_with_order(ns, url, key,
+                        &format!("stored {i}"), &body, Some(i)).await.unwrap();
+                }
+                // Some chapters have only legacy keys; some have both. A URL
+                // hash must win over a legacy body at the same real position.
+                if i % 11 == 0 || i % 13 == 0 {
+                    storage.cache_chapter_content_with_order(ns, url, i,
+                        &format!("legacy {i}"), &format!("{ns} legacy body {i}"), Some(i)).await.unwrap();
+                }
+            }
+        }
+        for ns in ["alice", "bob"] {
+            for (from, to) in [
+                (None, None), (Some(0), None), (Some(100), Some(310)),
+                (Some(7), Some(7)), (Some(5), Some(5)), (None, Some(12)),
+                (Some(203), Some(203)), (Some(409), None), (Some(i64::MAX), None),
+            ] {
+                assert_cached_page_matches_full_view(&storage, ns, url, from, to).await;
+            }
+            let first = assert_cached_page_matches_full_view(&storage, ns, url, None, None).await;
+            assert_eq!(first.chapters[0].2, format!("{ns} hash body 0"));
+            assert!(first.has_more);
+            assert!(first.next_from.unwrap() > 200, "uncached bodies retain their real positions");
+            let second = assert_cached_page_matches_full_view(&storage, ns, url, first.next_from, None).await;
+            assert!(!second.has_more);
+            let all = [first.chapters, second.chapters].concat();
+            for i in [0, 203, 409] {
+                assert_eq!(all.iter().find(|c| c.0 == i).unwrap().2, format!("{ns} hash body 0"));
+            }
+            assert_eq!(all.iter().find(|c| c.0 == 5).unwrap().2, "", "empty body is cached");
+            assert_eq!(all.iter().find(|c| c.0 == 203).unwrap().1, "目录 203 \"quoted\"");
+        }
+        assert_cached_page_matches_full_view(&storage, "charlie", url, None, None).await;
+        cleanup(storage, "audit-page-toc").await;
+    }
+
+    #[tokio::test]
+    async fn cached_chapters_page_preserves_local_and_persisted_positions() {
+        let storage = test_storage("audit-page-position").await;
+        for url in ["local://page", "storage/page.txt", "custom-local"] {
+            storage.upsert_book("alice", &Book {
+                book_url: url.into(), origin: "loc_book".into(), ..Default::default()
+            }).await.unwrap();
+            storage.save_chapters("alice", url, &(0..205).map(|i| {
+                (format!("local {i}"), format!("body {i}"))
+            }).collect::<Vec<_>>()).await.unwrap();
+            // Optional bounds must remain optional, even for old abnormal rows.
+            for index in [-1, i64::MAX] {
+                storage.cache_chapter_content_with_order("alice", url, index, "edge", "edge body", Some(8))
+                    .await.unwrap();
+            }
+            for (from, to) in [(None, None), (Some(199), None), (None, Some(2)), (Some(i64::MAX), None)] {
+                assert_cached_page_matches_full_view(&storage, "alice", url, from, to).await;
+            }
+            assert_eq!(storage.cached_chapters_page("alice", url, None, None).await.unwrap().chapters[0].0, -1);
+        }
+        let url = "https://page.test/no-directory";
+        storage.save_chapters("alice", url, &(0..205).map(|i| {
+            (format!("old {i}"), format!("old body {i}"))
+        }).collect::<Vec<_>>()).await.unwrap();
+        let hash = crate::util::md5::chapter_url_hash("https://page.test/known");
+        storage.cache_chapter_content_with_order("alice", url, hash, "persisted", "known body", Some(410))
+            .await.unwrap();
+        // Include genuinely historical small keys with no chapter_order.
+        sqlx::query("UPDATE book_chapters SET chapter_order = NULL WHERE book_url = ?1 AND chapter_index < 1000000")
+            .bind(url).execute(&storage.pool).await.unwrap();
+        for (from, to) in [(None, None), (Some(200), None), (Some(410), Some(410))] {
+            assert_cached_page_matches_full_view(&storage, "alice", url, from, to).await;
+        }
+        let unknown = crate::util::md5::chapter_url_hash("https://page.test/unknown");
+        storage.cache_chapter_content("bob", url, unknown, "other ns", "other ns").await.unwrap();
+        assert_cached_page_matches_full_view(&storage, "alice", url, Some(0), Some(0)).await;
+        storage.cache_chapter_content("alice", url, unknown, "unknown", "unknown body").await.unwrap();
+        assert_eq!(storage.cached_chapters_page("alice", url, Some(0), Some(0)).await.unwrap_err().to_string(),
+            "目录缓存缺失，请先刷新目录");
+        cleanup(storage, "audit-page-position").await;
+    }
+
+    #[tokio::test]
+    async fn cached_chapters_page_probe_does_not_decode_body_and_joins_use_indexes() {
+        let storage = test_storage("audit-page-bounded").await;
+        let url = "local://bounded-page";
+        storage.save_chapters("alice", url, &(0..201).map(|i| {
+            (format!("chapter {i}"), "body".into())
+        }).collect::<Vec<_>>()).await.unwrap();
+        // Invalid UTF-8 is intentional: decoding the probe as a String would
+        // fail. Page 1 and a narrow range must never fetch that body's bytes.
+        sqlx::query("UPDATE book_chapters SET content = X'80' WHERE user_namespace = 'alice' AND book_url = ?1 AND chapter_index = 200")
+            .bind(url).execute(&storage.pool).await.unwrap();
+        let page = storage.cached_chapters_page("alice", url, None, None).await.unwrap();
+        assert_eq!(page.chapters.len(), 200);
+        assert!(page.has_more);
+        assert_eq!(page.next_from, Some(200));
+        assert_eq!(storage.cached_chapters_page("alice", url, Some(0), Some(9)).await.unwrap().chapters.len(), 10);
+        assert!(storage.cached_chapters_page("alice", url, Some(200), None).await.is_err(),
+            "control: the probe body cannot be decoded when actually selected");
+
+        let directory = serde_json::to_string(&vec![(0_i64, 99999999999999999_i64, "toc")]).unwrap();
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(&format!("EXPLAIN QUERY PLAN {TOC_CACHE_PAGE_KEYS_SQL}"))
+            .bind("alice").bind(url).bind(&directory).bind(None::<i64>).bind(None::<i64>).bind(201_i64)
+            .fetch_all(&storage.pool).await.unwrap();
+        for alias in ["hashed", "legacy"] {
+            assert!(plan.iter().any(|r| r.3.contains(&format!("SEARCH {alias} USING COVERING INDEX"))
+                && r.3.contains("book_url=? AND chapter_index=? AND user_namespace=?")), "{plan:?}");
+        }
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(&format!("EXPLAIN QUERY PLAN {CACHE_PAGE_BODIES_SQL}"))
+            .bind("alice").bind(url).bind(&directory).fetch_all(&storage.pool).await.unwrap();
+        assert!(plan.iter().any(|r| r.3.contains("SEARCH body USING INDEX")
+            && r.3.contains("book_url=? AND chapter_index=? AND user_namespace=?")), "{plan:?}");
+        cleanup(storage, "audit-page-bounded").await;
     }
 
     /// 缓存管理：getCacheInfo 统计（toc_cache 行数 / book_chapters 行数 / sum length 大小）+

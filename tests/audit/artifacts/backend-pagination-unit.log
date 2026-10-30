@@ -1,0 +1,9 @@
+
+running 4 tests
+test api::router::tests::test_cached_chapters_page_api_sparse_cursor_and_range ... ok
+test storage::tests::cached_chapters_page_matches_toc_order_gaps_duplicates_and_namespaces ... ok
+test storage::tests::cached_chapters_page_preserves_local_and_persisted_positions ... ok
+test storage::tests::cached_chapters_page_probe_does_not_decode_body_and_joins_use_indexes ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 826 filtered out; finished in 11.88s
+

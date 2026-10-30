@@ -1,0 +1,21 @@
+{
+  "binary": "/tmp/reader-dev-audit-target-20261030/debug/deps/reader_dev-3546ce6c9cc40a82",
+  "sha256": "668bfa1e692948d820dbbab16446d04d639e476ccdee714cbf20583425f71429",
+  "log": "tests/audit/artifacts/backend-paging-lib-final.log",
+  "exitCode": 0,
+  "passed": 830,
+  "failed": 0,
+  "ignored": 0,
+  "filteredOut": 0,
+  "testSeconds": 405.3,
+  "command": [
+    "/tmp/reader-dev-audit-target-20261030/debug/deps/reader_dev-3546ce6c9cc40a82",
+    "--test-threads=1"
+  ],
+  "environment": {
+    "proxyVariables": "removed",
+    "NO_PROXY": "127.0.0.1,localhost,::1",
+    "READER_CAMOUFOX_DISABLE": "1",
+    "READER_CAMOUFOX_SPAWN": "0"
+  }
+}

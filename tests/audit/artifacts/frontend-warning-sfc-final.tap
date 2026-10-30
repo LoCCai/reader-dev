@@ -1,0 +1,130 @@
+TAP version 13
+# Subtest: R1: cancelling a delayed start cancels its eventual taskId and never subscribes
+ok 1 - R1: cancelling a delayed start cancels its eventual taskId and never subscribes
+  ---
+  duration_ms: 374.020123
+  type: 'test'
+  ...
+# Subtest: R1: cancelling established stream uses exact taskId, not book URL
+ok 2 - R1: cancelling established stream uses exact taskId, not book URL
+  ---
+  duration_ms: 92.548452
+  type: 'test'
+  ...
+# Subtest: R1: cancelling during SSE handshake closes the late handle and ignores late completion
+ok 3 - R1: cancelling during SSE handshake closes the late handle and ignores late completion
+  ---
+  duration_ms: 83.732028
+  type: 'test'
+  ...
+# Subtest: R1: local storage rejecting writes cannot count successfully cached chapters
+ok 4 - R1: local storage rejecting writes cannot count successfully cached chapters
+  ---
+  duration_ms: 52.237665
+  type: 'test'
+  ...
+# Subtest: R1: normal EOF without a finished frame must not report successful caching
+ok 5 - R1: normal EOF without a finished frame must not report successful caching
+  ---
+  duration_ms: 45.049372
+  type: 'test'
+  ...
+# Subtest: R1: details cache button loads directory before opening without visiting directory tab
+ok 6 - R1: details cache button loads directory before opening without visiting directory tab
+  ---
+  duration_ms: 194.249818
+  type: 'test'
+  ...
+# Subtest: R1 positive: range selection uses zero-based real chapter positions and emits exact scope
+ok 7 - R1 positive: range selection uses zero-based real chapter positions and emits exact scope
+  ---
+  duration_ms: 39.069381
+  type: 'test'
+  ...
+# Subtest: R2: an old task callback cannot finish a newly started operation
+ok 8 - R2: an old task callback cannot finish a newly started operation
+  ---
+  duration_ms: 31.006081
+  type: 'test'
+  ...
+# Subtest: R2: changing books during a delayed start cancels only the original operation
+ok 9 - R2: changing books during a delayed start cancels only the original operation
+  ---
+  duration_ms: 31.387062
+  type: 'test'
+  ...
+# Subtest: R2: unmount cancels active task and late completion does not emit done
+ok 10 - R2: unmount cancels active task and late completion does not emit done
+  ---
+  duration_ms: 26.704301
+  type: 'test'
+  ...
+# Subtest: R2: cancellation during local content download prevents later IndexedDB writes
+ok 11 - R2: cancellation during local content download prevents later IndexedDB writes
+  ---
+  duration_ms: 30.734998
+  type: 'test'
+  ...
+# Subtest: R2: a mixed local batch reports only durable chapters and retains a failure indication
+ok 12 - R2: a mixed local batch reports only durable chapters and retains a failure indication
+  ---
+  duration_ms: 20.653955
+  type: 'test'
+  ...
+# Subtest: R2: failed stream reconnection ignores callbacks from the previous connection
+ok 13 - R2: failed stream reconnection ignores callbacks from the previous connection
+  ---
+  duration_ms: 22.922188
+  type: 'test'
+  ...
+# Subtest: R2: SSE handshake failure preserves selected single source and group in batch fallback
+ok 14 - R2: SSE handshake failure preserves selected single source and group in batch fallback
+  ---
+  duration_ms: 57.3951
+  type: 'test'
+  ...
+# Subtest: R2: a partial SSE source window remains resumable even when no books were found
+ok 15 - R2: a partial SSE source window remains resumable even when no books were found
+  ---
+  duration_ms: 46.011152
+  type: 'test'
+  ...
+# Subtest: R2: stopping during search handshake aborts late handle and ignores old results
+ok 16 - R2: stopping during search handshake aborts late handle and ignores old results
+  ---
+  duration_ms: 37.771776
+  type: 'test'
+  ...
+# Subtest: R3: resuming a source window freezes original keyword, group, source, exact and concurrency
+ok 17 - R3: resuming a source window freezes original keyword, group, source, exact and concurrency
+  ---
+  duration_ms: 32.696
+  type: 'test'
+  ...
+# Subtest: R3: duplicate batch result page does not hide later pages and keeps original source scope
+ok 18 - R3: duplicate batch result page does not hide later pages and keeps original source scope
+  ---
+  duration_ms: 33.47902
+  type: 'test'
+  ...
+# Subtest: Follow-up: a nonterminal cache error keeps the exact active task cancellable
+ok 19 - Follow-up: a nonterminal cache error keeps the exact active task cancellable
+  ---
+  duration_ms: 21.09604
+  type: 'test'
+  ...
+# Subtest: Follow-up: partial server completion shows failed chapters without claiming full success
+ok 20 - Follow-up: partial server completion shows failed chapters without claiming full success
+  ---
+  duration_ms: 16.145651
+  type: 'test'
+  ...
+1..20
+# tests 20
+# suites 0
+# pass 20
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 3051.745989

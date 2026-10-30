@@ -233,15 +233,24 @@ async function subscribeProgress(run: CacheRun): Promise<void> {
         run.terminal = true
         busy.value = false
         msg.value = '缓存已取消'
-      } else if (p.error) {
-        run.terminal = true
-        fail(`缓存失败：${p.error}`)
       } else if (p.finished) {
         run.terminal = true
         busy.value = false
-        finished.value = true
-        msg.value = `已缓存到服务器（${cached.value}/${total.value} 章）`
-        emit('done', { direction: 'server', from: run.from, to: run.to, saved: cached.value })
+        const failed = p.failedCount ?? Math.max(0, total.value - cached.value)
+        const incomplete = failed > 0 || cached.value < total.value || !!p.error
+        finished.value = !incomplete
+        msgError.value = incomplete
+        msg.value = incomplete
+          ? `缓存已结束（成功 ${cached.value}/${total.value} 章${failed ? `，${failed} 章失败` : ''}）${p.error ? `：${p.error}` : ''}`
+          : `已缓存到服务器（${cached.value}/${total.value} 章）`
+        if (cached.value > 0 || !incomplete) {
+          emit('done', { direction: 'server', from: run.from, to: run.to, saved: cached.value })
+        }
+      } else if (p.error || (p.failedCount ?? 0) > 0) {
+        // A chapter error can arrive while the server continues other chapters.
+        // Keep the operation active so its exact task ID remains cancellable.
+        msgError.value = true
+        msg.value = `缓存仍在进行（成功 ${cached.value}/${total.value} 章${p.failedCount ? `，${p.failedCount} 章失败` : ''}）${p.error ? `：${p.error}` : ''}`
       }
     },
     onEnd: () => {

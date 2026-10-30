@@ -4918,8 +4918,6 @@ async fn cache_book_range_on_server(
 /// GET/POST /reader3/getBookCacheChapters：拉取服务器已缓存章节（客户端离线缓存用）
 /// body/query { url, from?, to? }；只返回服务器 book_chapters 已缓存且在范围内的章节，
 /// 未缓存章节不返回（调用方先跑 cacheBookRangeOnServer 补齐再拉取）。
-const MAX_CACHE_CHAPTERS_PER_FETCH: usize = 200;
-
 async fn get_book_cache_chapters(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -4955,27 +4953,21 @@ async fn get_book_cache_chapters(
     {
         return Json(ReturnData::err("缓存范围参数错误"));
     }
-    let chapters = match state.storage.ordered_cached_chapters(&namespace, &url, false).await {
+    let page = match state.storage.cached_chapters_page(&namespace, &url, from, to).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!("getBookCacheChapters 失败 [{url}]: {e}");
             return Json(ReturnData::err(crate::storage::cache_read_error(&e)));
         }
     };
-    let mut rows = chapters.into_iter().filter(|(index, _, _)| {
-        from.is_none_or(|f| *index >= f) && to.is_none_or(|t| *index <= t)
-    });
-    let selected: Vec<serde_json::Value> = rows.by_ref()
-        .take(MAX_CACHE_CHAPTERS_PER_FETCH)
+    let selected: Vec<serde_json::Value> = page.chapters.into_iter()
         .map(|(index, title, content)| json!({ "index": index, "title": title, "content": content }))
         .collect();
-    let has_more = rows.next().is_some();
-    let next_from = selected.last().and_then(|row| row["index"].as_i64()).map(|i| i + 1);
     Json(ReturnData::ok(json!({
         "url": url,
         "chapters": selected,
-        "hasMore": has_more,
-        "nextFrom": if has_more { next_from } else { None },
+        "hasMore": page.has_more,
+        "nextFrom": page.next_from,
     })))
 }
 
@@ -19125,6 +19117,55 @@ mod tests {
 
         // 清理任务表
         crate::service::cache_job::cancel_key("default", &task_id).await;
+        cleanup(state, dir).await;
+    }
+
+    /// Cached-body pagination keeps sparse real positions and an inclusive range.
+    #[tokio::test]
+    async fn test_cached_chapters_page_api_sparse_cursor_and_range() {
+        let (state, dir) = test_state("cache-page-cursor").await;
+        let book_url = "https://page.test/api-book";
+        state.storage.upsert_book("default", &crate::model::Book {
+            book_url: book_url.into(), toc_url: book_url.into(), ..Default::default()
+        }).await.unwrap();
+        let toc: Vec<_> = (0..205).map(|i| serde_json::json!({
+            "title": format!("chapter {i}"), "url": format!("https://page.test/api-ch/{i}")
+        })).collect();
+        state.storage.cache_toc("default", book_url, book_url, &serde_json::to_string(&toc).unwrap())
+            .await.unwrap();
+        for i in 0..205 {
+            if i == 1 || i == 3 { continue; }
+            let key = crate::util::md5::chapter_url_hash(&format!("https://page.test/api-ch/{i}"));
+            state.storage.cache_chapter_content_with_order("default", book_url, key, "", "body", Some(i))
+                .await.unwrap();
+        }
+        for (from, to, expected, last, more, next) in [
+            (None, None, 200, 201, true, Some(202)),
+            (Some(202), None, 3, 204, false, None),
+            (Some(2), Some(4), 2, 4, false, None),
+        ] {
+            let body = axum::body::Bytes::from(serde_json::to_vec(&json!({
+                "url": book_url, "from": from, "to": to,
+            })).unwrap());
+            let ret = get_book_cache_chapters(
+                AxumState(state.clone()), Query(HashMap::new()), HeaderMap::new(), Some(body),
+            ).await;
+            assert!(ret.0.is_success, "{}", ret.0.error_msg);
+            let rows = ret.0.data["chapters"].as_array().unwrap();
+            assert_eq!(rows.len(), expected);
+            assert_eq!(rows.last().unwrap()["index"], last);
+            assert_eq!(ret.0.data["hasMore"], more);
+            assert_eq!(ret.0.data["nextFrom"], json!(next));
+        }
+        for (from, to) in [("-1", ""), ("bad", ""), ("4", "2")] {
+            let params = [("url".into(), book_url.into()), ("from".into(), from.into()), ("to".into(), to.into())]
+                .into_iter().collect();
+            let ret = get_book_cache_chapters(
+                AxumState(state.clone()), Query(params), HeaderMap::new(), None,
+            ).await;
+            assert!(!ret.0.is_success);
+            assert_eq!(ret.0.error_msg, "缓存范围参数错误");
+        }
         cleanup(state, dir).await;
     }
 

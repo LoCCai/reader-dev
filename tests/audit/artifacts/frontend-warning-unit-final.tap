@@ -1,0 +1,628 @@
+TAP version 13
+# Subtest: P2 backendDown 复位：注册的回调在 notifyBackendReachable 时全部触发
+ok 1 - P2 backendDown 复位：注册的回调在 notifyBackendReachable 时全部触发
+  ---
+  duration_ms: 5.887666
+  type: 'test'
+  ...
+# Subtest: clearBackendReachableHooks 后通知为空操作
+ok 2 - clearBackendReachableHooks 后通知为空操作
+  ---
+  duration_ms: 0.267072
+  type: 'test'
+  ...
+# Subtest: cacheBookSSE preserves failedCount through the actual fetch, stream and event parser
+ok 3 - cacheBookSSE preserves failedCount through the actual fetch, stream and event parser
+  ---
+  duration_ms: 63.499057
+  type: 'test'
+  ...
+# Subtest: GAP 81：parseSSEBlock 解析 event:/data: 块（兼容 CRLF 与 data 前导空格）
+ok 4 - GAP 81：parseSSEBlock 解析 event:/data: 块（兼容 CRLF 与 data 前导空格）
+  ---
+  duration_ms: 1.542508
+  type: 'test'
+  ...
+# Subtest: GAP 81：dispatchSSEBlock 分发 book/end/error 事件
+ok 5 - GAP 81：dispatchSSEBlock 分发 book/end/error 事件
+  ---
+  duration_ms: 1.16555
+  type: 'test'
+  ...
+# Subtest: GAP 81：dispatchSSEBlock 容错——坏 JSON 忽略、end 坏 JSON 兜底 onEnd(-1,false)、error 无 JSON 结构兜底文案
+ok 6 - GAP 81：dispatchSSEBlock 容错——坏 JSON 忽略、end 坏 JSON 兜底 onEnd(-1,false)、error 无 JSON 结构兜底文案
+  ---
+  duration_ms: 0.415769
+  type: 'test'
+  ...
+# Subtest: legacy 对齐：dispatchSSEBlock 无名 data 事件（onmessage）按 book 分发
+ok 7 - legacy 对齐：dispatchSSEBlock 无名 data 事件（onmessage）按 book 分发
+  ---
+  duration_ms: 0.256671
+  type: 'test'
+  ...
+# Subtest: GAP 81：consumeSSEStream 按空行切块并跨 chunk 拼接
+ok 8 - GAP 81：consumeSSEStream 按空行切块并跨 chunk 拼接
+  ---
+  duration_ms: 3.14787
+  type: 'test'
+  ...
+# Subtest: GAP 81：consumeSSEStream 用户取消不触发 onStreamError
+ok 9 - GAP 81：consumeSSEStream 用户取消不触发 onStreamError
+  ---
+  duration_ms: 0.665895
+  type: 'test'
+  ...
+# Subtest: P2 SSE 统一：consumeSSEStreamBlocks 按块回调 + 跨 chunk 拼接（cacheBook/sourceDebug 共用）
+ok 10 - P2 SSE 统一：consumeSSEStreamBlocks 按块回调 + 跨 chunk 拼接（cacheBook/sourceDebug 共用）
+  ---
+  duration_ms: 0.827673
+  type: 'test'
+  ...
+# Subtest: P2 SSE 统一：consumeSSEStreamBlocks 连接中断回调 onStreamError；用户取消静默
+ok 11 - P2 SSE 统一：consumeSSEStreamBlocks 连接中断回调 onStreamError；用户取消静默
+  ---
+  duration_ms: 0.756127
+  type: 'test'
+  ...
+# Subtest: P2 v-lazy 闭包过期：绑定值在 intersect 前变化 → 回调加载最新值（非旧闭包值）
+ok 12 - P2 v-lazy 闭包过期：绑定值在 intersect 前变化 → 回调加载最新值（非旧闭包值）
+  ---
+  duration_ms: 2.497468
+  type: 'test'
+  ...
+# Subtest: P2 v-lazy：intersect 后已加载，updated 换图直接生效（保留 is-loaded）
+ok 13 - P2 v-lazy：intersect 后已加载，updated 换图直接生效（保留 is-loaded）
+  ---
+  duration_ms: 0.352497
+  type: 'test'
+  ...
+# Subtest: P2 v-lazy：mounted 未加载时 updated 仅记录最新值，不提前设 src
+ok 14 - P2 v-lazy：mounted 未加载时 updated 仅记录最新值，不提前设 src
+  ---
+  duration_ms: 1.141206
+  type: 'test'
+  ...
+# Subtest: v-lazy：unmounted 断开 observer；空 src 不创建 observer
+ok 15 - v-lazy：unmounted 断开 observer；空 src 不创建 observer
+  ---
+  duration_ms: 0.268526
+  type: 'test'
+  ...
+# Subtest: GAP 6：bookConfigKey 按 bookUrl 唯一命名
+ok 16 - GAP 6：bookConfigKey 按 bookUrl 唯一命名
+  ---
+  duration_ms: 1.25429
+  type: 'test'
+  ...
+# Subtest: GAP 6：save/load 往返（reader_* 键 + 字符串值）
+ok 17 - GAP 6：save/load 往返（reader_* 键 + 字符串值）
+  ---
+  duration_ms: 1.166746
+  type: 'test'
+  ...
+# Subtest: GAP 6：非法 JSON / 非对象 / 非字符串值 → 空对象
+ok 18 - GAP 6：非法 JSON / 非对象 / 非字符串值 → 空对象
+  ---
+  duration_ms: 0.384615
+  type: 'test'
+  ...
+# Subtest: GAP 6：hasBookConfig / clearBookConfig
+ok 19 - GAP 6：hasBookConfig / clearBookConfig
+  ---
+  duration_ms: 0.322252
+  type: 'test'
+  ...
+# Subtest: GAP 6：空对象写入后视为无覆盖
+ok 20 - GAP 6：空对象写入后视为无覆盖
+  ---
+  duration_ms: 0.506645
+  type: 'test'
+  ...
+# Subtest: 命令表：搜索 + 跳转页面 + 设置项齐全（书架/书源/设置/探索/RSS/文件/用户/深色/语言）
+ok 21 - 命令表：搜索 + 跳转页面 + 设置项齐全（书架/书源/设置/探索/RSS/文件/用户/深色/语言）
+  ---
+  duration_ms: 1.520604
+  type: 'test'
+  ...
+# Subtest: 空输入返回全部命令
+ok 22 - 空输入返回全部命令
+  ---
+  duration_ms: 0.544068
+  type: 'test'
+  ...
+# Subtest: 按标题/关键词过滤（忽略大小写，空格分词 AND）
+ok 23 - 按标题/关键词过滤（忽略大小写，空格分词 AND）
+  ---
+  duration_ms: 0.514842
+  type: 'test'
+  ...
+# Subtest: 搜索命令 action 声明正确
+ok 24 - 搜索命令 action 声明正确
+  ---
+  duration_ms: 0.965204
+  type: 'test'
+  ...
+# Subtest: 导航命令 path 正确
+ok 25 - 导航命令 path 正确
+  ---
+  duration_ms: 0.428736
+  type: 'test'
+  ...
+# Subtest: GAP 110：localDateStr 本地时区 YYYY-MM-DD
+ok 26 - GAP 110：localDateStr 本地时区 YYYY-MM-DD
+  ---
+  duration_ms: 1.582374
+  type: 'test'
+  ...
+# Subtest: GAP 110：parseDailyStats 容错（null/坏 JSON/非对象/非法键/非正数）
+ok 27 - GAP 110：parseDailyStats 容错（null/坏 JSON/非对象/非法键/非正数）
+  ---
+  duration_ms: 1.439252
+  type: 'test'
+  ...
+# Subtest: GAP 110：accumulateDaily 同日累计 + 过期清理（>31 天删除，31 天保留）
+ok 28 - GAP 110：accumulateDaily 同日累计 + 过期清理（>31 天删除，31 天保留）
+  ---
+  duration_ms: 0.572243
+  type: 'test'
+  ...
+# Subtest: GAP 110：last7Days 含今天、从 6 天前起、缺省日补 0
+ok 29 - GAP 110：last7Days 含今天、从 6 天前起、缺省日补 0
+  ---
+  duration_ms: 0.50484
+  type: 'test'
+  ...
+# Subtest: C2: parseEpubBytes resolves OPF via container.xml and extracts manifest/spine
+ok 30 - C2: parseEpubBytes resolves OPF via container.xml and extracts manifest/spine
+  ---
+  duration_ms: 25.711781
+  type: 'test'
+  ...
+# Subtest: \#11: spine 与后端章节表口径对齐——跳过 manifest 缺失/非 html/空文本项
+ok 31 - \#11: spine 与后端章节表口径对齐——跳过 manifest 缺失/非 html/空文本项
+  ---
+  duration_ms: 3.064406
+  type: 'test'
+  ...
+# Subtest: \#11: isHtmlTextEmpty 与后端 html_to_text 判空口径逐项对齐
+ok 32 - \#11: isHtmlTextEmpty 与后端 html_to_text 判空口径逐项对齐
+  ---
+  duration_ms: 0.435506
+  type: 'test'
+  ...
+# Subtest: C2: parseEpubBytes tolerates single-quoted attributes and percent-encoded hrefs
+ok 33 - C2: parseEpubBytes tolerates single-quoted attributes and percent-encoded hrefs
+  ---
+  duration_ms: 9.867055
+  type: 'test'
+  ...
+# Subtest: C2: resolveHref handles ./ ../ and nested base dirs
+ok 34 - C2: resolveHref handles ./ ../ and nested base dirs
+  ---
+  duration_ms: 0.33451
+  type: 'test'
+  ...
+# Subtest: C2: missing container.xml throws with clear message
+ok 35 - C2: missing container.xml throws with clear message
+  ---
+  duration_ms: 0.798894
+  type: 'test'
+  ...
+# Subtest: C2: destroyEpubDoc clears blob URL table (no-op without URLs)
+ok 36 - C2: destroyEpubDoc clears blob URL table (no-op without URLs)
+  ---
+  duration_ms: 3.182728
+  type: 'test'
+  ...
+# Subtest: P2 分组拖拽 off-by-one：向下拖拽（A 拖到 C）落点应取 C 的位置而非其后
+ok 37 - P2 分组拖拽 off-by-one：向下拖拽（A 拖到 C）落点应取 C 的位置而非其后
+  ---
+  duration_ms: 3.340698
+  type: 'test'
+  ...
+# Subtest: 向上拖拽（C 拖到 A）：移除后目标索引不变，落点在 A 位置
+ok 38 - 向上拖拽（C 拖到 A）：移除后目标索引不变，落点在 A 位置
+  ---
+  duration_ms: 0.315488
+  type: 'test'
+  ...
+# Subtest: 相邻向下拖拽（A 拖到 B）：A 已在 B 正上方，插入 B 位置 = 原位（无变化）
+ok 39 - 相邻向下拖拽（A 拖到 B）：A 已在 B 正上方，插入 B 位置 = 原位（无变化）
+  ---
+  duration_ms: 0.560825
+  type: 'test'
+  ...
+# Subtest: 相邻向上拖拽（B 拖到 A）：B 落在 A 位置
+ok 40 - 相邻向上拖拽（B 拖到 A）：B 落在 A 位置
+  ---
+  duration_ms: 1.186356
+  type: 'test'
+  ...
+# Subtest: 源/目标不存在：返回原数组副本，不修改
+ok 41 - 源/目标不存在：返回原数组副本，不修改
+  ---
+  duration_ms: 0.412494
+  type: 'test'
+  ...
+# Subtest: 默认模式为 auto，且转换简体
+ok 42 - 默认模式为 auto，且转换简体
+  ---
+  duration_ms: 17.71813
+  type: 'test'
+  ...
+# Subtest: setGlobalHanMode 更新响应式状态并写入 localStorage（全站响应）
+ok 43 - setGlobalHanMode 更新响应式状态并写入 localStorage（全站响应）
+  ---
+  duration_ms: 87.42097
+  type: 'test'
+  ...
+# Subtest: setGlobalHanMode 切回简体后转换恢复
+ok 44 - setGlobalHanMode 切回简体后转换恢复
+  ---
+  duration_ms: 0.412649
+  type: 'test'
+  ...
+# Subtest: syncHanMode 从 localStorage 重新同步（同标签页直写场景）
+ok 45 - syncHanMode 从 localStorage 重新同步（同标签页直写场景）
+  ---
+  duration_ms: 0.373393
+  type: 'test'
+  ...
+# Subtest: 无效模式值回退 auto
+ok 46 - 无效模式值回退 auto
+  ---
+  duration_ms: 0.471274
+  type: 'test'
+  ...
+# Subtest: GAP 78：local:// 双轨书可重扫
+ok 47 - GAP 78：local:// 双轨书可重扫
+  ---
+  duration_ms: 1.260652
+  type: 'test'
+  ...
+# Subtest: GAP 78：loc_book 文件书可重扫（origin=loc_book）
+ok 48 - GAP 78：loc_book 文件书可重扫（origin=loc_book）
+  ---
+  duration_ms: 0.248834
+  type: 'test'
+  ...
+# Subtest: GAP 78：storage/ 路径书可重扫
+ok 49 - GAP 78：storage/ 路径书可重扫
+  ---
+  duration_ms: 0.191061
+  type: 'test'
+  ...
+# Subtest: GAP 78：文件扩展名书可重扫（大小写不敏感）
+ok 50 - GAP 78：文件扩展名书可重扫（大小写不敏感）
+  ---
+  duration_ms: 0.220422
+  type: 'test'
+  ...
+# Subtest: GAP 78：书源书不可重扫（网络书无本地文件可解析）
+ok 51 - GAP 78：书源书不可重扫（网络书无本地文件可解析）
+  ---
+  duration_ms: 0.207029
+  type: 'test'
+  ...
+# Subtest: GAP 6：旧索引范围内且非卷标 → 原样保留
+ok 52 - GAP 6：旧索引范围内且非卷标 → 原样保留
+  ---
+  duration_ms: 1.639875
+  type: 'test'
+  ...
+# Subtest: GAP 6：旧索引指向新目录的卷标行 → 标题匹配非卷标章
+ok 53 - GAP 6：旧索引指向新目录的卷标行 → 标题匹配非卷标章
+  ---
+  duration_ms: 0.285266
+  type: 'test'
+  ...
+# Subtest: GAP 6：旧索引越界 + 标题命中 → 用命中下标
+ok 54 - GAP 6：旧索引越界 + 标题命中 → 用命中下标
+  ---
+  duration_ms: 0.291081
+  type: 'test'
+  ...
+# Subtest: GAP 6：旧索引越界 + 标题不匹配 → 钳制到末章
+ok 55 - GAP 6：旧索引越界 + 标题不匹配 → 钳制到末章
+  ---
+  duration_ms: 0.206828
+  type: 'test'
+  ...
+# Subtest: GAP 6：旧索引越界 + 无标题 → 钳制到末章
+ok 56 - GAP 6：旧索引越界 + 无标题 → 钳制到末章
+  ---
+  duration_ms: 0.187539
+  type: 'test'
+  ...
+# Subtest: GAP 6：钳制不落卷标行（末行是卷标 → 前移）
+ok 57 - GAP 6：钳制不落卷标行（末行是卷标 → 前移）
+  ---
+  duration_ms: 0.187681
+  type: 'test'
+  ...
+# Subtest: GAP 6：标题匹配跳过卷标行（同名卷标不误命中）
+ok 58 - GAP 6：标题匹配跳过卷标行（同名卷标不误命中）
+  ---
+  duration_ms: 0.173755
+  type: 'test'
+  ...
+# Subtest: GAP 6：无进度（-1）/ 空目录 / 非法索引 → -1（不动服务端进度）
+ok 59 - GAP 6：无进度（-1）/ 空目录 / 非法索引 → -1（不动服务端进度）
+  ---
+  duration_ms: 0.264086
+  type: 'test'
+  ...
+# Subtest: parsePageMode：合法值原样返回（含新增 hslide/flip）
+ok 60 - parsePageMode：合法值原样返回（含新增 hslide/flip）
+  ---
+  duration_ms: 1.171748
+  type: 'test'
+  ...
+# Subtest: parsePageMode：null/undefined/非法值回退默认（默认 scroll）
+ok 61 - parsePageMode：null/undefined/非法值回退默认（默认 scroll）
+  ---
+  duration_ms: 0.219096
+  type: 'test'
+  ...
+# Subtest: PAGE_MODES 覆盖全部模式且含默认
+ok 62 - PAGE_MODES 覆盖全部模式且含默认
+  ---
+  duration_ms: 0.974007
+  type: 'test'
+  ...
+# Subtest: P1-5：200 字符以内正则放行
+ok 63 - P1-5：200 字符以内正则放行
+  ---
+  duration_ms: 1.140006
+  type: 'test'
+  ...
+# Subtest: P1-5：超过 200 字符拒绝并提示
+ok 64 - P1-5：超过 200 字符拒绝并提示
+  ---
+  duration_ms: 0.319296
+  type: 'test'
+  ...
+# Subtest: P1-5：空串与边界值
+ok 65 - P1-5：空串与边界值
+  ---
+  duration_ms: 0.203471
+  type: 'test'
+  ...
+# Subtest: C2: isHlsSrc matches .m3u8 with query/hash suffixes
+ok 66 - C2: isHlsSrc matches .m3u8 with query/hash suffixes
+  ---
+  duration_ms: 3.188427
+  type: 'test'
+  ...
+# Subtest: C2: isHlsSrc rejects native media formats and non-media paths
+ok 67 - C2: isHlsSrc rejects native media formats and non-media paths
+  ---
+  duration_ms: 0.945073
+  type: 'test'
+  ...
+# Subtest: P1-4：危险协议判定——javascript:/data:/vbscript: 前缀
+ok 68 - P1-4：危险协议判定——javascript:/data:/vbscript: 前缀
+  ---
+  duration_ms: 1.556984
+  type: 'test'
+  ...
+# Subtest: P1-4：协议内空白/控制字符剥离（java\\tscript: 等价 javascript:）
+ok 69 - P1-4：协议内空白/控制字符剥离（java\\tscript: 等价 javascript:）
+  ---
+  duration_ms: 0.263217
+  type: 'test'
+  ...
+# Subtest: P1-4：实体解码——数字实体/命名实体/双重编码
+ok 70 - P1-4：实体解码——数字实体/命名实体/双重编码
+  ---
+  duration_ms: 0.6469
+  type: 'test'
+  ...
+# Subtest: P1-4：href/src 危险协议属性被移除（含实体编码变体）
+ok 71 - P1-4：href/src 危险协议属性被移除（含实体编码变体）
+  ---
+  duration_ms: 3.411337
+  type: 'test'
+  ...
+# Subtest: P1-4：xlink:href 处理（SVG 注入面）
+ok 72 - P1-4：xlink:href 处理（SVG 注入面）
+  ---
+  duration_ms: 0.813338
+  type: 'test'
+  ...
+# Subtest: P1-4：安全链接与正常属性不受影响
+ok 73 - P1-4：安全链接与正常属性不受影响
+  ---
+  duration_ms: 0.902173
+  type: 'test'
+  ...
+# Subtest: P1-4：script/style/iframe 与事件属性仍被移除
+ok 74 - P1-4：script/style/iframe 与事件属性仍被移除
+  ---
+  duration_ms: 0.42297
+  type: 'test'
+  ...
+# Subtest: parseShelfView：reader_shelf_view 支持 'wall'，非法值回落 grid
+ok 75 - parseShelfView：reader_shelf_view 支持 'wall'，非法值回落 grid
+  ---
+  duration_ms: 1.16355
+  type: 'test'
+  ...
+# Subtest: 墙模式尺寸：跟随密度（桌面 s176/m208/l240，窄屏 0.72 折算，间距 40/48）
+ok 76 - 墙模式尺寸：跟随密度（桌面 s176/m208/l240，窄屏 0.72 折算，间距 40/48）
+  ---
+  duration_ms: 0.376482
+  type: 'test'
+  ...
+# Subtest: 网格模式：密度影响卡片宽（桌面 128/160/204，窄屏 96/120/150）
+ok 77 - 网格模式：密度影响卡片宽（桌面 128/160/204，窄屏 96/120/150）
+  ---
+  duration_ms: 0.250319
+  type: 'test'
+  ...
+# Subtest: 列表模式：单列占位宽 1px，行高兜底 76
+ok 78 - 列表模式：单列占位宽 1px，行高兜底 76
+  ---
+  duration_ms: 1.134796
+  type: 'test'
+  ...
+# Subtest: 虚拟滚动行高按墙尺寸计算：封面 4:3 + 元信息区
+ok 79 - 虚拟滚动行高按墙尺寸计算：封面 4:3 + 元信息区
+  ---
+  duration_ms: 0.585324
+  type: 'test'
+  ...
+# Subtest: load/persist 往返：reader_source_group_order 存 string[]
+ok 80 - load/persist 往返：reader_source_group_order 存 string[]
+  ---
+  duration_ms: 2.422347
+  type: 'test'
+  ...
+# Subtest: load 容错：非法 JSON / 非数组 / 混入非字符串 → 空或过滤
+ok 81 - load 容错：非法 JSON / 非数组 / 混入非字符串 → 空或过滤
+  ---
+  duration_ms: 0.511117
+  type: 'test'
+  ...
+# Subtest: mergeGroupOrder：已保存顺序过滤失效组 + 新组追加；无保存顺序返回 null
+ok 82 - mergeGroupOrder：已保存顺序过滤失效组 + 新组追加；无保存顺序返回 null
+  ---
+  duration_ms: 0.422271
+  type: 'test'
+  ...
+# Subtest: reorderGroup：把 from 移到 to 位置，其余相对顺序不变
+ok 83 - reorderGroup：把 from 移到 to 位置，其余相对顺序不变
+  ---
+  duration_ms: 0.511143
+  type: 'test'
+  ...
+# Subtest: M5：/reader3/* 动态 API 判定为动态路径（不得 cache-first）
+ok 84 - M5：/reader3/* 动态 API 判定为动态路径（不得 cache-first）
+  ---
+  duration_ms: 6.178146
+  type: 'test'
+  ...
+# Subtest: M5：/assets/proxy 为动态路径（网络优先，不得 cache-first）
+ok 85 - M5：/assets/proxy 为动态路径（网络优先，不得 cache-first）
+  ---
+  duration_ms: 0.492558
+  type: 'test'
+  ...
+# Subtest: M5：静态资源路径不误判为动态
+ok 86 - M5：静态资源路径不误判为动态
+  ---
+  duration_ms: 0.263078
+  type: 'test'
+  ...
+# Subtest: M5：仅合法图片响应可入代理缓存（错误 JSON 体不缓存）
+ok 87 - M5：仅合法图片响应可入代理缓存（错误 JSON 体不缓存）
+  ---
+  duration_ms: 32.527268
+  type: 'test'
+  ...
+# Subtest: M5：缓存版本已升级（旧 cache-first v1 缓存整体失效）+ 静态缓存条目上限已配置
+ok 88 - M5：缓存版本已升级（旧 cache-first v1 缓存整体失效）+ 静态缓存条目上限已配置
+  ---
+  duration_ms: 0.266841
+  type: 'test'
+  ...
+# Subtest: P2 分卷标题无限追加：前 50 章截断后不再追加任何行（含后续分卷标题行）
+ok 89 - P2 分卷标题无限追加：前 50 章截断后不再追加任何行（含后续分卷标题行）
+  ---
+  duration_ms: 1.733021
+  type: 'test'
+  ...
+# Subtest: 卷标题行渲染为分隔行且不计入章数上限
+ok 90 - 卷标题行渲染为分隔行且不计入章数上限
+  ---
+  duration_ms: 1.112302
+  type: 'test'
+  ...
+# Subtest: 卷标题在截断边界：达到上限后出现的分卷行不再追加
+ok 91 - 卷标题在截断边界：达到上限后出现的分卷行不再追加
+  ---
+  duration_ms: 0.365845
+  type: 'test'
+  ...
+# Subtest: max=0 或空目录：返回空数组；index 为完整目录下标
+ok 92 - max=0 或空目录：返回空数组；index 为完整目录下标
+  ---
+  duration_ms: 0.285333
+  type: 'test'
+  ...
+# Subtest: transform 应用于标题（简繁转换场景）
+ok 93 - transform 应用于标题（简繁转换场景）
+  ---
+  duration_ms: 0.243585
+  type: 'test'
+  ...
+# Subtest: C2: ttsCacheKey is deterministic for identical inputs
+ok 94 - C2: ttsCacheKey is deterministic for identical inputs
+  ---
+  duration_ms: 1.732342
+  type: 'test'
+  ...
+# Subtest: C2: ttsCacheKey changes when any synthesis param changes
+ok 95 - C2: ttsCacheKey changes when any synthesis param changes
+  ---
+  duration_ms: 0.27505
+  type: 'test'
+  ...
+# Subtest: C2: ttsCacheKey distinguishes text content and length
+ok 96 - C2: ttsCacheKey distinguishes text content and length
+  ---
+  duration_ms: 1.325105
+  type: 'test'
+  ...
+# Subtest: C2: key format is /tts/<sig>/<body>.mp3 path segments
+ok 97 - C2: key format is /tts/<sig>/<body>.mp3 path segments
+  ---
+  duration_ms: 0.460265
+  type: 'test'
+  ...
+# Subtest: C2: graceful no-op when Cache API unavailable (node)
+ok 98 - C2: graceful no-op when Cache API unavailable (node)
+  ---
+  duration_ms: 0.714682
+  type: 'test'
+  ...
+# Subtest: 不支持 Wake Lock 的环境：静默返回 false，不持有
+ok 99 - 不支持 Wake Lock 的环境：静默返回 false，不持有
+  ---
+  duration_ms: 1.724502
+  type: 'test'
+  ...
+# Subtest: 支持环境：request 持有，release 释放
+ok 100 - 支持环境：request 持有，release 释放
+  ---
+  duration_ms: 1.415746
+  type: 'test'
+  ...
+# Subtest: 重复 request：先释放旧锁再请求新锁（仅持有一个）
+ok 101 - 重复 request：先释放旧锁再请求新锁（仅持有一个）
+  ---
+  duration_ms: 4.687545
+  type: 'test'
+  ...
+# Subtest: request 抛错（浏览器拒绝）：静默返回 false，不持有
+ok 102 - request 抛错（浏览器拒绝）：静默返回 false，不持有
+  ---
+  duration_ms: 0.784281
+  type: 'test'
+  ...
+# Subtest: 浏览器后台自动释放（release 事件）：内部置空，可再次请求
+ok 103 - 浏览器后台自动释放（release 事件）：内部置空，可再次请求
+  ---
+  duration_ms: 15.101481
+  type: 'test'
+  ...
+1..103
+# tests 103
+# suites 0
+# pass 103
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 792.684191

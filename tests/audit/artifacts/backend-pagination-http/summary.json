@@ -1,0 +1,38 @@
+{
+  "binary": "/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_cache_pagination-cca9ae289f8aca64",
+  "binary_sha256": "31e9d315f19810529ec81c26244eb600b818830a64deb322b647c0d18f893f88",
+  "base_head": "d6dc13e6e7656640a9bdd69b85182c2d83744286",
+  "source_sha256": {
+    "src/storage/mod.rs": "28c685eb8c305ab632a3fd5f80bf7dbeb0c623020f81e5efdaf0cbedd0c0369d",
+    "src/api/router.rs": "81dd0ea3c5ae404ae834253743a4202627b086e9576eb9b09f8aeeefaaf39ed4",
+    "tests/e2e_cache_pagination.rs": "b69e62f7a46cd7a6738fe4f81eca311bf0ff7b2c3995f5880fbd819b5297da60"
+  },
+  "started_at": "2026-10-30T14:47:44.579Z",
+  "ended_at": "2026-10-30T14:47:59.923Z",
+  "elapsed_ms": 15344,
+  "args": [
+    "--test-threads=1",
+    "--nocapture"
+  ],
+  "timeout_ms": 120000,
+  "exit_code": 0,
+  "signal": null,
+  "error": null,
+  "expected_tests": 8,
+  "counts": {
+    "outcome": "ok",
+    "passed": 8,
+    "failed": 0,
+    "ignored": 0,
+    "measured": 0,
+    "filtered": 0
+  },
+  "list_exit_code": 0,
+  "log": "tests/audit/artifacts/backend-pagination-http/e2e_cache_pagination.log",
+  "environment": {
+    "proxies_removed": true,
+    "no_proxy": "127.0.0.1,localhost,::1",
+    "camoufox_disabled": true,
+    "external_solver_urls_removed": true
+  }
+}

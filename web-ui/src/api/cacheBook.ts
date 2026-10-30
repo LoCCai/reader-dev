@@ -36,6 +36,8 @@ export interface CacheRangeStartResult extends CacheStartResult {
 export interface CacheSSEProgress {
   cached: number
   total: number
+  /** Chapters that failed to fetch or persist; a nonzero count does not end the task. */
+  failedCount?: number
   title?: string
   finished?: boolean
   cancelled?: boolean
@@ -111,6 +113,8 @@ function dispatchSSEBlock(block: string, cbs: CacheProgressCallbacks) {
     cbs.onProgress({
       cached: Math.max(0, p.cached),
       total: Math.max(0, p.total),
+      failedCount: typeof p.failedCount === 'number' && Number.isFinite(p.failedCount)
+        ? Math.max(0, Math.floor(p.failedCount)) : undefined,
       title: typeof p.title === 'string' ? p.title : undefined,
       finished: p.finished === true,
       cancelled: p.cancelled === true,

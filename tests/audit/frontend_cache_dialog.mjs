@@ -316,3 +316,34 @@ test('R3: duplicate batch result page does not hide later pages and keeps origin
   assert.equal(state.batchExhausted.value, true)
   assert.equal(calls.batch[2][3], 3)
 })
+
+test('Follow-up: a nonterminal cache error keeps the exact active task cancellable', async () => {
+  const { state, calls, events } = dialog()
+  state.start()
+  await tick()
+  calls.subscribe[0][1].onProgress({ cached: 0, total: 2, failedCount: 1,
+    error: '写入章节缓存失败：fixture', finished: false })
+  assert.equal(state.busy.value, true, 'a failed chapter does not finish the server task')
+  assert.equal(state.finished.value, false)
+  assert.equal(state.msgError.value, true)
+  assert.match(state.msg.value, /失败/)
+  assert.equal(events.filter(([name]) => name === 'done').length, 0)
+  state.cancel()
+  assert.deepEqual(calls.cancel, [['task-a', true]], 'the task must remain cancellable by its returned ID')
+})
+
+test('Follow-up: partial server completion shows failed chapters without claiming full success', async () => {
+  const { state, calls, events } = dialog()
+  state.start()
+  await tick()
+  calls.subscribe[0][1].onProgress({ cached: 1, total: 2, failedCount: 1, finished: true })
+  assert.equal(state.busy.value, false)
+  assert.equal(state.finished.value, false, 'partial persistence must not appear fully successful')
+  assert.equal(state.msgError.value, true)
+  assert.match(state.msg.value, /1.*失败|失败.*1/)
+  assert.deepEqual(events.filter(([name]) => name === 'done').map(([, payload]) => payload),
+    [{ direction: 'server', from: 1, to: 2, saved: 1 }])
+  const warning = state.msg.value
+  calls.subscribe[0][1].onEnd()
+  assert.equal(state.msg.value, warning, 'EOF must not overwrite the partial failure warning')
+})

@@ -90,11 +90,34 @@
 
 ### 已执行的验收与证据
 
-- 独立组件脚本最终 18/18 通过；命令：`node --test tests/audit/frontend_cache_dialog.mjs`。基线使用 `AUDIT_BASELINE=7efd557` 运行同一脚本，首轮缺陷断言失败的结果由 QA 记录；最终说明见 [tests/audit/README.md](../../tests/audit/README.md)。
+- 原三轮独立组件脚本 18/18 通过；命令：`node --test tests/audit/frontend_cache_dialog.mjs`。基线使用 `AUDIT_BASELINE=7efd557` 运行同一脚本，首轮缺陷断言失败的结果由 QA 记录；说明见 [tests/audit/README.md](../../tests/audit/README.md)。发布候选复审后新增 2 项交互回归，总计 20/20，见下节。
 - 原有 utils + API SSE 合并运行共 96/96 通过：`node --test src/utils/*.test.ts src/api/sse.test.ts`（`web-ui` 目录）。
 - `npm run build` 在 getBookFile 适配及最终缓存清理范围确认文案补充后再次通过 `vue-tsc` 与 Vite，Vite 耗时 15.88s；日志 `/tmp/reader-frontend-final-build-20261030.log`。现有 VueUse 包有两条注释位置提示，不影响构建；依赖未改。最后文案补充未重复执行全量单测。
 - [browser_acceptance.mjs](../../tests/audit/browser_acceptance.mjs) 使用真实 Chromium、候选 Vite 页面及拦截的合成接口；所有外部网络请求被阻止。最终 [browser/report.json](../../tests/audit/artifacts/browser/report.json) 记录 15/15 项通过（含基线隐私缺陷证明、带认证 getBookFile/真实ZIP原版EPUB/禁脚本iframe、4种媒体、窄屏及主代理维护的轻量版场景），`pageErrors=[]`。跨用户清理、旧无归属记录不可见和旧归属写入拒绝也通过独立验收；额外范围以最终报告实际执行条目为准。
 - 可视证据：[详情](../../tests/audit/artifacts/browser/desktop-detail.png)、[阅读页搜索](../../tests/audit/artifacts/browser/desktop-reader-search.png)、[390px导出](../../tests/audit/artifacts/browser/narrow-export.png)。
+
+## 发布候选复审补充：分页联调与服务端部分失败提示
+
+此段是三轮完成后的发布候选复审，不把新用例倒填为此前已经通过。
+
+- 分页调用方只读核对：仅 `ReaderView.loadCacheMarkers` 使用 `getBookCacheChapters`。它按 `nextFrom` 继续；旧后端无该字段时使用最大返回 `index + 1`，没有按数组长度推进。稀疏缓存章位、每页最多 200 条、目录过滤卷标题和后端 SQL 分页兼容。标记只消费章位，不依赖返回 `title/content`；本机标记另按章节 URL 合并。没有为分页变更前端代码。
+- 实际残留缺陷一：后端提供 `failedCount`，前端 API 解析丢弃，部分失败终态缺少明确失败数提示。
+- 实际残留缺陷二：后端单章存储错误可在任务仍进行时通过 `error` 帧推送；前端先前把任何 `error` 都当终态，导致取消入口提前消失。
+- 最小修复：保留并规范化 `failedCount`；非终态错误仅显示警告且继续保留 `busy` 和精确 taskId 取消；明确 `finished` 后才结束操作，部分失败保持醒目提示，不标完整成功，`done.saved` 仍只为实际已缓存数。操作世代与取消边界未改。
+- 新增两个真实 SFC 交互：中途错误后仍可按返回 taskId 取消；部分失败终态显示失败数、只回报持久化成功数，EOF 不覆盖警告。先在修复前候选执行为 **0/2 通过**，修复后连同原 18 项共 **20/20 通过**。日志：[修前](../../tests/audit/artifacts/frontend-warning-before.tap)、[修后](../../tests/audit/artifacts/frontend-warning-after.tap)。这不是重新测生产或读取真实用户数据。
+- 补丁后 `vue-tsc + vite build` 通过（Vite 1m 3s），`git diff --check` 通过；构建日志：[frontend-warning-build.log](../../tests/audit/artifacts/frontend-warning-build.log)。未把此前浏览器 15 项和广域单测结果冒充新增补丁后的重新执行。
+- 随后新增 [api/cacheBook.test.ts](../../web-ui/src/api/cacheBook.test.ts)，直接执行生产 `cacheBookSSE`、共享 SSE 分块与事件解析，认证边界和 fetch 响应使用合成数据。真实 `Response/ReadableStream` 包含跨 chunk 的 CRLF、命名/无名帧、非终态错误及部分失败终态，确认 `failedCount` 沿完整解析链保留，taskId 作为 opaque 值传递。
+- 新增 API 回归后执行全部 utils/API/directive 单测 **103/103**、真实 SFC 交互 **20/20**，均无跳过；新增测试 `vue-tsc --noEmit` 通过，产品源码未再次改变，没有重复 Vite build。新日志：[全部单测](../../tests/audit/artifacts/frontend-warning-unit-final.tap)、[交互](../../tests/audit/artifacts/frontend-warning-sfc-final.tap)、[类型检查](../../tests/audit/artifacts/frontend-warning-test-types.log)，未覆盖三轮原证据。
+
+补充复测的精确命令：
+
+```bash
+# 工作目录：reader-dev-audit-20261030/web-ui
+PATH=/root/.nvm/versions/node/v22.23.4/bin:$PATH node --test src/utils/*.test.ts src/api/*.test.ts src/directives/*.test.ts
+PATH=/root/.nvm/versions/node/v22.23.4/bin:$PATH ./node_modules/.bin/vue-tsc --noEmit -p tsconfig.json
+# 工作目录：reader-dev-audit-20261030
+PATH=/root/.nvm/versions/node/v22.23.4/bin:$PATH node --test tests/audit/frontend_cache_dialog.mjs
+```
 
 ## 保留行为、未改原因和剩余限制
 

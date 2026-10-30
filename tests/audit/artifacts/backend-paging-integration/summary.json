@@ -1,0 +1,132 @@
+{
+  "environment": {
+    "proxyVariables": "removed",
+    "NO_PROXY": "127.0.0.1,localhost,::1",
+    "READER_CAMOUFOX_DISABLE": "1",
+    "READER_CAMOUFOX_SPAWN": "0"
+  },
+  "limitations": [
+    "No real Camoufox navigation/login/CAPTCHA; HTTP fallback verified."
+  ],
+  "results": [
+    {
+      "binary": "/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_advanced-c883e5a2a5c9c0a1",
+      "sha256": "f204347600794dde8e46b9bb89c9e3fedda322d2653af7f4586f6550ab1c6ab5",
+      "log": "tests/audit/artifacts/backend-paging-integration/e2e_advanced-c883e5a2a5c9c0a1.log",
+      "exitCode": 0,
+      "timedOut": false,
+      "elapsedMs": 752,
+      "counts": {
+        "status": "ok",
+        "passed": "4",
+        "failed": "0",
+        "ignored": "0",
+        "measured": "0",
+        "filteredOut": "0"
+      },
+      "reportedSkips": []
+    },
+    {
+      "binary": "/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_audit_cache-2902d33b09fa02fc",
+      "sha256": "0bed69c43149677772eb6a1e4875d5eb663336b28e3f85957acb5e456eba6269",
+      "log": "tests/audit/artifacts/backend-paging-integration/e2e_audit_cache-2902d33b09fa02fc.log",
+      "exitCode": 0,
+      "timedOut": false,
+      "elapsedMs": 6435,
+      "counts": {
+        "status": "ok",
+        "passed": "4",
+        "failed": "0",
+        "ignored": "0",
+        "measured": "0",
+        "filteredOut": "0"
+      },
+      "reportedSkips": []
+    },
+    {
+      "binary": "/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_booksource-be7f662772893964",
+      "sha256": "ded6ed81b4dc64825a56bca175f999126faf1fb6236c4f93020037b35eb42246",
+      "log": "tests/audit/artifacts/backend-paging-integration/e2e_booksource-be7f662772893964.log",
+      "exitCode": 0,
+      "timedOut": false,
+      "elapsedMs": 233,
+      "counts": {
+        "status": "ok",
+        "passed": "2",
+        "failed": "0",
+        "ignored": "0",
+        "measured": "0",
+        "filteredOut": "0"
+      },
+      "reportedSkips": []
+    },
+    {
+      "binary": "/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_bot_api-d5bf0124e5b3a5b9",
+      "sha256": "addceb659df2b5043bce94e4a46c228d9ab7e924b219605d089689fb4afdca0b",
+      "log": "tests/audit/artifacts/backend-paging-integration/e2e_bot_api-d5bf0124e5b3a5b9.log",
+      "exitCode": 0,
+      "timedOut": false,
+      "elapsedMs": 4734,
+      "counts": {
+        "status": "ok",
+        "passed": "5",
+        "failed": "0",
+        "ignored": "0",
+        "measured": "0",
+        "filteredOut": "0"
+      },
+      "reportedSkips": []
+    },
+    {
+      "binary": "/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_health-9bae3e77bc101a96",
+      "sha256": "9a9d7684c0414a152064ef5bf87223dc4f319916f11b017f8c600ee2283f67b2",
+      "log": "tests/audit/artifacts/backend-paging-integration/e2e_health-9bae3e77bc101a96.log",
+      "exitCode": 0,
+      "timedOut": false,
+      "elapsedMs": 54182,
+      "counts": {
+        "status": "ok",
+        "passed": "3",
+        "failed": "0",
+        "ignored": "0",
+        "measured": "0",
+        "filteredOut": "0"
+      },
+      "reportedSkips": []
+    },
+    {
+      "binary": "/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_source_features-d9af0c4fddfce63c",
+      "sha256": "0f4280d3a54651111850cd53ce6f25497eac6763b88ae2b7671f24323c643bce",
+      "log": "tests/audit/artifacts/backend-paging-integration/e2e_source_features-d9af0c4fddfce63c.log",
+      "exitCode": 0,
+      "timedOut": false,
+      "elapsedMs": 363,
+      "counts": {
+        "status": "ok",
+        "passed": "4",
+        "failed": "0",
+        "ignored": "0",
+        "measured": "0",
+        "filteredOut": "0"
+      },
+      "reportedSkips": []
+    },
+    {
+      "binary": "/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_sse-3cf3e6600f4be359",
+      "sha256": "d7d9362e5a2e813e7657a949be304403976888034909992aae996ec3a631dde9",
+      "log": "tests/audit/artifacts/backend-paging-integration/e2e_sse-3cf3e6600f4be359.log",
+      "exitCode": 0,
+      "timedOut": false,
+      "elapsedMs": 401,
+      "counts": {
+        "status": "ok",
+        "passed": "1",
+        "failed": "0",
+        "ignored": "0",
+        "measured": "0",
+        "filteredOut": "0"
+      },
+      "reportedSkips": []
+    }
+  ]
+}

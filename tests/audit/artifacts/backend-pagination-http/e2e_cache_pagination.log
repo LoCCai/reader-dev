@@ -1,0 +1,13 @@
+
+running 8 tests
+test duplicate_toc_urls_on_page_boundary_retain_each_position_and_title ... ok
+test get_and_post_bounds_preserve_errors_and_empty_page_shape ... ok
+test local_and_imported_books_page_by_stored_sequential_keys_without_toc ... ok
+test no_toc_legacy_sequence_and_persisted_hash_positions_remain_pageable ... ok
+test same_book_and_toc_urls_isolate_directory_body_and_has_more_by_namespace ... ok
+test sparse_toc_pages_use_real_indices_and_probe_only_inside_inclusive_range ... ok
+test toc_legacy_fallback_hash_priority_and_empty_cached_body_keep_their_contract ... ok
+test unorderable_hash_without_toc_fails_even_for_a_safe_looking_subrange ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.34s
+
