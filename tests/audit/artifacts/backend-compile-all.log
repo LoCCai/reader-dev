@@ -1,0 +1,213 @@
+   Compiling reader-dev v6.0.46 (/www/wwwroot/bot/QIQI/qq/github_git/reader-dev-audit-20261030)
+warning: unused import: `axum::handler::Handler`
+ --> src/api/router.rs:7:5
+  |
+7 | use axum::handler::Handler as _;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `namespace`
+   --> src/api/router.rs:933:9
+    |
+933 |     let namespace = match resolve_namespace(&state, &params, &headers).await {
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_namespace`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `updated` is never read
+    --> src/storage/mod.rs:5889:23
+     |
+5889 |     let mut updated = 0usize;
+     |                       ^^^^^^ this value is reassigned later and never used
+...
+5961 |     updated = updated_counter.load(std::sync::atomic::Ordering::Relaxed);
+     |     -------------------------------------------------------------------- `updated` is overwritten here before the previous value is read
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `namespace`
+    --> src/api/router.rs:6484:9
+     |
+6484 |     let namespace = match resolve_namespace(&state, &params, &headers).await {
+     |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_namespace`
+
+warning: unused variable: `namespace`
+    --> src/api/router.rs:6527:9
+     |
+6527 |     let namespace = match resolve_namespace(&state, &params, &headers).await {
+     |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_namespace`
+
+warning: unused variable: `namespace`
+    --> src/api/router.rs:6709:9
+     |
+6709 |     let namespace = match resolve_namespace(&state, &params, &headers).await {
+     |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_namespace`
+
+warning: unused variable: `namespace`
+    --> src/api/router.rs:8008:9
+     |
+8008 |     let namespace = match resolve_namespace(&state, &params, &headers).await {
+     |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_namespace`
+
+warning: unused variable: `path`
+  --> src/middleware/stats.rs:53:13
+   |
+53 |         let path = path.to_string();
+   |             ^^^^ help: if this is intentional, prefix it with an underscore: `_path`
+
+warning: unused variable: `context`
+    --> src/parser/js.rs:4236:5
+     |
+4236 |     context: &mut Context,
+     |     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_context`
+
+warning: unnecessary `unsafe` block
+    --> src/parser/js.rs:6072:29
+     |
+6059 |             unsafe {
+     |             ------ because it's nested under this `unsafe` block
+...
+6072 |                             unsafe {
+     |                             ^^^^^^ unnecessary `unsafe` block
+     |
+     = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/service/local_book.rs:237:9
+    |
+237 |     let mut stack: Vec<(usize, String)> = Vec::new();
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `book_url` is never read
+  --> src/api/bot.rs:72:5
+   |
+70 | struct BotJob {
+   |        ------ field in this struct
+71 |     ns: String,
+72 |     book_url: String,
+   |     ^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `add_invalid_book_source` is never used
+    --> src/api/router.rs:4678:10
+     |
+4678 | async fn add_invalid_book_source(
+     |          ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `java_base64_encode` is never used
+    --> src/parser/js.rs:4095:4
+     |
+4095 | fn java_base64_encode(
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `java_base64_decode` is never used
+    --> src/parser/js.rs:4259:4
+     |
+4259 | fn java_base64_decode(
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `expand_inline_depth` is never used
+    --> src/parser/rule.rs:1219:4
+     |
+1219 | fn expand_inline_depth(body: &str, text: &str, depth: usize) -> String {
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `ssrf_redirect_policy` is never used
+   --> src/service/crawler.rs:270:15
+    |
+270 | pub(crate) fn ssrf_redirect_policy() -> reqwest::redirect::Policy {
+    |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `concurrent_rate_sleep_ms` is never used
+   --> src/service/search.rs:493:15
+    |
+493 | pub(crate) fn concurrent_rate_sleep_ms(rate: Option<&str>) -> u64 {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `analyze_book_list` is never used
+   --> src/service/search.rs:854:4
+    |
+854 | fn analyze_book_list(
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: function `field_url` is never used
+    --> src/service/search.rs:1226:4
+     |
+1226 | fn field_url(context: &str, rule: Option<&str>, default: &str, base: &str) -> String {
+     |    ^^^^^^^^^
+
+warning: function `expand_embedded` is never used
+    --> src/service/search.rs:1295:15
+     |
+1295 | pub(crate) fn expand_embedded(rule: &str, context: &str) -> String {
+     |               ^^^^^^^^^^^^^^^
+
+warning: function `field_with_bridge` is never used
+    --> src/service/search.rs:1445:15
+     |
+1445 | pub(crate) fn field_with_bridge(
+     |               ^^^^^^^^^^^^^^^^^
+
+warning: function `opt_field` is never used
+    --> src/service/search.rs:1677:15
+     |
+1677 | pub(crate) fn opt_field(context: &str, rule: Option<&str>) -> Option<String> {
+     |               ^^^^^^^^^
+
+warning: function `opt_field_with_bridge` is never used
+    --> src/service/search.rs:1681:15
+     |
+1681 | pub(crate) fn opt_field_with_bridge(
+     |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `len` is never used
+  --> src/util/regex.rs:86:8
+   |
+45 | impl RegexCache {
+   | --------------- method in this implementation
+...
+86 |     fn len(&self) -> usize {
+   |        ^^^
+
+warning: `reader-dev` (lib) generated 25 warnings (run `cargo fix --lib -p reader-dev` to apply 8 suggestions)
+warning: `reader-dev` (lib test) generated 21 warnings (21 duplicates)
+warning: unused variable: `base`
+  --> tests/e2e_health.rs:76:9
+   |
+76 |     let base = format!("http://127.0.0.1:{port}");
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_base`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `reader-dev` (test "e2e_health") generated 1 warning (run `cargo fix --test "e2e_health" -p reader-dev` to apply 1 suggestion)
+warning: unused import: `std::net::SocketAddr`
+  --> tests/e2e_booksource.rs:10:5
+   |
+10 | use std::net::SocketAddr;
+   |     ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::sync::atomic::Ordering`
+  --> tests/e2e_booksource.rs:11:5
+   |
+11 | use std::sync::atomic::Ordering;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `reader-dev` (test "e2e_booksource") generated 2 warnings (run `cargo fix --test "e2e_booksource" -p reader-dev` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5m 53s
+  Executable unittests src/lib.rs (/tmp/reader-dev-audit-target-20261030/debug/deps/reader_dev-3546ce6c9cc40a82)
+  Executable unittests src/main.rs (/tmp/reader-dev-audit-target-20261030/debug/deps/reader_dev-c1fdc4c439cd1009)
+  Executable tests/e2e_advanced.rs (/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_advanced-c883e5a2a5c9c0a1)
+  Executable tests/e2e_audit_cache.rs (/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_audit_cache-2902d33b09fa02fc)
+  Executable tests/e2e_booksource.rs (/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_booksource-be7f662772893964)
+  Executable tests/e2e_bot_api.rs (/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_bot_api-d5bf0124e5b3a5b9)
+  Executable tests/e2e_health.rs (/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_health-9bae3e77bc101a96)
+  Executable tests/e2e_source_features.rs (/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_source_features-d9af0c4fddfce63c)
+  Executable tests/e2e_sse.rs (/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_sse-3cf3e6600f4be359)

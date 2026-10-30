@@ -2905,7 +2905,10 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let r = rt.block_on(solve_cf_builtin(
             "default",
-            "https://cf.example.com/book/1",
+            // A literal public target passes the earlier SSRF/DNS check without
+            // relying on an intentionally nonexistent example.com subdomain.
+            // Camoufox is disabled above, so no HTTP request is made.
+            "https://1.1.1.1/book/1",
             "sid=abc",
             None,
         ));

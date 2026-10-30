@@ -1,0 +1,9 @@
+
+running 4 tests
+test e2e_gbk_autodetect_pipeline ... ok
+test e2e_gbk_charset_pipeline ... ok
+test e2e_post_and_js_chain ... ok
+test e2e_webview_fallback_to_http ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.06s
+

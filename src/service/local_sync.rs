@@ -563,7 +563,7 @@ async fn generate_epub_for_book(
     book: &crate::model::Book,
     books_dir: &Path,
 ) -> Result<()> {
-    let rows = storage.list_chapters_full(&book.book_url).await?;
+    let rows = storage.list_chapters_full(ns, &book.book_url).await?;
     if rows.is_empty() {
         return Ok(()); // 空书不生成
     }
@@ -776,7 +776,7 @@ mod tests {
                 .unwrap(),
             2
         );
-        let toc = storage.list_chapters(&b.book_url).await.unwrap();
+        let toc = storage.list_chapters("default", &b.book_url).await.unwrap();
         assert_eq!(toc[0].1, "第一章 起点");
         assert_eq!(toc[1].1, "第二章 成长");
         // 幂等：再次对账无变更
@@ -817,7 +817,7 @@ mod tests {
             storage.count_chapters("default", &book_url).await.unwrap(),
             3
         );
-        let toc = storage.list_chapters(&book_url).await.unwrap();
+        let toc = storage.list_chapters("default", &book_url).await.unwrap();
         assert_eq!(toc[2].1, "第三章 终章");
         let content = storage
             .get_chapter_content("default", &book_url, 1)
@@ -912,7 +912,7 @@ mod tests {
             .await
             .unwrap();
         storage
-            .save_chapters(
+            .save_chapters("default",
                 &book_url,
                 &[
                     ("第一章".to_string(), "正文一。".to_string()),
@@ -984,7 +984,7 @@ mod tests {
                 .await
                 .unwrap();
             storage
-                .save_chapters(&book_url, &[("第一章".to_string(), "正文。".to_string())])
+                .save_chapters("default", &book_url, &[("第一章".to_string(), "正文。".to_string())])
                 .await
                 .unwrap();
         }

@@ -10,15 +10,16 @@ import type { ReturnData, SearchBook } from '@/types'
  */
 export function searchBookMulti(
   key: string,
-  maxSources = 50,
+  maxSources?: number,
   signal?: AbortSignal,
   page = 1,
   exact = false,
   bookSourceGroup = '',
+  bookSourceUrl = '',
 ): Promise<ReturnData<SearchBook[]>> {
   return post<SearchBook[]>(
     '/searchBookMulti',
-    { key, maxSources, page, exact: exact ? 1 : 0, bookSourceGroup },
+    { key, ...(maxSources === undefined ? {} : { maxSources }), page, exact: exact ? 1 : 0, bookSourceGroup, bookSourceUrl },
     { signal },
   )
 }

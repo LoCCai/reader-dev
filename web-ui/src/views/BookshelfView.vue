@@ -1033,8 +1033,14 @@ const exportEncoding = ref<ExportEncoding>('utf-8')
 const exportBusy = ref(false)
 const exportMsg = ref('')
 const exportMsgError = ref(false)
+let exportSession = 0
 
 function openExportFor(book: Book) {
+  if ((book.type ?? 0) !== 0) {
+    ElMessage.info('暂不支持该书籍类型的文本导出')
+    return
+  }
+  exportSession++
   exportBookUrl.value = book.bookUrl
   exportName.value = book.name || 'book'
   exportFormat.value = 'txt'
@@ -1058,6 +1064,7 @@ async function confirmExport() {
   exportBusy.value = true
   exportMsg.value = ''
   exportMsgError.value = false
+  const session = exportSession
   try {
     const { blob, warning } = await exportBook(
       exportBookUrl.value,
@@ -1088,8 +1095,8 @@ async function confirmExport() {
       exportMsg.value = warnParts.length
         ? `已下载 ${name}（警告：${warnParts.join('；')}）`
         : `已下载 ${name}`
-      window.setTimeout(() => {
-        if (!exportBusy.value) closeExport()
+      if (!warnParts.length) window.setTimeout(() => {
+        if (!exportBusy.value && session === exportSession) closeExport()
       }, 900)
     }
   } catch (err) {
@@ -2755,7 +2762,7 @@ onMounted(() => {
               </svg>
               设置分组
             </button>
-            <button class="ctx-item" type="button" @click="openExportFor(menuBook)">
+            <button class="ctx-item" type="button" :disabled="(menuBook.type ?? 0) !== 0" :title="(menuBook.type ?? 0) !== 0 ? '暂不支持该书籍类型的文本导出' : '导出本书全部章节'" @click="openExportFor(menuBook)">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M12 15V4" />
                 <path d="M7 9.5L12 4.5l5 5" />

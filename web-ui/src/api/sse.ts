@@ -111,9 +111,24 @@ export async function consumeSSEStream(
   cbs: SSEStreamCallbacks,
   isAborted: () => boolean,
 ): Promise<void> {
-  await consumeSSEStreamBlocks(body, (block) => dispatchSSEBlock(block, cbs), isAborted, (msg) =>
-    cbs.onStreamError?.(msg),
-  )
+  let terminal = false
+  let failed = false
+  const callbacks: SSEStreamCallbacks = {
+    ...cbs,
+    onEnd: (lastIndex, isEnd) => {
+      terminal = true
+      cbs.onEnd(lastIndex, isEnd)
+    },
+    onErrorEvent: (ret) => {
+      terminal = true
+      cbs.onErrorEvent(ret)
+    },
+  }
+  await consumeSSEStreamBlocks(body, (block) => dispatchSSEBlock(block, callbacks), isAborted, (msg) => {
+    failed = true
+    cbs.onStreamError?.(msg)
+  })
+  if (!terminal && !failed && !isAborted()) cbs.onStreamError?.('连接已结束，搜索尚未完成，请重试')
 }
 
 /**

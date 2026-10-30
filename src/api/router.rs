@@ -180,6 +180,7 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
         .route("/reader3/file/mkdir", post(crate::api::files::mkdir))
         .route("/reader3/file/rename", post(crate::api::files::rename))
         .route("/reader3/file/download", get(crate::api::files::download))
+        .route("/reader3/getBookFile", get(get_book_file))
         .route(
             "/reader3/file/upload",
             post(crate::api::files::upload)
@@ -1722,11 +1723,11 @@ async fn get_cache_info(
     Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Json<ReturnData> {
-    // P0-9：缓存统计/清理接口加登录校验（缓存为全局表，不按命名空间隔离，仅要求登录）
-    if let Err(ret) = resolve_namespace(&state, &params, &headers).await {
-        return Json(ret);
-    }
-    match state.storage.get_cache_info().await {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    match state.storage.get_cache_info(&namespace).await {
         Ok(info) => Json(ReturnData::ok(
             serde_json::to_value(info).unwrap_or(serde_json::Value::Null),
         )),
@@ -1745,9 +1746,10 @@ async fn clear_cache(
     headers: HeaderMap,
     body: Option<axum::body::Bytes>,
 ) -> Json<ReturnData> {
-    if let Err(ret) = resolve_namespace(&state, &params, &headers).await {
-        return Json(ret);
-    }
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
     let mut cache_type = params.get("type").cloned().unwrap_or_default();
     if let Some(body) = body {
         if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body) {
@@ -1762,7 +1764,7 @@ async fn clear_cache(
     if cache_type != "toc" && cache_type != "chapters" && cache_type != "all" {
         return Json(ReturnData::err("参数错误"));
     }
-    match state.storage.clear_cache(&cache_type).await {
+    match state.storage.clear_cache(&namespace, &cache_type).await {
         Ok((toc_deleted, chapters_deleted)) => Json(ReturnData::ok(serde_json::json!({
             "deletedToc": toc_deleted,
             "deletedChapters": chapters_deleted,
@@ -2523,6 +2525,7 @@ async fn search_book(
     }
     // 参数解析（POST body JSON 优先，GET query 兜底）
     let mut key = params.get("key").cloned().unwrap_or_default();
+    let mut exact = params.get("exact").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
     let mut page = params
         .get("page")
         .and_then(|v| v.parse().ok())
@@ -2542,8 +2545,11 @@ async fn search_book(
             if let Some(v) = json.get("page").and_then(|v| v.as_i64()) {
                 page = v;
             }
-            if let Some(v) = json.get("bookSource").and_then(|v| v.as_str()) {
+            if let Some(v) = json.get("bookSource").or_else(|| json.get("bookSourceUrl")).or_else(|| json.get("sourceUrl")).or_else(|| json.get("origin")).and_then(|v| v.as_str()) {
                 book_source_param = v.to_string();
+            }
+            if let Some(v) = json.get("exact") {
+                exact = v.as_bool() == Some(true) || v.as_u64() == Some(1) || v.as_str().is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
             }
         }
     }
@@ -2582,7 +2588,7 @@ async fn search_book(
     {
         Ok(books) => {
             // legacy "=" 前缀/exact=1：按书名/作者等值过滤（大小写/全半角忽略）
-            let exact = key_exact_prefix || params.get("exact").map(|v| v == "1").unwrap_or(false);
+            let exact = key_exact_prefix || exact;
             let books = if exact {
                 crate::service::search::filter_exact(books, &key)
             } else {
@@ -2655,7 +2661,7 @@ async fn search_book_multi(
     let mut group = params.get("bookSourceGroup").cloned().unwrap_or_default();
     // P1-4 单源指定：精确匹配 bookSourceUrl（非空时只搜该源）
     let mut single_source_url = params.get("bookSourceUrl").cloned().unwrap_or_default();
-    let mut exact = params.get("exact").map(|v| v == "1").unwrap_or(false);
+    let mut exact = params.get("exact").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
     let mut max_sources = params
         .get("maxSources")
         .and_then(|v| v.parse::<usize>().ok())
@@ -2678,7 +2684,7 @@ async fn search_book_multi(
                 single_source_url = v.to_string();
             }
             if let Some(v) = json.get("exact") {
-                exact = v.as_u64() == Some(1)
+                exact = v.as_bool() == Some(true) || v.as_u64() == Some(1)
                     || v.as_str()
                         .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
                         .unwrap_or(false);
@@ -2784,8 +2790,8 @@ fn dedup_search_books(
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(books.len());
     for b in books {
-        let key = format!("{}_{}", b.name, b.author);
-        if key.is_empty() {
+        let key = (b.name.clone(), b.author.clone());
+        if b.name.is_empty() && b.author.is_empty() {
             continue;
         }
         if seen.insert(key) {
@@ -2818,7 +2824,7 @@ async fn search_book_source(
     let url = param_of(&params, body_json.as_ref(), "url");
     let book_source_param = param_of(&params, body_json.as_ref(), "bookSource");
     // 精确模式（exact=1）：书名等值匹配（大小写/全半角忽略）；缺省模糊（双向包含）
-    let exact = params.get("exact").map(|v| v == "1").unwrap_or(false)
+    let exact = params.get("exact").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false)
         || body_json
             .as_ref()
             .and_then(|j| j.get("exact"))
@@ -4470,6 +4476,9 @@ async fn collect_export_chapters(
     String,
 > {
     let shelf = state.storage.find_book(ns, url).await.ok().flatten();
+    if shelf.as_ref().is_some_and(|b| b.book_type != 0) {
+        return Err("暂不支持该书籍类型的文本导出".to_string());
+    }
     let is_local = url.starts_with("local://");
     let is_file = url.starts_with("storage/")
         || crate::service::local_book::SUPPORTED_EXTENSIONS
@@ -4481,7 +4490,7 @@ async fn collect_export_chapters(
         let book = shelf.ok_or_else(|| "书籍不存在（请先加入书架）".to_string())?;
         let rows = state
             .storage
-            .list_chapters(url)
+            .list_chapters(ns, url)
             .await
             .map_err(|e| format!("读取章节失败: {e}"))?;
         let mut chapters = Vec::with_capacity(rows.len());
@@ -4815,10 +4824,11 @@ async fn cache_book_on_server(
                 results.push(json!({ "url": u, "error": "书籍不存在" }));
                 continue;
             }
-            let progress = crate::service::cache_job::start(&namespace, u, state.storage.clone());
+            let (task_id, progress) = crate::service::cache_job::start_range(&namespace, u, None, state.storage.clone());
             let p = progress.lock().unwrap_or_else(|e| e.into_inner());
             results.push(json!({
                 "url": u,
+                "taskId": task_id,
                 "started": !p.finished,
                 "cached": p.cached,
                 "total": p.total,
@@ -4837,10 +4847,11 @@ async fn cache_book_on_server(
     {
         return Json(ReturnData::err("书籍不存在（请先加入书架）"));
     }
-    let progress = crate::service::cache_job::start(&namespace, &url, state.storage.clone());
+    let (task_id, progress) = crate::service::cache_job::start_range(&namespace, &url, None, state.storage.clone());
     let p = progress.lock().unwrap_or_else(|e| e.into_inner());
     Json(ReturnData::ok(json!({
-        "started": !p.finished,
+        "taskId": task_id,
+                "started": !p.finished,
         "url": url,
         "cached": p.cached,
         "total": p.total,
@@ -4934,75 +4945,37 @@ async fn get_book_cache_chapters(
     {
         return Json(ReturnData::err("书籍不存在（请先加入书架）"));
     }
-    let from = param_of(&params, body_json.as_ref(), "from")
-        .parse::<i64>()
-        .ok();
-    let to = param_of(&params, body_json.as_ref(), "to")
-        .parse::<i64>()
-        .ok();
-    if let (Some(f), Some(t)) = (from, to) {
-        if f > t {
-            return Json(ReturnData::err("缓存范围参数错误"));
-        }
+    let from_raw = param_of(&params, body_json.as_ref(), "from");
+    let to_raw = param_of(&params, body_json.as_ref(), "to");
+    let from = from_raw.parse::<i64>().ok();
+    let to = to_raw.parse::<i64>().ok();
+    if (!from_raw.is_empty() && from.is_none()) || (!to_raw.is_empty() && to.is_none())
+        || from.is_some_and(|v| v < 0) || to.is_some_and(|v| v < 0)
+        || matches!((from, to), (Some(f), Some(t)) if f > t)
+    {
+        return Json(ReturnData::err("缓存范围参数错误"));
     }
-    let chapters = match state.storage.list_cached_chapters(&namespace, &url).await {
+    let chapters = match state.storage.ordered_cached_chapters(&namespace, &url, false).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!("getBookCacheChapters 失败 [{url}]: {e}");
-            return Json(ReturnData::err("系统错误"));
+            return Json(ReturnData::err(crate::storage::cache_read_error(&e)));
         }
     };
-    let mut selected: Vec<serde_json::Value> = Vec::new();
-    // 书源书缓存行键 = md5(chapterUrl)（60 位大整数）——前端目录标记与 from/to 范围
-    // 都按目录 0..N 位置比对，且 60 位超出 JS Number 精度，必须在此反解为目录位置。
-    // 反查表来源：toc_cache（#13 修复后按 book_url/toc_url 均可命中）
-    let mut md5_to_pos: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
-    let is_local = url.starts_with("local://") || is_loc_book_file_chapter(&url);
-    if !is_local {
-        if let Ok(Some(toc_json)) = state
-            .storage
-            .get_toc_cache(&namespace, &url, TOC_CACHE_TTL_MS)
-            .await
-        {
-            if let Ok(toc) = serde_json::from_str::<Vec<serde_json::Value>>(&toc_json) {
-                for (pos, c) in toc.iter().enumerate() {
-                    if let Some(u) = c.get("url").and_then(|v| v.as_str()) {
-                        md5_to_pos.insert(crate::util::md5::chapter_url_hash(u), pos);
-                    }
-                }
-            }
-        }
-    }
-    for (index, title, content) in chapters {
-        // 非本地书：md5 键 → 目录位置（映射缺失的行保留原键，由前端忽略）
-        let display_index = if is_local {
-            index
-        } else {
-            md5_to_pos
-                .get(&index)
-                .copied()
-                .map(|p| p as i64)
-                .unwrap_or(index)
-        };
-        if let Some(f) = from {
-            if display_index < f {
-                continue;
-            }
-        }
-        if let Some(t) = to {
-            if display_index > t {
-                continue;
-            }
-        }
-        selected.push(json!({ "index": display_index, "title": title, "content": content }));
-        if selected.len() >= MAX_CACHE_CHAPTERS_PER_FETCH {
-            break;
-        }
-    }
+    let mut rows = chapters.into_iter().filter(|(index, _, _)| {
+        from.is_none_or(|f| *index >= f) && to.is_none_or(|t| *index <= t)
+    });
+    let selected: Vec<serde_json::Value> = rows.by_ref()
+        .take(MAX_CACHE_CHAPTERS_PER_FETCH)
+        .map(|(index, title, content)| json!({ "index": index, "title": title, "content": content }))
+        .collect();
+    let has_more = rows.next().is_some();
+    let next_from = selected.last().and_then(|row| row["index"].as_i64()).map(|i| i + 1);
     Json(ReturnData::ok(json!({
         "url": url,
         "chapters": selected,
-        "hasMore": selected.len() >= MAX_CACHE_CHAPTERS_PER_FETCH,
+        "hasMore": has_more,
+        "nextFrom": if has_more { next_from } else { None },
     })))
 }
 
@@ -5025,7 +4998,7 @@ async fn cache_book_sse(
     if task_id.is_empty() {
         return sse_error(ReturnData::err("参数错误"));
     }
-    let progress = match crate::service::cache_job::progress_of_key(&task_id) {
+    let progress = match if has_task_id { crate::service::cache_job::progress_of_key(&namespace, &task_id) } else { crate::service::cache_job::progress_of(&namespace, &url) } {
         Some(p) => p,
         None if !has_task_id && !url.is_empty() => {
             // P0（legacy cacheBookSSE 自执行语义）：仅带 url 且无运行中任务时
@@ -5063,7 +5036,7 @@ async fn cache_book_sse(
                         // legacy 客户端计数字段别名
                         "cachedCount": p.cached,
                         "successCount": p.cached,
-                        "failedCount": 0,
+                        "failedCount": p.failed,
                     }),
                     p.finished,
                 )
@@ -5104,11 +5077,14 @@ async fn cancel_cache_book(
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
     let url = param_of(&params, body_json.as_ref(), "url");
     let task_id = param_of(&params, body_json.as_ref(), "taskId");
-    let task_id = if !task_id.is_empty() { task_id } else { url };
-    if task_id.is_empty() {
+    if task_id.is_empty() && url.is_empty() {
         return Json(ReturnData::err("参数错误"));
     }
-    let cancelled = crate::service::cache_job::cancel_key(&task_id);
+    let cancelled = if task_id.is_empty() {
+        crate::service::cache_job::cancel(&namespace, &url).await
+    } else {
+        crate::service::cache_job::cancel_key(&namespace, &task_id).await
+    };
     Json(ReturnData::ok(json!({ "cancelled": cancelled })))
 }
 
@@ -5326,7 +5302,7 @@ async fn refresh_local_book(
         .iter()
         .map(|c| (c.title.clone(), c.content.clone()))
         .collect();
-    if let Err(e) = state.storage.save_chapters(&url, &pairs).await {
+    if let Err(e) = state.storage.replace_chapters(&namespace, &url, &pairs).await {
         tracing::error!("refreshLocalBook 章节入库失败: {e}");
         return Json(ReturnData::err("刷新失败"));
     }
@@ -8698,7 +8674,7 @@ async fn search_book_multi_sse(
     let mut group = params.get("bookSourceGroup").cloned().unwrap_or_default();
     // P1-4 单源指定：精确匹配 bookSourceUrl（非空时只搜该源）
     let mut single_source_url = params.get("bookSourceUrl").cloned().unwrap_or_default();
-    let mut exact = params.get("exact").map(|v| v == "1").unwrap_or(false);
+    let mut exact = params.get("exact").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
     let mut last_index = params
         .get("lastIndex")
         .and_then(|v| v.parse::<i64>().ok())
@@ -8722,7 +8698,7 @@ async fn search_book_multi_sse(
                 single_source_url = v.to_string();
             }
             if let Some(v) = json.get("exact") {
-                exact = v.as_u64() == Some(1)
+                exact = v.as_bool() == Some(true) || v.as_u64() == Some(1)
                     || v.as_str()
                         .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
                         .unwrap_or(false);
@@ -8769,7 +8745,7 @@ async fn search_book_multi_sse(
         .filter(|s| {
             s.enabled
                 && s.search_url.is_some()
-                && !crate::service::health::is_source_invalid(&namespace, &s.book_source_url)
+                && (!single_source_url.is_empty() || !crate::service::health::is_source_invalid(&namespace, &s.book_source_url))
         })
         .filter(|s| book_source_group_matches(&group, s.book_source_group.as_deref()))
         .filter(|s| single_source_url.is_empty() || s.book_source_url == single_source_url)
@@ -8788,7 +8764,7 @@ async fn search_book_multi_sse(
     );
     let total = sources.len() as i64;
     let start = (last_index + 1).max(0) as usize;
-    let end = (start + search_size).min(sources.len());
+    let end = start.saturating_add(search_size).min(sources.len());
     let ns = namespace.clone();
     let storage = state.storage.clone();
     tokio::spawn(async move {
@@ -8804,27 +8780,15 @@ async fn search_book_multi_sse(
             tasks.push(Box::pin(async move {
                 let _permit = sem.acquire().await;
                 let books =
-                    crate::service::search::search_one_source(&storage, &ns, &source, &key, 1)
-                        .await
-                        .unwrap_or_default();
+                    search_one_source_with_timeout(&storage, &ns, source, &key, 1, std::time::Duration::from_secs(SEARCH_SOURCE_TIMEOUT_SE)).await;
                 // 精确模式（exact=1）：书源规则解析后按书名/作者等值过滤（大小写/全半角忽略）
                 let books = if exact {
                     crate::service::search::filter_exact(books, &key)
                 } else {
                     books
                 };
-                // 跨书源去重：同 书名+作者 只保留首个命中的书源
-                let mut unique = Vec::with_capacity(books.len());
-                let mut local_seen = std::collections::HashSet::new();
-                for b in books {
-                    let k = format!("{}_{}", b.name.trim(), b.author.trim());
-                    if k.is_empty() {
-                        continue;
-                    }
-                    if local_seen.insert(k) {
-                        unique.push(b);
-                    }
-                }
+                // Keep each source's candidates: the UI aggregates source choices.
+                let unique = dedup_search_books(books);
                 let payload = serde_json::json!({ "lastIndex": i as i64, "data": unique });
                 (i as i64, format!("data: {payload}\n\n"))
             }));
@@ -8833,7 +8797,12 @@ async fn search_book_multi_sse(
         // 若用「最后完成的索引」，乱序时 end 的 lastIndex/isEnd 会倒退，
         // 客户端按 lastIndex 续传将重复搜索已交付的源（C4 e2e 实测捕获）
         let mut last = last_index;
-        while let Some((i, text)) = tasks.next().await {
+        loop {
+            let (i, text) = tokio::select! {
+                biased;
+                _ = tx.closed() => return,
+                result = tasks.next() => match result { Some(result) => result, None => break },
+            };
             if i > last {
                 last = i;
             }
@@ -9270,7 +9239,7 @@ async fn delete_book_cache(
         }
     };
     // legacy：本地书籍无需删除缓存
-    if crate::service::local_book::is_local_book(&book.book_url, &book.origin) {
+    if book.origin == "local" || crate::service::local_book::is_local_book(&book.book_url, &book.origin) {
         return Json(ReturnData::err("本地书籍无需删除缓存"));
     }
     match state.storage.delete_book_cache(&namespace, &url).await {
@@ -9810,7 +9779,7 @@ async fn get_chapter_list_by_rule(
                 // 无关联文件（已迁移 local:// DB 书）→ 章节表现状预览
                 match state
                     .storage
-                    .list_chapters_with_word_count(&bk.book_url)
+                    .list_chapters_with_word_count(&namespace, &bk.book_url)
                     .await
                 {
                     Ok(rows) if !rows.is_empty() => rows
@@ -11132,7 +11101,7 @@ async fn get_book_toc_loc_book(
     let book_url = &book.book_url;
     tracing::debug!("loc_book toc: req={req_url} matched={book_url}");
     // GAP 171：已迁移（migrateLocBook）的书——章节表命中即 DB 直读（含字数）
-    if let Ok(chapters) = state.storage.list_chapters_with_word_count(book_url).await {
+    if let Ok(chapters) = state.storage.list_chapters_with_word_count(namespace, book_url).await {
         if !chapters.is_empty() {
             return toc_json_from_chapters(book_url, &chapters);
         }
@@ -11188,7 +11157,7 @@ async fn get_book_toc_loc_book(
 /// 文件型本地书目录：按扩展名解析（TXT 用用户规则）→ 章节列表（chapterUrl = bookUrl#index）
 async fn get_book_toc_file(state: &AppState, ns: &str, book_url: &str) -> Option<Json<ReturnData>> {
     // GAP 171：已迁移（migrateLocBook）的书——章节表命中即 DB 直读（含字数）
-    if let Ok(chapters) = state.storage.list_chapters_with_word_count(book_url).await {
+    if let Ok(chapters) = state.storage.list_chapters_with_word_count(ns, book_url).await {
         if !chapters.is_empty() {
             return toc_json_from_chapters(book_url, &chapters);
         }
@@ -11321,12 +11290,12 @@ async fn get_book_content_file(
 /// 本地书目录（local://book_id/toc）
 async fn get_book_toc_local(
     state: &AppState,
-    _namespace: &str,
+    namespace: &str,
     book_url: &str,
 ) -> Option<Json<ReturnData>> {
     let chapters = state
         .storage
-        .list_chapters_with_word_count(book_url)
+        .list_chapters_with_word_count(namespace, book_url)
         .await
         .ok()?;
     let list: Vec<serde_json::Value> = chapters
@@ -11426,6 +11395,63 @@ fn resolve_local_book_source_file(
     } else {
         resolve_loc_book_file(&state.storage.config.storage_dir(), book_url)
     }
+}
+
+/// Original EPUB bytes for the reader. Resolve the shelf identity on the server;
+/// callers never provide a filesystem path or a management credential.
+async fn get_book_file(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let ns = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret).into_response(),
+    };
+    let url = params.get("url").or_else(|| params.get("bookUrl")).map(String::as_str).unwrap_or("");
+    let book = match state.storage.find_book(&ns, url).await {
+        Ok(Some(book)) => book,
+        Ok(None) => return Json(ReturnData::err("书籍不存在（请先加入书架）")).into_response(),
+        Err(_) => return Json(ReturnData::err("系统错误")).into_response(),
+    };
+    let path = book.local_file.as_deref()
+        .and_then(|path| crate::api::opds::safe_local_file(&state.storage.config.storage_dir(), path))
+        .or_else(|| resolve_local_book_source_file(&state, &ns, &book.book_url));
+    let Some(path) = path.and_then(|p| p.canonicalize().ok()) else {
+        return Json(ReturnData::err("本地书原文件不存在")).into_response();
+    };
+    if state.storage.config.secure {
+        let own_root = state.storage.config.storage_dir().join("data").join(&ns);
+        let own = own_root.canonicalize().ok().is_some_and(|root| path.starts_with(root));
+        // The optional external local-book root is assigned to default by the
+        // existing synchronizer. Never let a user's editable local_file point
+        // into another namespace, or into a globally shared storage directory.
+        let external_default = ns == "default" && std::env::var("READER_LOCAL_BOOK_DIR").ok()
+            .and_then(|root| std::path::PathBuf::from(root).canonicalize().ok())
+            .is_some_and(|root| path.starts_with(root));
+        if !own && !external_default {
+            return Json(ReturnData::err("无权读取该本地书文件")).into_response();
+        }
+    }
+    if !path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("epub")) {
+        return Json(ReturnData::err("此书没有EPUB原文件")).into_response();
+    }
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(file) => file,
+        Err(_) => return Json(ReturnData::err("本地书原文件读取失败")).into_response(),
+    };
+    let stream = futures::stream::try_unfold(file, |mut file| async move {
+        use tokio::io::AsyncReadExt;
+        let mut bytes = vec![0u8; 64 * 1024];
+        let len = file.read(&mut bytes).await?;
+        if len == 0 { return Ok::<_, std::io::Error>(None); }
+        bytes.truncate(len);
+        Ok(Some((Bytes::from(bytes), file)))
+    });
+    Response::builder().status(StatusCode::OK)
+        .header("Content-Type", "application/epub+zip")
+        .header("Cache-Control", "private, no-store")
+        .body(Body::from_stream(stream)).unwrap()
 }
 
 /// URL 路径段编码（img src 用——中文/空格/# 等字符安全进 URL）
@@ -12217,7 +12243,7 @@ mod tests {
         let (state, dir) = test_state("delbcache").await;
         state
             .storage
-            .save_chapters(
+            .save_chapters("default",
                 "https://book.com/a",
                 &[("第一章".to_string(), "正文A".to_string())],
             )
@@ -12225,7 +12251,7 @@ mod tests {
             .unwrap();
         state
             .storage
-            .save_chapters(
+            .save_chapters("default",
                 "https://book.com/b",
                 &[("第一章".to_string(), "正文B".to_string())],
             )
@@ -12287,7 +12313,7 @@ mod tests {
         // body {bookUrl}（POST）
         state
             .storage
-            .save_chapters(
+            .save_chapters("default",
                 "https://book.com/a",
                 &[("第一章".to_string(), "正文A2".to_string())],
             )
@@ -12325,7 +12351,7 @@ mod tests {
         // 按用户：书不在该用户书架 → 拒绝（缓存保留）
         state
             .storage
-            .save_chapters(
+            .save_chapters("default",
                 "https://book.com/b",
                 &[("第一章".to_string(), "正文B".to_string())],
             )
@@ -12378,7 +12404,7 @@ mod tests {
         let local_url = "storage/data/default/本地书.txt";
         state
             .storage
-            .save_chapters(local_url, &[("第一章".to_string(), "本地正文".to_string())])
+            .save_chapters("default", local_url, &[("第一章".to_string(), "本地正文".to_string())])
             .await
             .unwrap();
         state
@@ -12435,7 +12461,7 @@ mod tests {
             .unwrap();
         state
             .storage
-            .save_chapters(
+            .save_chapters("default",
                 "https://book.com/a",
                 &[
                     ("第一章".to_string(), "正文一二三".to_string()),
@@ -12512,7 +12538,7 @@ mod tests {
         assert_eq!(
             state
                 .storage
-                .list_chapters("https://book.com/a")
+                .list_chapters("default", "https://book.com/a")
                 .await
                 .unwrap()[0]
                 .1,
@@ -15908,8 +15934,8 @@ mod tests {
             .unwrap();
         state
             .storage
-            .save_chapters(
-                "local://book1",
+            .save_chapters("default",
+                "https://cache.test/book1",
                 &[
                     ("第一章".to_string(), "正文一甲乙".to_string()),
                     ("第二章".to_string(), "正文二丙丁戊".to_string()),
@@ -15944,7 +15970,7 @@ mod tests {
         assert!(ret.0.is_success, "{}", ret.0.error_msg);
         assert_eq!(ret.0.data["deletedToc"], 1);
         assert_eq!(ret.0.data["deletedChapters"], 0);
-        let info = state.storage.get_cache_info().await.unwrap();
+        let info = state.storage.get_cache_info("default").await.unwrap();
         assert_eq!(info.toc_cache_count, 0);
         assert_eq!(info.chapter_count, 2);
 
@@ -16003,7 +16029,7 @@ mod tests {
         state
             .storage
             .cache_toc(
-                "default",
+                "alice",
                 "https://book.com/a",
                 "https://book.com/toc",
                 "[]",
@@ -16030,7 +16056,7 @@ mod tests {
         assert!(!ret.0.is_success);
         assert_eq!(ret.0.data, json!("NEED_LOGIN"));
         // 数据未被清除
-        let info = state.storage.get_cache_info().await.unwrap();
+        let info = state.storage.get_cache_info("alice").await.unwrap();
         assert_eq!(info.toc_cache_count, 1);
         assert_eq!(info.chapter_count, 0);
 
@@ -16055,7 +16081,7 @@ mod tests {
         .await;
         assert!(ret.0.is_success, "{}", ret.0.error_msg);
         assert_eq!(ret.0.data["deletedToc"], 1);
-        let info = state.storage.get_cache_info().await.unwrap();
+        let info = state.storage.get_cache_info("alice").await.unwrap();
         assert_eq!(info.toc_cache_count, 0);
 
         cleanup(state, dir).await;
@@ -16256,7 +16282,7 @@ mod tests {
         let (state, dir) = test_state("searchapi").await;
         state
             .storage
-            .save_chapters(
+            .save_chapters("default",
                 "local://book1",
                 &[
                     (
@@ -16331,7 +16357,7 @@ mod tests {
         // 书源书（K4）：不再拒绝——走已缓存章节全文匹配（legacy searchChapter 语义）
         state
             .storage
-            .save_chapters(
+            .save_chapters("default",
                 "https://book.com/web",
                 &[(
                     "第一章".to_string(),
@@ -17254,7 +17280,7 @@ mod tests {
             .unwrap();
         state
             .storage
-            .save_chapters(
+            .save_chapters("default",
                 "local://abc",
                 &[
                     ("第一章".to_string(), "第一段内容".to_string()),
@@ -17822,7 +17848,7 @@ mod tests {
             .unwrap();
         state
             .storage
-            .save_chapters(
+            .save_chapters("default",
                 "local://exp1",
                 &[
                     ("第一章".to_string(), "正文一 <甲> & 乙。".to_string()),
@@ -18001,7 +18027,7 @@ mod tests {
             .unwrap();
         state
             .storage
-            .save_chapters(
+            .save_chapters("default",
                 "local://expfont",
                 &[("第一章".to_string(), "正文一。".to_string())],
             )
@@ -18366,7 +18392,7 @@ mod tests {
             .unwrap();
         state
             .storage
-            .save_chapters(
+            .save_chapters("default",
                 "local://gbk1",
                 &[("第一章".to_string(), "正文😀结束。".to_string())],
             )
@@ -18435,7 +18461,7 @@ mod tests {
             .unwrap();
         state
             .storage
-            .save_chapters(
+            .save_chapters("default",
                 "local://gbk2",
                 &[("第一章".to_string(), "纯中文正文。".to_string())],
             )
@@ -18778,7 +18804,7 @@ mod tests {
             .unwrap();
         state
             .storage
-            .save_chapters(
+            .save_chapters("default",
                 book_url,
                 &[
                     ("第一章".to_string(), "正文一".to_string()),
@@ -18802,11 +18828,11 @@ mod tests {
         assert!(ret.0.data["started"].as_bool().unwrap());
         // 等待完成
         assert!(
-            crate::service::cache_job::wait_finished(book_url, std::time::Duration::from_secs(5))
+            crate::service::cache_job::wait_finished("default", book_url, std::time::Duration::from_secs(5))
                 .await,
             "任务应在 5s 内完成"
         );
-        let p = crate::service::cache_job::progress_of(book_url).unwrap();
+        let p = crate::service::cache_job::progress_of("default", book_url).unwrap();
         let p = p.lock().unwrap_or_else(|e| e.into_inner());
         assert!(p.finished);
         assert_eq!(p.total, 2);
@@ -18834,7 +18860,7 @@ mod tests {
         assert!(body.contains("\"total\":2"), "{body}");
         assert!(body.contains("\"finished\":true"), "{body}");
 
-        // cancel：任务已完成但仍在表内 → true；再 cancel → false
+        // 已完成任务保留终态，不再声称取消了已结束的工作。
         let ret = cancel_cache_book(
             AxumState(state.clone()),
             Query(params.clone()),
@@ -18843,7 +18869,7 @@ mod tests {
         )
         .await;
         assert!(ret.0.is_success);
-        assert!(ret.0.data["cancelled"].as_bool().unwrap());
+        assert!(!ret.0.data["cancelled"].as_bool().unwrap());
         let ret = cancel_cache_book(
             AxumState(state.clone()),
             Query(params.clone()),
@@ -18948,11 +18974,11 @@ mod tests {
         .await;
         assert!(ret.0.is_success, "{}", ret.0.error_msg);
         assert!(
-            crate::service::cache_job::wait_finished(&book_url, std::time::Duration::from_secs(10))
+            crate::service::cache_job::wait_finished("default", &book_url, std::time::Duration::from_secs(10))
                 .await,
             "书源书缓存应在 10s 内完成"
         );
-        let p = crate::service::cache_job::progress_of(&book_url).unwrap();
+        let p = crate::service::cache_job::progress_of("default", &book_url).unwrap();
         let p = p.lock().unwrap_or_else(|e| e.into_inner());
         assert!(p.finished, "任务应结束");
         assert_eq!(p.total, 2);
@@ -18981,7 +19007,7 @@ mod tests {
             Some("正文二。")
         );
         // 清理任务表
-        crate::service::cache_job::cancel(&book_url);
+        crate::service::cache_job::cancel("default", &book_url).await;
         cleanup(state, dir).await;
     }
 
@@ -19005,7 +19031,7 @@ mod tests {
             .unwrap();
         state
             .storage
-            .save_chapters(
+            .save_chapters("default",
                 book_url,
                 &[
                     ("第一章".to_string(), "正文一".to_string()),
@@ -19033,11 +19059,11 @@ mod tests {
         .await;
         assert!(ret.0.is_success, "{}", ret.0.error_msg);
         let task_id = ret.0.data["taskId"].as_str().unwrap().to_string();
-        assert_eq!(task_id, "local://cache-range#1-2");
+        assert!(uuid::Uuid::parse_str(&task_id).is_ok());
         // 本地书任务立即结束（章节已在库）；轮询等待 finished
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            let p = crate::service::cache_job::progress_of_key(&task_id)
+            let p = crate::service::cache_job::progress_of_key("default", &task_id)
                 .map(|p| p.lock().unwrap_or_else(|e| e.into_inner()).clone());
             if let Some(p) = p {
                 if p.finished {
@@ -19098,7 +19124,7 @@ mod tests {
         assert_eq!(ret.0.error_msg, "缓存范围参数错误");
 
         // 清理任务表
-        crate::service::cache_job::cancel_key(&task_id);
+        crate::service::cache_job::cancel_key("default", &task_id).await;
         cleanup(state, dir).await;
     }
 
@@ -19122,7 +19148,7 @@ mod tests {
             .unwrap();
         state
             .storage
-            .save_chapters(
+            .save_chapters("default",
                 book_url,
                 &[
                     ("第一章".to_string(), "正文一".to_string()),
@@ -19143,10 +19169,10 @@ mod tests {
         .await;
         assert!(ret.0.is_success, "{}", ret.0.error_msg);
         let task_id = ret.0.data["taskId"].as_str().unwrap().to_string();
-        assert_eq!(task_id, "local://cache-range-json#0-1");
+        assert!(uuid::Uuid::parse_str(&task_id).is_ok());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            let p = crate::service::cache_job::progress_of_key(&task_id)
+            let p = crate::service::cache_job::progress_of_key("default", &task_id)
                 .map(|p| p.lock().unwrap_or_else(|e| e.into_inner()).clone());
             if let Some(p) = p {
                 if p.finished {
@@ -19159,7 +19185,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
 
-        crate::service::cache_job::cancel_key(&task_id);
+        crate::service::cache_job::cancel_key("default", &task_id).await;
         cleanup(state, dir).await;
     }
 
@@ -19366,7 +19392,7 @@ mod tests {
         assert_eq!(ret.0.data["totalChapterNum"], 2, "应返回新 totalChapterNum");
         assert_eq!(ret.0.data["name"], "刷新书");
         assert_eq!(
-            state.storage.list_chapters(&book_url).await.unwrap().len(),
+            state.storage.list_chapters("default", &book_url).await.unwrap().len(),
             2,
             "章节已重扫入库"
         );
@@ -19517,7 +19543,7 @@ mod tests {
         // 章节已入库
         let chapters = state
             .storage
-            .list_chapters(&scanned[0].book_url)
+            .list_chapters("default", &scanned[0].book_url)
             .await
             .unwrap();
         assert_eq!(chapters.len(), 2);
@@ -19581,7 +19607,7 @@ mod tests {
         }
         state
             .storage
-            .save_chapters("https://b.com/1", &[("第一章".into(), "正文".into())])
+            .save_chapters("default", "https://b.com/1", &[("第一章".into(), "正文".into())])
             .await
             .unwrap();
 
@@ -22397,7 +22423,7 @@ mod tests {
         assert_eq!(ret.0.data["migrated"], 1, "{}", ret.0.data);
         assert_eq!(ret.0.data["skipped"].as_array().unwrap().len(), 0);
         // 章节入库 + local_file 关联 + 原记录保留（origin 不变）
-        let chapters = state.storage.list_chapters(&book_url).await.unwrap();
+        let chapters = state.storage.list_chapters("default", &book_url).await.unwrap();
         assert_eq!(chapters.len(), 2, "章节应写入 DB");
         assert_eq!(chapters[0].1, "第一章 起点");
         let book = state
@@ -22451,7 +22477,7 @@ mod tests {
         .await;
         assert_eq!(ret.0.data["migrated"], 1);
         assert_eq!(
-            state.storage.list_chapters(&book_url).await.unwrap().len(),
+            state.storage.list_chapters("default", &book_url).await.unwrap().len(),
             2
         );
 
@@ -22510,7 +22536,7 @@ mod tests {
             ret.0.data
         );
         assert_eq!(
-            state.storage.list_chapters(&book_url2).await.unwrap().len(),
+            state.storage.list_chapters("default", &book_url2).await.unwrap().len(),
             1
         );
         cleanup(state, dir).await;
@@ -22778,7 +22804,7 @@ mod tests {
         let cbz_url = json["data"]["bookUrl"].as_str().unwrap().to_string();
         assert!(cbz_url.starts_with("local://"));
         assert_eq!(json["data"]["name"], "漫画", "书名用文件主名");
-        let rows = state.storage.list_chapters(&cbz_url).await.unwrap();
+        let rows = state.storage.list_chapters("default", &cbz_url).await.unwrap();
         let titles: Vec<String> = rows.iter().map(|(_, t)| t.clone()).collect();
         assert_eq!(
             titles,
@@ -22830,7 +22856,7 @@ mod tests {
         );
         assert_eq!(json["data"]["author"], "当年明月");
         let umd_url = json["data"]["bookUrl"].as_str().unwrap().to_string();
-        let rows = state.storage.list_chapters(&umd_url).await.unwrap();
+        let rows = state.storage.list_chapters("default", &umd_url).await.unwrap();
         assert_eq!(rows.len(), 7, "7 卷章节");
         assert_eq!(rows[0].1, "明朝那些事儿*壹");
         let content = state

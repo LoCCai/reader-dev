@@ -1,0 +1,20 @@
+{
+  "baseline": "7efd557",
+  "executed_actual_sql": [
+    "DELETE FROM toc_cache",
+    "DELETE FROM book_chapters"
+  ],
+  "before": {
+    "toc_cache": 2,
+    "book_chapters": 4
+  },
+  "after": {
+    "toc_cache": 0,
+    "book_chapters": 0
+  },
+  "confirmed": [
+    "statistics includes both users and local primary data",
+    "clearCache removes both users' cache",
+    "clearCache destroys local primary chapters"
+  ]
+}

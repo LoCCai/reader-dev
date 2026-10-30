@@ -1,0 +1,125 @@
+{
+  "environment": {
+    "proxyVariables": "removed",
+    "NO_PROXY": "127.0.0.1,localhost,::1",
+    "READER_CAMOUFOX_DISABLE": "1",
+    "READER_CAMOUFOX_SPAWN": "0"
+  },
+  "limitations": [
+    "Camoufox browser navigation, browser login and CAPTCHA solving were not executed; HTTP WebView fallback is covered."
+  ],
+  "results": [
+    {
+      "binary": "/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_advanced-c883e5a2a5c9c0a1",
+      "sha256": "bd3e33063cb4c4c1996550dadb9d2d2b9746aeee39a8240c0e1d273dc2687ecd",
+      "exitCode": 0,
+      "elapsedSeconds": 10.79,
+      "log": "/www/wwwroot/bot/QIQI/qq/github_git/reader-dev-audit-20261030/tests/audit/artifacts/backend-integration-final/e2e_advanced-c883e5a2a5c9c0a1.log",
+      "counts": {
+        "status": "ok",
+        "passed": "4",
+        "failed": "0",
+        "ignored": "0",
+        "measured": "0",
+        "filteredOut": "0"
+      },
+      "reportedSkips": []
+    },
+    {
+      "binary": "/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_audit_cache-2902d33b09fa02fc",
+      "sha256": "c58a46c60329656aa2941b447cfe8a243ecac54a35ce06dddc1c4d4ae56012b8",
+      "exitCode": 0,
+      "elapsedSeconds": 4.11,
+      "log": "/www/wwwroot/bot/QIQI/qq/github_git/reader-dev-audit-20261030/tests/audit/artifacts/backend-integration-final/e2e_audit_cache-2902d33b09fa02fc.log",
+      "counts": {
+        "status": "ok",
+        "passed": "4",
+        "failed": "0",
+        "ignored": "0",
+        "measured": "0",
+        "filteredOut": "0"
+      },
+      "reportedSkips": []
+    },
+    {
+      "binary": "/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_booksource-be7f662772893964",
+      "sha256": "b10af60c7c60465c573f9b7dbc213ed2eee1fe9334ba0e78a44692b551e5bd9e",
+      "exitCode": 0,
+      "elapsedSeconds": 1.44,
+      "log": "/www/wwwroot/bot/QIQI/qq/github_git/reader-dev-audit-20261030/tests/audit/artifacts/backend-integration-final/e2e_booksource-be7f662772893964.log",
+      "counts": {
+        "status": "ok",
+        "passed": "2",
+        "failed": "0",
+        "ignored": "0",
+        "measured": "0",
+        "filteredOut": "0"
+      },
+      "reportedSkips": []
+    },
+    {
+      "binary": "/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_bot_api-d5bf0124e5b3a5b9",
+      "sha256": "3b47ff93d8e6667a2358d8699d0c64a35ad91f4ea2a49097ed8350739c58a24f",
+      "exitCode": 0,
+      "elapsedSeconds": 54.46,
+      "log": "/www/wwwroot/bot/QIQI/qq/github_git/reader-dev-audit-20261030/tests/audit/artifacts/backend-integration-final/e2e_bot_api-d5bf0124e5b3a5b9.log",
+      "counts": {
+        "status": "ok",
+        "passed": "5",
+        "failed": "0",
+        "ignored": "0",
+        "measured": "0",
+        "filteredOut": "0"
+      },
+      "reportedSkips": []
+    },
+    {
+      "binary": "/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_health-9bae3e77bc101a96",
+      "sha256": "dbbdb6acaff6fafec6bf68293767367e0a04e2be420855847f6ecc5b3c9e4458",
+      "exitCode": 0,
+      "elapsedSeconds": 3.61,
+      "log": "/www/wwwroot/bot/QIQI/qq/github_git/reader-dev-audit-20261030/tests/audit/artifacts/backend-integration-final/e2e_health-9bae3e77bc101a96.log",
+      "counts": {
+        "status": "ok",
+        "passed": "3",
+        "failed": "0",
+        "ignored": "0",
+        "measured": "0",
+        "filteredOut": "0"
+      },
+      "reportedSkips": []
+    },
+    {
+      "binary": "/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_source_features-d9af0c4fddfce63c",
+      "sha256": "c1b76d54d217829a6cbef144c897d57efeaa5c059e445cce43b6e6226ee0ebf3",
+      "exitCode": 0,
+      "elapsedSeconds": 1.06,
+      "log": "/www/wwwroot/bot/QIQI/qq/github_git/reader-dev-audit-20261030/tests/audit/artifacts/backend-integration-final/e2e_source_features-d9af0c4fddfce63c.log",
+      "counts": {
+        "status": "ok",
+        "passed": "4",
+        "failed": "0",
+        "ignored": "0",
+        "measured": "0",
+        "filteredOut": "0"
+      },
+      "reportedSkips": []
+    },
+    {
+      "binary": "/tmp/reader-dev-audit-target-20261030/debug/deps/e2e_sse-3cf3e6600f4be359",
+      "sha256": "ea34df50be24a62fff8cfce2f7506277db6702202eb120f4592fd27aa140eccd",
+      "exitCode": 0,
+      "elapsedSeconds": 3.66,
+      "log": "/www/wwwroot/bot/QIQI/qq/github_git/reader-dev-audit-20261030/tests/audit/artifacts/backend-integration-final/e2e_sse-3cf3e6600f4be359.log",
+      "counts": {
+        "status": "ok",
+        "passed": "1",
+        "failed": "0",
+        "ignored": "0",
+        "measured": "0",
+        "filteredOut": "0"
+      },
+      "reportedSkips": []
+    }
+  ]
+}

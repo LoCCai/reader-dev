@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getBookContent } from '@/api/books'
 import { cacheBookRangeOnServer, cacheBookSSE, cancelCacheBook } from '@/api/cacheBook'
-import { saveLocalChapter } from '@/utils/readerLocalCache'
+import { localCacheOwner, saveLocalChapter } from '@/utils/readerLocalCache'
 import type { BookChapter } from '@/types'
 
 interface Props {
@@ -48,13 +48,21 @@ const cached = ref(0)
 const total = ref(0)
 const msg = ref('')
 const msgError = ref(false)
-let sseHandle: { close: () => void } | null = null
-let cancelLocal = false
-/** 最近一次服务端缓存任务标识（taskId 优先，缺省回退 bookUrl）——SSE 断线后重订阅用 */
-let lastTaskKey = ''
-let lastTaskKeyIsId = false
-/** 断线重订阅时的进度范围快照（done 事件回传用） */
-let lastRange: { f: number; t: number } | null = null
+interface CacheRun {
+  bookUrl: string
+  origin: string
+  owner: string
+  from: number
+  to: number
+  cancelled: boolean
+  terminal: boolean
+  taskKey: string
+  taskKeyIsId: boolean
+  cancelSent: boolean
+  connection: number
+  handle: { close: () => void } | null
+}
+let activeRun: CacheRun | null = null
 /** 进度连接中断（任务仍在服务端后台跑）：显示「重新连接进度」入口 */
 const streamDropped = ref(false)
 
@@ -84,7 +92,8 @@ const percent = computed(() => {
 const serverDisabled = computed(() => direction.value === 'server' && !props.allowServer)
 
 function reset() {
-  direction.value = 'server'
+  stopRun()
+  direction.value = props.allowServer ? 'server' : 'local'
   scope.value = props.defaultScope
   rangeFrom.value = props.defaultFrom
   rangeTo.value = chapterCount.value || 1
@@ -94,10 +103,6 @@ function reset() {
   total.value = 0
   msg.value = ''
   msgError.value = false
-  cancelLocal = false
-  lastTaskKey = ''
-  lastTaskKeyIsId = false
-  lastRange = null
   streamDropped.value = false
 }
 
@@ -113,15 +118,47 @@ watch(
       reset()
       document.body.style.overflow = 'hidden'
     } else {
+      stopRun()
       document.body.style.overflow = ''
     }
   },
 )
 
+watch(() => props.bookUrl, () => {
+  stopRun()
+  busy.value = false
+  emit('update:modelValue', false)
+})
+
 onBeforeUnmount(() => {
-  if (sseHandle) sseHandle.close()
+  stopRun()
   document.body.style.overflow = ''
 })
+
+function isActive(run: CacheRun): boolean {
+  return activeRun === run && !run.cancelled && !run.terminal
+}
+
+function cancelServerRun(run: CacheRun) {
+  if (!run.taskKey || run.cancelSent || run.terminal) return
+  run.cancelSent = true
+  void cancelCacheBook(run.taskKey, run.taskKeyIsId).catch(() => {
+    if (activeRun === run && props.modelValue) {
+      msg.value = '取消请求失败，请稍后检查服务器缓存任务'
+      msgError.value = true
+    }
+  })
+}
+
+function stopRun() {
+  const run = activeRun
+  if (!run) return
+  run.cancelled = true
+  run.connection++
+  run.handle?.close()
+  run.handle = null
+  cancelServerRun(run)
+}
 
 function fail(text: string) {
   busy.value = false
@@ -142,142 +179,160 @@ function start() {
   streamDropped.value = false
   const f = from.value
   const t = to.value
-  if (direction.value === 'server') void startServer(f, t)
-  else void startLocal(f, t)
+  stopRun()
+  const run: CacheRun = {
+    bookUrl: props.bookUrl, origin: props.origin, owner: localCacheOwner(), from: f, to: t,
+    cancelled: false, terminal: false, taskKey: '', taskKeyIsId: false,
+    cancelSent: false, connection: 0, handle: null,
+  }
+  activeRun = run
+  if (direction.value === 'server') void startServer(run)
+  else void startLocal(run)
 }
 
-async function startServer(f: number, t: number) {
+async function startServer(run: CacheRun) {
   try {
-    const res = await cacheBookRangeOnServer(props.bookUrl, f - 1, t - 1)
+    const res = await cacheBookRangeOnServer(run.bookUrl, run.from - 1, run.to - 1)
     if (!res.isSuccess) throw new Error(res.errorMsg || '缓存启动失败')
     const start = res.data
-    cached.value = start?.cached ?? 0
-    total.value = start?.total ?? t - f + 1
     const taskId = start?.taskId
-    lastTaskKey = taskId || props.bookUrl
-    lastTaskKeyIsId = !!taskId
-    lastRange = { f, t }
-    sseHandle = await subscribeProgress(lastTaskKey, lastTaskKeyIsId)
+    run.taskKey = taskId || run.bookUrl
+    run.taskKeyIsId = !!taskId
+    // The POST may finish after cancellation or after another book opens.
+    if (!isActive(run)) {
+      cancelServerRun(run)
+      return
+    }
+    cached.value = start?.cached ?? 0
+    total.value = start?.total ?? run.to - run.from + 1
+    await subscribeProgress(run)
   } catch (err) {
-    fail(`缓存失败：${err instanceof Error ? err.message : '请稍后重试'}`)
+    if (!isActive(run)) return
+    if (run.taskKey) {
+      msg.value = '进度连接失败，任务仍在后台运行，可重新连接进度'
+      streamDropped.value = true
+    } else {
+      run.terminal = true
+      fail(`缓存失败：${err instanceof Error ? err.message : '请稍后重试'}`)
+    }
   }
 }
 
 /** 订阅服务端进度流（启动与断线重订阅共用；cacheBookSSE 支持 taskId 精确订阅） */
-async function subscribeProgress(
-  key: string,
-  isTaskId: boolean,
-): Promise<{ close: () => void }> {
-  const f = lastRange?.f ?? from.value
-  const t = lastRange?.t ?? to.value
-  return cacheBookSSE(key, {
+async function subscribeProgress(run: CacheRun): Promise<void> {
+  const connection = ++run.connection
+  const current = () => isActive(run) && run.connection === connection
+  const handle = await cacheBookSSE(run.taskKey, {
     onProgress: (p) => {
+      if (!current()) return
       // 收到进度帧即视为连接恢复
       streamDropped.value = false
       if (typeof p.cached === 'number') cached.value = p.cached
       if (typeof p.total === 'number') total.value = p.total
       if (p.cancelled) {
+        run.terminal = true
         busy.value = false
         msg.value = '缓存已取消'
       } else if (p.error) {
+        run.terminal = true
         fail(`缓存失败：${p.error}`)
       } else if (p.finished) {
+        run.terminal = true
         busy.value = false
         finished.value = true
         msg.value = `已缓存到服务器（${cached.value}/${total.value} 章）`
-        emit('done', { direction: 'server', from: f, to: t, saved: cached.value })
+        emit('done', { direction: 'server', from: run.from, to: run.to, saved: cached.value })
       }
     },
     onEnd: () => {
-      streamDropped.value = false
-      if (busy.value && !msg.value) {
-        busy.value = false
-        finished.value = true
-        msg.value = `已缓存到服务器（${cached.value}/${total.value} 章）`
-        emit('done', { direction: 'server', from: f, to: t, saved: cached.value })
-      }
+      if (!current()) return
+      // EOF only describes the connection; completion requires a finished frame.
+      msg.value = '进度连接已结束，尚未确认任务完成，请重新连接进度'
+      msgError.value = false
+      streamDropped.value = true
     },
     onStreamError: (m) => {
       // SSE 断线 ≠ 缓存失败：任务仍在服务端后台运行——中性提示并提供 taskId 重订阅入口
-      if (!busy.value) return
+      if (!current()) return
       msg.value = `进度连接中断（${m}），任务仍在后台运行`
       msgError.value = false
       streamDropped.value = true
     },
-  }, isTaskId)
+  }, run.taskKeyIsId)
+  if (!current()) handle.close()
+  else run.handle = handle
 }
 
 /** 断线后重新订阅进度（key=taskId 优先，cacheBook.ts 契约） */
 async function resubscribeProgress() {
-  if (!lastTaskKey || !busy.value) return
+  const run = activeRun
+  if (!run || !isActive(run) || !run.taskKey || !busy.value) return
   msg.value = '正在重新连接进度…'
   msgError.value = false
   try {
-    sseHandle?.close()
-    sseHandle = await subscribeProgress(lastTaskKey, lastTaskKeyIsId)
+    run.handle?.close()
+    await subscribeProgress(run)
   } catch {
+    if (!isActive(run)) return
     // 重连失败：任务仍在后台，保留重试入口
     msg.value = '重连进度失败，任务仍在后台运行，可再试'
   }
 }
 
-async function startLocal(f: number, t: number) {
-  if (!props.origin) {
+async function startLocal(run: CacheRun) {
+  if (!run.origin) {
+    run.terminal = true
     fail('缺少书源信息，无法拉取正文')
     return
   }
-  cancelLocal = false
-  const selected = props.chapters.slice(f - 1, t).map((ch, i) => ({
+  const selected = props.chapters.slice(run.from - 1, run.to).map((ch, i) => ({
     ch,
-    index: f - 1 + i,
+    index: run.from - 1 + i,
   }))
   total.value = selected.length
   cached.value = 0
   let cursor = 0
   let saved = 0
   const worker = async () => {
-    while (!cancelLocal) {
+    while (isActive(run)) {
       const item = selected[cursor++]
       if (!item) return
       try {
-        const res = await getBookContent(item.ch.url, props.origin || '')
+        const res = await getBookContent(item.ch.url, run.origin, { bookUrl: run.bookUrl })
+        if (!isActive(run)) return
         const text = res.data?.content ?? ''
-        if (text) {
-          await saveLocalChapter({
-            bookUrl: props.bookUrl,
+        if (res.isSuccess && text) {
+          const stored = await saveLocalChapter({
+            bookUrl: run.bookUrl,
+            owner: run.owner,
             chapterUrl: item.ch.url,
             title: item.ch.title,
             index: item.index,
             content: text,
           })
-          saved++
+          if (!isActive(run)) return
+          if (stored) saved++
         }
       } catch {
         // 单章失败不中断整批（与服务器任务口径一致）
       }
-      cached.value = saved
+      if (isActive(run)) cached.value = saved
     }
   }
   await Promise.all(Array.from({ length: Math.min(3, selected.length) }, () => worker()))
-  if (cancelLocal) {
-    busy.value = false
-    msg.value = '已取消'
-    return
-  }
+  if (!isActive(run)) return
+  run.terminal = true
   busy.value = false
-  finished.value = true
-  msg.value = `已保存到本机缓存 ${saved} 章`
-  emit('done', { direction: 'local', from: f, to: t, saved })
+  const failed = selected.length - saved
+  finished.value = failed === 0
+  msgError.value = failed > 0
+  msg.value = `已保存到本机缓存 ${saved}/${selected.length} 章${failed ? `，${failed} 章失败（正文获取或本机存储失败）` : ''}`
+  if (saved > 0) emit('done', { direction: 'local', from: run.from, to: run.to, saved })
 }
 
 function cancel() {
   if (!busy.value) return
-  if (sseHandle) {
-    sseHandle.close()
-    sseHandle = null
-    void cancelCacheBook(props.bookUrl, false).catch(() => {})
-  }
-  cancelLocal = true
+  stopRun()
   busy.value = false
   msg.value = '已取消'
   msgError.value = false

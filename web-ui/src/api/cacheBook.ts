@@ -80,12 +80,14 @@ export interface ServerCachedChapters {
   url: string
   chapters: ServerCachedChapter[]
   hasMore: boolean
+  nextFrom?: number | null
 }
 
 export function getBookCacheChapters(
   url: string,
+  range?: { from?: number; to?: number },
 ): Promise<ReturnData<ServerCachedChapters>> {
-  return get<ServerCachedChapters>('/getBookCacheChapters', { url }, { silent: true })
+  return get<ServerCachedChapters>('/getBookCacheChapters', { url, ...range }, { silent: true })
 }
 
 function tryJson(s: string): unknown {

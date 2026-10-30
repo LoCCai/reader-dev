@@ -1,0 +1,94 @@
+TAP version 13
+# Subtest: P2 backendDown 复位：注册的回调在 notifyBackendReachable 时全部触发
+ok 1 - P2 backendDown 复位：注册的回调在 notifyBackendReachable 时全部触发
+  ---
+  duration_ms: 1.403914
+  type: 'test'
+  ...
+# Subtest: clearBackendReachableHooks 后通知为空操作
+ok 2 - clearBackendReachableHooks 后通知为空操作
+  ---
+  duration_ms: 0.129802
+  type: 'test'
+  ...
+# Subtest: GAP 81：parseSSEBlock 解析 event:/data: 块（兼容 CRLF 与 data 前导空格）
+ok 3 - GAP 81：parseSSEBlock 解析 event:/data: 块（兼容 CRLF 与 data 前导空格）
+  ---
+  duration_ms: 1.341008
+  type: 'test'
+  ...
+# Subtest: GAP 81：dispatchSSEBlock 分发 book/end/error 事件
+ok 4 - GAP 81：dispatchSSEBlock 分发 book/end/error 事件
+  ---
+  duration_ms: 0.710424
+  type: 'test'
+  ...
+# Subtest: GAP 81：dispatchSSEBlock 容错——坏 JSON 忽略、end 坏 JSON 兜底 onEnd(-1,false)、error 无 JSON 结构兜底文案
+ok 5 - GAP 81：dispatchSSEBlock 容错——坏 JSON 忽略、end 坏 JSON 兜底 onEnd(-1,false)、error 无 JSON 结构兜底文案
+  ---
+  duration_ms: 0.203618
+  type: 'test'
+  ...
+# Subtest: legacy 对齐：dispatchSSEBlock 无名 data 事件（onmessage）按 book 分发
+ok 6 - legacy 对齐：dispatchSSEBlock 无名 data 事件（onmessage）按 book 分发
+  ---
+  duration_ms: 0.143683
+  type: 'test'
+  ...
+# Subtest: GAP 81：consumeSSEStream 按空行切块并跨 chunk 拼接
+ok 7 - GAP 81：consumeSSEStream 按空行切块并跨 chunk 拼接
+  ---
+  duration_ms: 1.857064
+  type: 'test'
+  ...
+# Subtest: GAP 81：consumeSSEStream 用户取消不触发 onStreamError
+ok 8 - GAP 81：consumeSSEStream 用户取消不触发 onStreamError
+  ---
+  duration_ms: 0.376496
+  type: 'test'
+  ...
+# Subtest: P2 SSE 统一：consumeSSEStreamBlocks 按块回调 + 跨 chunk 拼接（cacheBook/sourceDebug 共用）
+ok 9 - P2 SSE 统一：consumeSSEStreamBlocks 按块回调 + 跨 chunk 拼接（cacheBook/sourceDebug 共用）
+  ---
+  duration_ms: 0.433817
+  type: 'test'
+  ...
+# Subtest: P2 SSE 统一：consumeSSEStreamBlocks 连接中断回调 onStreamError；用户取消静默
+ok 10 - P2 SSE 统一：consumeSSEStreamBlocks 连接中断回调 onStreamError；用户取消静默
+  ---
+  duration_ms: 0.403416
+  type: 'test'
+  ...
+# Subtest: P2 v-lazy 闭包过期：绑定值在 intersect 前变化 → 回调加载最新值（非旧闭包值）
+ok 11 - P2 v-lazy 闭包过期：绑定值在 intersect 前变化 → 回调加载最新值（非旧闭包值）
+  ---
+  duration_ms: 1.168479
+  type: 'test'
+  ...
+# Subtest: P2 v-lazy：intersect 后已加载，updated 换图直接生效（保留 is-loaded）
+ok 12 - P2 v-lazy：intersect 后已加载，updated 换图直接生效（保留 is-loaded）
+  ---
+  duration_ms: 0.223039
+  type: 'test'
+  ...
+# Subtest: P2 v-lazy：mounted 未加载时 updated 仅记录最新值，不提前设 src
+ok 13 - P2 v-lazy：mounted 未加载时 updated 仅记录最新值，不提前设 src
+  ---
+  duration_ms: 0.258351
+  type: 'test'
+  ...
+# Subtest: v-lazy：unmounted 断开 observer；空 src 不创建 observer
+ok 14 - v-lazy：unmounted 断开 observer；空 src 不创建 observer
+  ---
+  duration_ms: 0.200239
+  type: 'test'
+  ...
+1..14
+# tests 14
+# suites 0
+# pass 14
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 113.657294

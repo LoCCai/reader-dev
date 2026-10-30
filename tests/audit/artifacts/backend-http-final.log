@@ -1,0 +1,9 @@
+
+running 4 tests
+test audit_r1_clear_cache_scopes_users_and_preserves_primary_local_content ... ok
+test audit_r2_cancellation_during_inflight_fetch_does_not_write_and_is_user_scoped ... ok
+test audit_r2_expired_toc_hash_rows_page_and_export_in_directory_order ... ok
+test audit_r3_original_epub_file_requires_shelf_and_own_namespace_path ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.44s
+

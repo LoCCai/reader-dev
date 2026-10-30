@@ -21,7 +21,7 @@ import { getTtsVoices, synthesizeTts, type TtsVoice } from '@/api/tts'
 import EpubIframe from '@/components/EpubIframe.vue'
 import { loadEpubDoc, destroyEpubDoc, type EpubDoc } from '@/utils/epubLoader'
 import { getCachedTts, putCachedTts, ttsCacheKey } from '@/utils/ttsCache'
-import { getLocalChapter, listLocalChapterUrls, saveLocalChapter } from '@/utils/readerLocalCache'
+import { getLocalChapter, listLocalChapterUrls, localCacheOwner, saveLocalChapter } from '@/utils/readerLocalCache'
 import {
   loadCustomFont,
   removeCustomFont,
@@ -160,9 +160,10 @@ type EpubMode = 'text' | 'html' | 'raw'
 const EPUB_MODE_KEY = 'reader_epub_mode'
 function loadEpubMode(): EpubMode {
   const v = localStorage.getItem(EPUB_MODE_KEY)
-  return v === 'html' || v === 'raw' ? (v as EpubMode) : 'text'
+  return v === 'html' || v === 'raw' || v === 'text' ? v : epubHtmlMode.value ? 'html' : 'text'
 }
 const epubMode = ref<EpubMode>(loadEpubMode())
+epubHtmlMode.value = epubMode.value === 'html'
 watch(epubMode, (v) => {
   persist(EPUB_MODE_KEY, v)
   // 兼容旧开关语义：html 态同步旧键，其余态复位
@@ -178,15 +179,32 @@ const epubRawActive = computed(() => isEpubBook.value && epubMode.value === 'raw
 /** 已加载的 EPUB 文档（懒加载：进入 raw 模式才拉取解析） */
 const epubDoc = shallowRef<EpubDoc | null>(null)
 const epubDocLoading = ref(false)
+const epubDocError = ref('')
+let epubDocRequest = 0
 async function ensureEpubDoc(): Promise<void> {
   if (!isEpubBook.value || epubDoc.value || epubDocLoading.value) return
+  const request = ++epubDocRequest
+  const url = bookUrl.value
+  const owner = localCacheOwner()
   epubDocLoading.value = true
+  epubDocError.value = ''
   try {
-    epubDoc.value = await loadEpubDoc(bookUrl.value)
+    const user = useUserStore()
+    const doc = await loadEpubDoc(url, {
+      accessToken: user.accessToken,
+      namespace: user.isAdmin && user.defaultConfigMode ? 'default' : undefined,
+    })
+    if (request !== epubDocRequest || url !== bookUrl.value || owner !== localCacheOwner()) {
+      destroyEpubDoc(doc)
+      return
+    }
+    epubDoc.value = doc
   } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : 'EPUB 加载失败')
+    if (request !== epubDocRequest) return
+    epubDocError.value = e instanceof Error ? e.message : 'EPUB 加载失败'
+    ElMessage.error(epubDocError.value)
   } finally {
-    epubDocLoading.value = false
+    if (request === epubDocRequest) epubDocLoading.value = false
   }
 }
 watch(epubRawActive, (on) => {
@@ -234,11 +252,16 @@ function chapterPlainText(): string {
 }
 /** D2：任意 HTML 文本 → 纯文本（chapterPlainText 的入参版——本机缓存 HTML 降级复用） */
 function chapterHtmlToPlain(html: string): string {
-  return html
+  const spaced = html
     .replace(/<(style|script)[\s\S]*?<\/\1>/gi, ' ')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/(?:p|div|h[1-6]|li|tr|blockquote)>/gi, '\n')
-    .replace(/<[^>]*>/g, '')
+  if (typeof DOMParser !== 'undefined') {
+    return (new DOMParser().parseFromString(spaced, 'text/html').body.textContent || '')
+      .replace(/\n{3,}/g, '\n\n').trim()
+  }
+  return spaced.replace(/<[^>]*>/g, '')
+    .replace(/&(nbsp|amp|lt|gt|quot|apos);/g, (_m, name: string) => ({ nbsp: ' ', amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" })[name] || '')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
 }
@@ -249,11 +272,20 @@ const EPUB_MODE_LABELS: Record<EpubMode, string> = {
   html: '净化排版',
   raw: '原版排版',
 }
-function cycleEpubMode(): void {
+async function cycleEpubMode(): Promise<void> {
   if (!isEpubBook.value) return
   const order: EpubMode[] = ['text', 'html', 'raw']
   const i = order.indexOf(epubMode.value)
-  epubMode.value = order[(i + 1) % order.length]!
+  await changeEpubMode(order[(i + 1) % order.length]!)
+}
+
+async function changeEpubMode(mode: EpubMode): Promise<void> {
+  epubMode.value = mode
+  epubHtmlMode.value = mode === 'html'
+  closeChapterSearch()
+  const ch = currentChapter.value
+  if (ch) await loadContent(ch.url)
+  if (mode === 'raw') await ensureEpubDoc()
 }
 
 /* ---------------- 1. 主题（亮/暗/暖/跟随系统/自定义） ---------------- */
@@ -1172,6 +1204,7 @@ async function saveEditChapter() {
   const ch = currentChapter.value
   if (!ch || editSaving.value) return
   const newContent = editText.value
+  const owner = localCacheOwner()
   if (!newContent.trim()) {
     ElMessage.warning('正文不能为空')
     return
@@ -1185,6 +1218,7 @@ async function saveEditChapter() {
       content: newContent,
     })
     await saveLocalChapter({
+      owner,
       bookUrl: bookUrl.value,
       chapterUrl: ch.url,
       title: ch.title,
@@ -1434,7 +1468,13 @@ let flashTimer: number | undefined
 /** 单段命中上限（防超长段死循环） */
 const SEARCH_MAX_PER_PARA = 500
 
-function openChapterSearch() {
+async function openChapterSearch() {
+  if (loading.value || loadError.value) return
+  if (epubHtmlActive.value || epubRawActive.value) {
+    await changeEpubMode('text')
+    if (loadError.value) return
+    ElMessage.info('已切换纯文本排版，搜索当前章正文')
+  }
   searchKeyword.value = ''
   searchSearched.value = false
   paraMatchCounts.value = []
@@ -2573,7 +2613,7 @@ function searchSelection() {
 /* ---------------- GAP 124：复制本章（navigator.clipboard 全文；失败回退 execCommand；提示字数） ---------------- */
 
 async function copyChapter() {
-  const text = paragraphs.value.length > 0 ? paragraphs.value.join('\n') : chapterPlainText()
+  const text = chapterCopyText.value
   if (!text) {
     ElMessage.info('本章暂无内容可复制')
     return
@@ -2664,16 +2704,20 @@ function preloadNextChapterImages() {
   const next = realChapters.value[fi + 1]
   if (preloadedChapters.has(next.url)) return
   preloadedChapters.add(next.url)
+  const url = bookUrl.value
+  const owner = localCacheOwner()
   void getBookContent(next.url, shelfBook.value.origin, {
     timeout: chapterTimeout.value * 1000,
-    bookUrl: bookUrl.value,
+    bookUrl: url,
   })
     .then(async (res) => {
+      if (owner !== localCacheOwner() || url !== bookUrl.value) return
       const content = res.data?.content ?? ''
       if (content) {
         // 预读正文落本机缓存（翻章免抓取免等待）
         await saveLocalChapter({
-          bookUrl: bookUrl.value,
+          bookUrl: url,
+          owner,
           chapterUrl: next.url,
           title: next.title,
           index: fi + 1,
@@ -2750,6 +2794,7 @@ const paragraphs = computed(() =>
     .filter(Boolean)
     .map((p) => applyReplace(hanConvert(p))),
 )
+const chapterCopyText = computed(() => epubHtmlActive.value ? chapterPlainText() : paragraphs.value.join('\n'))
 
 /* ---------------- GAP 155：长章分段渲染（>200 段按 200 段/块渐进渲染——滚动到底加载下一块，防超长章 DOM 过大） ---------------- */
 
@@ -2837,20 +2882,38 @@ const drawerChapters = computed(() => {
 
 /** 已缓存章标记（服务器 book_chapters + 本机 IndexedDB 的实章索引；0 基） */
 const cachedChapterIndexes = ref<Set<number>>(new Set())
+let cacheMarkersSeq = 0
 async function loadCacheMarkers() {
+  const seq = ++cacheMarkersSeq
+  const url = bookUrl.value
+  const owner = localCacheOwner()
+  const toc = chapters.value
+  const realToRaw = toc.flatMap((ch, index) => ch.isVolume ? [] : [index])
+  const current = () => seq === cacheMarkersSeq && url === bookUrl.value && owner === localCacheOwner()
   const set = new Set<number>()
   try {
-    const res = await getBookCacheChapters(bookUrl.value)
-    for (const ch of res.data?.chapters ?? []) {
-      if (typeof ch.index === 'number') set.add(ch.index)
+    let from = 0
+    for (;;) {
+      const res = await getBookCacheChapters(url, { from })
+      if (!current()) return
+      const rows = res.data?.chapters ?? []
+      for (const ch of rows) {
+        const rawIndex = realToRaw[ch.index]
+        if (typeof rawIndex === 'number') set.add(rawIndex)
+      }
+      if (!res.data?.hasMore || !rows.length) break
+      const next = res.data.nextFrom ?? Math.max(...rows.map((ch) => ch.index)) + 1
+      if (!Number.isSafeInteger(next) || next <= from) break
+      from = next
     }
   } catch {
     /* 服务器缓存接口未就绪/未入架——忽略，仍显示本机缓存 */
   }
   try {
-    const urls = await listLocalChapterUrls(bookUrl.value)
+    const urls = await listLocalChapterUrls(url)
+    if (!current()) return
     const byUrl = new Map<string, number>()
-    chapters.value.forEach((c, idx) => {
+    toc.forEach((c, idx) => {
       if (!c.isVolume) byUrl.set(c.url, idx)
     })
     for (const u of urls) {
@@ -2860,7 +2923,7 @@ async function loadCacheMarkers() {
   } catch {
     /* IndexedDB 不可用——忽略 */
   }
-  cachedChapterIndexes.value = set
+  if (current()) cachedChapterIndexes.value = set
 }
 
 /* ---------------- 目录卷折叠（点击卷标题折叠/展开；localStorage reader_toc_collapsed {volTitle: bool}） ---------------- */
@@ -3060,6 +3123,7 @@ let contentLoadSeq = 0
 async function loadContent(chapterUrl: string) {
   if (!shelfBook.value?.origin) return
   const seq = ++contentLoadSeq
+  const owner = localCacheOwner()
   loading.value = true
   loadError.value = false
   content.value = ''
@@ -3081,7 +3145,7 @@ async function loadContent(chapterUrl: string) {
     } else {
       // 本机缓存优先；未命中再走服务器缓存/书源（getBookContent 命中服务器缓存，未命中自动抓取并写回）
       // B4：携带 bookUrl——服务端按书键写正文缓存（legacy 语义；epubContent 模式不带，防 HTML 污染纯文本缓存）
-      const local = await getLocalChapter(bookUrl.value, chapterUrl)
+      const local = await getLocalChapter(bookUrl.value, chapterUrl, owner)
       if (seq !== contentLoadSeq) return
       text = local?.content ?? ''
       // D2：EPUB 书在 HTML 模式编辑保存过 → 本机缓存是 HTML——纯文本模式读取时
@@ -3104,6 +3168,7 @@ async function loadContent(chapterUrl: string) {
         const ch = currentChapter.value
         if (ch && text) {
           void saveLocalChapter({
+            owner,
             bookUrl: bookUrl.value,
             chapterUrl,
             title: ch.title,
@@ -4212,9 +4277,12 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  epubDocRequest++
   if (epubDoc.value) destroyEpubDoc(epubDoc.value)
 })
 onBeforeUnmount(() => {
+  contentLoadSeq++
+  cacheMarkersSeq++
   mediaQuery?.removeEventListener('change', onSystemThemeChange)
   window.removeEventListener('scroll', onScroll)
   window.removeEventListener('resize', onResize)
@@ -4402,14 +4470,14 @@ onBeforeUnmount(() => {
         <button v-if="isTextBook" class="font-btn" type="button" :title="t('reader.bookmarksTip')" @click="openBookmarks">
           {{ t('reader.bookmarks') }}
         </button>
-        <button v-if="isTextBook" class="font-btn" type="button" :title="t('reader.searchChapterTip')" @click="openChapterSearch">
+        <button v-if="isTextBook" class="font-btn" type="button" :disabled="loading || loadError" :title="epubHtmlActive || epubRawActive ? '切换纯文本排版后搜索当前章' : t('reader.searchChapterTip')" @click="openChapterSearch">
           {{ t('reader.searchChapter') }}
         </button>
         <button
           v-if="isTextBook"
           class="font-btn"
           type="button"
-          :disabled="loading || loadError || paragraphs.length === 0"
+          :disabled="loading || loadError || !chapterCopyText"
           :title="t('reader.copyChapterTip')"
           @click="copyChapter"
         >
@@ -4457,6 +4525,14 @@ onBeforeUnmount(() => {
         >
           缓存
         </button>
+        <button
+          v-if="isTextBook"
+          class="font-btn"
+          type="button"
+          :disabled="!shelfBook || !!shelfBook.isTemp"
+          :title="shelfBook?.isTemp ? '加入书架后可导出本书' : '打开本书全部章节导出（TXT / EPUB / HTML）'"
+          @click="router.push({ path: `/book/${encodeURIComponent(bookUrl)}`, query: { action: 'export' } })"
+        >导出</button>
         <button class="toc-btn" type="button" :title="t('reader.tocTip')" @click="drawerOpen = true">
           {{ t('reader.toc') }}
         </button>
@@ -4511,6 +4587,10 @@ onBeforeUnmount(() => {
           </div>
           <div v-else-if="epubRawActive && epubDocLoading" class="state">
             <p class="state-text">EPUB 加载中…</p>
+          </div>
+          <div v-else-if="epubRawActive && epubDocError" class="state">
+            <p class="state-text">{{ epubDocError }}</p>
+            <button class="retry-btn" type="button" @click="ensureEpubDoc">重试原版文件</button>
           </div>
 
           <!-- EPUB 原书排版：净化后整章 HTML 渲染（getBookContent epubContent=1） -->

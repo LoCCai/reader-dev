@@ -133,6 +133,19 @@ let sseAbort: (() => void) | null = null
 let batchAbort: AbortController | null = null
 /** 搜索代数：取消/停止后使在途 SSE/批量响应失效 */
 let searchSeq = 0
+let streamRequestSeq = 0
+interface SearchScope {
+  key: string
+  bookSourceGroup: string
+  bookSourceUrl: string
+  exact: boolean
+  concurrentCount: number
+}
+let activeScope: SearchScope | null = null
+const searchedKey = ref('')
+const sseLastIndex = ref(-1)
+const sseExhausted = ref(false)
+const searchExhausted = computed(() => usingSSE.value ? sseExhausted.value : batchExhausted.value)
 
 /* ================= GAP 100：搜索分页（批量模式逐页「加载更多」；SSE 已全量则提示已全部） ================= */
 
@@ -189,6 +202,8 @@ async function doSearch(kw?: string) {
   key.value = word
   suggestOpen.value = false // 开始搜索时收起联想
   const seq = ++searchSeq
+  sseAbort?.()
+  batchAbort?.abort()
   sseAbort = null
   batchAbort = null
   searching.value = true
@@ -203,45 +218,66 @@ async function doSearch(kw?: string) {
   batchPage.value = 1
   batchExhausted.value = false
   batchLoadingMore.value = false
+  sseLastIndex.value = -1
+  sseExhausted.value = false
+  const scope: SearchScope = {
+    key: word, bookSourceGroup: activeSearchGroup.value,
+    bookSourceUrl: singleSourceUrl.value, exact: exact.value,
+    concurrentCount: searchConcurrent.value,
+  }
+  activeScope = scope
+  searchedKey.value = word
 
-  // 1) 优先 SSE 流式搜索（增量显示）
+  await runStream(scope, seq)
+}
+
+async function runStream(scope: SearchScope, seq: number) {
+  sseAbort?.()
+  sseAbort = null
+  const request = ++streamRequestSeq
+  const current = () => seq === searchSeq && request === streamRequestSeq
   try {
     const handle = await searchBookMultiSSE(
       {
-        key: word,
-        bookSourceGroup: activeSearchGroup.value,
-        bookSourceUrl: singleSourceUrl.value || undefined,
-        lastIndex: -1,
+        key: scope.key,
+        bookSourceGroup: scope.bookSourceGroup,
+        bookSourceUrl: scope.bookSourceUrl || undefined,
+        lastIndex: sseLastIndex.value,
         searchSize: 50,
-        concurrentCount: searchConcurrent.value,
-        exact: exact.value,
+        concurrentCount: scope.concurrentCount,
+        exact: scope.exact,
       },
       {
         onBooks: (lastIndex, books) => {
-          if (seq !== searchSeq) return
+          if (!current()) return
           if (lastIndex >= 0) completedSources.add(lastIndex)
           searchedSources.value = completedSources.size
           mergeBooks(books)
         },
-        onEnd: () => {
-          if (seq !== searchSeq) return
+        onEnd: (lastIndex, isEnd) => {
+          if (!current()) return
+          sseLastIndex.value = Math.max(sseLastIndex.value, lastIndex)
+          sseExhausted.value = isEnd
           searching.value = false
+          batchLoadingMore.value = false
           searched.value = true
-          pushHistory(word)
+          pushHistory(scope.key)
         },
         onErrorEvent: (ret) => {
-          if (seq !== searchSeq) return
+          if (!current()) return
+          batchLoadingMore.value = false
           handleErrorEvent(ret)
         },
         onStreamError: (msg) => {
-          if (seq !== searchSeq) return
+          if (!current()) return
           errorMsg.value = msg
           searching.value = false
           searched.value = true
+          batchLoadingMore.value = false
         },
       },
     )
-    if (seq !== searchSeq) {
+    if (!current()) {
       // 等待连接期间已被停止
       handle.abort()
       return
@@ -249,23 +285,26 @@ async function doSearch(kw?: string) {
     sseAbort = handle.abort
   } catch {
     // 2) SSE 传输失败/不支持 → 降级批量模式
-    if (seq !== searchSeq) return
+    if (!current()) return
     usingSSE.value = false
-    await runBatch(word, seq)
+    await runBatch(scope, seq)
+    if (seq === searchSeq) batchLoadingMore.value = false
   }
 }
 
-/** 批量降级：现有 searchBookMulti（maxSources=50，AbortSignal 可中止），按 page 分页累加 */
-async function runBatch(word: string, seq: number, page = 1) {
-  batchAbort = new AbortController()
+/** 普通接口按结果页分页；省略 maxSources 才会覆盖所选范围的全部书源。 */
+async function runBatch(scope: SearchScope, seq: number, page = 1) {
+  const controller = new AbortController()
+  batchAbort = controller
   try {
     const res = await searchBookMulti(
-      word,
-      50,
-      batchAbort.signal,
+      scope.key,
+      undefined,
+      controller.signal,
       page,
-      exact.value,
-      activeSearchGroup.value,
+      scope.exact,
+      scope.bookSourceGroup,
+      scope.bookSourceUrl,
     )
     if (seq !== searchSeq) return
     if (!res.isSuccess) {
@@ -277,52 +316,35 @@ async function runBatch(word: string, seq: number, page = 1) {
       }
       throw new Error(res.errorMsg || '搜索失败，请稍后重试')
     }
-    const before = bookMap.size
     mergeBooks(res.data ?? [])
     batchPage.value = page
-    // 该页无新增去重结果 → 已全部（后续「加载更多」不再出现）
-    if (bookMap.size === before) batchExhausted.value = true
+    // 重复条目不代表后续页为空；仅空响应说明本次结果页已读尽。
+    batchExhausted.value = (res.data ?? []).length === 0
     searched.value = true
-    pushHistory(word)
+    pushHistory(scope.key)
   } catch (err) {
     if (seq !== searchSeq) return
     errorMsg.value = err instanceof Error ? err.message : '搜索失败，请稍后重试'
   } finally {
     if (seq === searchSeq) searching.value = false
-    if (batchAbort && seq !== searchSeq) batchAbort = null
+    if (batchAbort === controller) batchAbort = null
   }
 }
 
-/** GAP 100：批量模式「加载更多」——下一页 searchBookMulti 合并去重 */
+/** SSE 继续下一批书源；普通接口继续下一页，均沿用发起搜索时的范围。 */
 async function loadMore() {
-  if (usingSSE.value || searching.value || batchLoadingMore.value || batchExhausted.value) return
-  const word = key.value.trim()
-  if (!word) return
+  if (searching.value || batchLoadingMore.value || searchExhausted.value || stopped.value) return
+  const scope = activeScope
+  if (!scope) return
   const seq = searchSeq
-  const nextPage = batchPage.value + 1
   batchLoadingMore.value = true
-  batchAbort = new AbortController()
-  try {
-    const res = await searchBookMulti(
-      word,
-      50,
-      batchAbort.signal,
-      nextPage,
-      exact.value,
-      activeSearchGroup.value,
-    )
-    if (seq !== searchSeq) return
-    if (!res.isSuccess) throw new Error(res.errorMsg || '加载失败，请稍后重试')
-    const before = bookMap.size
-    mergeBooks(res.data ?? [])
-    batchPage.value = nextPage
-    if (bookMap.size === before) batchExhausted.value = true
-  } catch (err) {
-    if (seq !== searchSeq) return
-    errorMsg.value = err instanceof Error ? err.message : '加载失败，请稍后重试'
-  } finally {
+  errorMsg.value = ''
+  if (usingSSE.value) {
+    searching.value = true
+    await runStream(scope, seq)
+  } else {
+    await runBatch(scope, seq, batchPage.value + 1)
     if (seq === searchSeq) batchLoadingMore.value = false
-    batchAbort = null
   }
 }
 
@@ -384,7 +406,7 @@ const sourceGroups = computed<SourceGroup[]>(() => {
 
 /** 停止搜索：中断 SSE/批量请求，保留已到达的部分结果 */
 function stopSearch() {
-  if (!searching.value) return
+  if (!searching.value && !batchLoadingMore.value) return
   searchSeq++
   if (sseAbort) {
     sseAbort()
@@ -397,7 +419,8 @@ function stopSearch() {
   stopped.value = true
   searched.value = true
   searching.value = false
-  pushHistory(key.value.trim())
+  batchLoadingMore.value = false
+  pushHistory(activeScope?.key || key.value.trim())
 }
 
 function onEnter() {
@@ -417,7 +440,10 @@ function openBook(book: SearchBook) {
   // 带 origin（书源 URL）——详情页非书架书分支需要它匹配书源（否则报"未找到这本书"）
   void router.push({
     path: `/book/${encodeURIComponent(book.bookUrl)}`,
-    query: book.origin ? { origin: book.origin } : undefined,
+    query: {
+      origin: book.origin, originName: book.originName,
+      name: book.name, author: book.author, cover: book.coverUrl,
+    },
   })
 }
 
@@ -628,6 +654,7 @@ function closeSuggest() {
 }
 
 onBeforeUnmount(() => {
+  searchSeq++
   window.clearTimeout(suggestTimer)
   // #24：离开页面中止流式多源搜索——曾让 SSE 连接与后端爬源跑完，
   // 流回调持续持有已卸载组件闭包
@@ -821,7 +848,7 @@ onBeforeUnmount(() => {
 
       <!-- 空结果 / 已停止 -->
       <div v-else-if="searched && !results.length" class="state-row">
-        <span class="state-text">{{ stopped ? t('search.stopped') : t('search.noResults', { k: key.trim() }) }}</span>
+        <span class="state-text">{{ stopped ? t('search.stopped') : !searchExhausted ? '已搜索范围暂无匹配，可继续搜索' : t('search.noResults', { k: searchedKey }) }}</span>
       </div>
 
       <!-- 结果列表（SSE 增量累积；按书源分组折叠，GAP 23） -->
@@ -903,25 +930,21 @@ onBeforeUnmount(() => {
           </li>
         </ul>
 
-        <!-- GAP 100：底部加载更多（批量模式逐页；SSE 已全量则提示已全部） -->
-        <div v-if="searched && results.length" class="load-more">
-          <template v-if="usingSSE">
-            <span class="load-all">{{ t('search.loadAll') }}</span>
-          </template>
-          <template v-else>
+      </div>
+
+        <!-- 无命中批次仍可继续，只有服务端确认覆盖全部书源后才显示完成。 -->
+        <div v-if="searched && !searching && !stopped" class="load-more">
             <button
-              v-if="!batchExhausted"
+              v-if="!searchExhausted"
               class="load-btn"
               type="button"
               :disabled="batchLoadingMore"
               @click="loadMore"
             >
-              {{ batchLoadingMore ? t('common.loading') : t('common.loadMore') }}
+              {{ batchLoadingMore ? t('common.loading') : usingSSE ? '继续搜索其他书源' : t('common.loadMore') }}
             </button>
             <span v-else class="load-all">{{ t('search.loadAllShort') }}</span>
-          </template>
         </div>
-      </div>
     </main>
   </div>
 </template>

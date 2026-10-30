@@ -1,7 +1,7 @@
 /**
  * P0-1 EPUB 原版渲染：.epub 文件加载与结构化解析。
  *
- * 数据流：file/download stream=1 拉取 .epub 字节 → fflate 解压（同步 unzip，
+ * 数据流：getBookFile 按当前用户书架归属拉取 .epub 字节 → fflate 解压（同步 unzip，
  * 书籍级一次性成本）→ META-INF/container.xml 定位 OPF → manifest/spine
  * 建立章节顺序 → 产出 EpubDoc（资源表 + spine 条目）供 EpubIframe 渲染。
  *
@@ -74,16 +74,28 @@ export function resolveHref(opfDir: string, href: string): string {
 
 /**
  * 加载并解析 EPUB：
- * - bookUrl 为本地书路径 → file/download?path=...&stream=1 直出字节
+ * - bookUrl 为本地书 URL → getBookFile?url=... 直出经过书架归属检查的原文件字节
  * - 返回 EpubDoc；调用方持有并在切换/卸载时调 destroyEpubDoc 回收 blob URL
  */
-export async function loadEpubDoc(bookUrl: string): Promise<EpubDoc> {
-  // file/download 需要 path 参数 + accessToken（request 层自动附带 token）
+export async function loadEpubDoc(
+  bookUrl: string,
+  session?: { accessToken?: string; namespace?: string },
+): Promise<EpubDoc> {
+  const params = new URLSearchParams({ url: bookUrl })
+  if (session?.accessToken) params.set('accessToken', session.accessToken)
+  if (session?.namespace) params.set('ns', session.namespace)
   const res = await fetch(
-    `/reader3/file/download?path=${encodeURIComponent(bookUrl)}&stream=1`,
+    `/reader3/getBookFile?${params.toString()}`,
     { credentials: 'same-origin' },
   )
-  if (!res.ok) throw new Error(`EPUB 文件获取失败（${res.status}）`)
+  if (!res.ok || !(res.headers.get('content-type') || '').includes('application/epub+zip')) {
+    let message = `EPUB 文件获取失败（${res.status}）`
+    try {
+      const error = await res.json() as { errorMsg?: string }
+      if (error.errorMsg) message = error.errorMsg
+    } catch { /* 代理错误页或非 JSON 响应 */ }
+    throw new Error(message)
+  }
   const buf = new Uint8Array(await res.arrayBuffer())
   return parseEpubBytes(buf)
 }

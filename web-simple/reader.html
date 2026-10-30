@@ -123,7 +123,7 @@
   var srcPanel = document.getElementById("srcPanel");
   var srcList = document.getElementById("srcList");
   document.getElementById("srcBtn").addEventListener("click", function () {
-    if (srcPanel.style.display !== "none") {
+    if (srcPanel.style.display === "block") {
       srcPanel.style.display = "none";
       return;
     }
@@ -140,13 +140,13 @@
         var html = "";
         for (var i = 0; i < arr.length; i++) {
           var s = arr[i];
-          var name = s.bookSourceName || s.bookSourceUrl || "";
-          var cur = name === BOOK_SOURCE ? "<span class='src-cur'>当前</span>" : "";
+          var name = s.originName || s.origin || "";
+          var cur = s.origin === BOOK_SOURCE ? "<span class='src-cur'>当前</span>" : "";
           html += "<li><a href='javascript:void(0)' data-url='" +
-                  encodeURIComponent(s.bookSourceUrl || "") + "' data-name='" +
-                  encodeURIComponent(name) + "'>" +
+                  encodeURIComponent(s.origin || "") + "' data-book='" +
+                  encodeURIComponent(s.bookUrl || "") + "'>" +
                   "<div class='src-name'>" + esc(name) + cur + "</div>" +
-                  "<div class='src-url'>" + esc(s.bookSourceUrl || "") + "</div>" +
+                  "<div class='src-url'>" + esc(s.origin || "") + "</div>" +
                   "</a></li>";
         }
         srcList.innerHTML = html;
@@ -155,7 +155,7 @@
           (function (a) {
             a.addEventListener("click", function () {
               switchSource(decodeURIComponent(a.getAttribute("data-url")),
-                           decodeURIComponent(a.getAttribute("data-name")));
+                           decodeURIComponent(a.getAttribute("data-book")));
             });
           })(as[i]);
         }
@@ -163,55 +163,30 @@
       function (msg) { srcList.innerHTML = "<li style='padding:10px 6px'>加载失败：" + esc(msg) + "</li>"; });
   });
 
-  function switchSource(newUrl, newName) {
+  function switchSource(sourceUrl, newUrl) {
+    if (!sourceUrl || !newUrl) { statusEl.textContent = "换源失败：候选缺少书源或书籍链接"; return; }
     statusEl.innerHTML = "切换书源中…";
-    getJSON(apiUrl("/reader3/getBookshelf", {}),
-      function (shelf) {
-        var exists = (shelf.data || []).some(function (b) { return b.bookUrl === BOOK_URL; });
-        if (!exists) {
-          statusEl.innerHTML = "该书未加入书架，请先在搜索页加入书架后再换源";
-          return;
-        }
-        // 先取新书源详情拿到 tocUrl，再增量更新书架书（bookUrl 主键不变）
-        getJSON(apiUrl("/reader3/getBookInfo", { url: BOOK_URL, bookSource: newUrl }),
-          function (info) {
-            var data = info.data || {};
-            var newToc = data.tocUrl || TOC_URL || BOOK_URL;
-            var body = {
-              bookUrl: BOOK_URL,
-              origin: newUrl,
-              originName: newName,
-              tocUrl: newToc
-            };
-            fetch(apiUrl("/reader3/saveBook", {}), {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(body)
-            }).then(function (r) { return r.json(); }).then(function (j) {
-              if (!j || j.isSuccess === false) {
-                statusEl.innerHTML = "换源失败：" + esc(j && j.errorMsg || "保存失败");
-                return;
-              }
-              var q = "reader.html?bookUrl=" + encodeURIComponent(BOOK_URL) +
-                      "&tocUrl=" + encodeURIComponent(newToc) +
-                      "&bookSource=" + encodeURIComponent(newUrl) +
-                      "&accessToken=" + encodeURIComponent(TOKEN);
-              location.href = q;
-            }).catch(function (e) {
-              statusEl.innerHTML = "换源失败：" + esc(e.message || e);
-            });
-          },
-          function (msg) {
-            statusEl.innerHTML = "换源失败：" + esc(msg);
-          });
-      },
-      function (msg) {
-        statusEl.innerHTML = "换源失败：" + esc(msg);
-      });
+    fetch(apiUrl("/reader3/setBookSource", {}), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bookUrl: BOOK_URL, newUrl: newUrl, bookSourceUrl: sourceUrl })
+    }).then(function (r) { return r.json(); }).then(function (j) {
+      if (!j || j.isSuccess === false || !j.data || !j.data.bookUrl) {
+        statusEl.textContent = "换源失败：" + (j && j.errorMsg || "保存失败");
+        return;
+      }
+      var b = j.data;
+      location.href = "reader.html?bookUrl=" + encodeURIComponent(b.bookUrl) +
+        "&tocUrl=" + encodeURIComponent(b.tocUrl || b.bookUrl) +
+        "&bookSource=" + encodeURIComponent(b.origin || sourceUrl) +
+        "&accessToken=" + encodeURIComponent(TOKEN);
+    }).catch(function (e) {
+      statusEl.textContent = "换源失败：" + (e.message || e);
+    });
   }
 
   // —— 目录加载 ——
-  getJSON(apiUrl("/reader3/getBookToc", { url: TOC_URL, tocUrl: TOC_URL }),
+  getJSON(apiUrl("/reader3/getBookToc", { url: BOOK_URL, tocUrl: TOC_URL, bookSource: BOOK_SOURCE }),
     function (j) {
       chapters = (j.data || []).filter(function (c) { return c && c.url; });
       if (!chapters.length) { statusEl.innerHTML = "目录为空或解析失败"; return; }
@@ -320,7 +295,7 @@
     }
   }
   document.getElementById("tocBtn").addEventListener("click", function () {
-    tocPanel.style.display = tocPanel.style.display === "none" ? "block" : "none";
+    tocPanel.style.display = tocPanel.style.display === "block" ? "none" : "block";
   });
 
   // —— 字号 ——

@@ -1046,10 +1046,16 @@ async function runClearCache() {
     return
   }
   if (cacheBusy.value) return
+  const type = cacheType.value
   cacheBusy.value = true
   try {
-    await clearCache(cacheType.value)
-    ElMessage.success(`已清理${clearTypeLabel(cacheType.value)}缓存`)
+    await ElMessageBox.confirm(
+      `清理当前账号的${clearTypeLabel(type)}缓存，导入原书保留。不会停止进行中的缓存任务；任务可能继续写入，请先取消任务。确定清理？`,
+      '清理缓存',
+      { confirmButtonText: '清理', cancelButtonText: '取消', type: 'warning' },
+    )
+    await clearCache(type)
+    ElMessage.success(`已清理${clearTypeLabel(type)}缓存`)
     await loadCacheInfo()
   } catch {
     // 已提示

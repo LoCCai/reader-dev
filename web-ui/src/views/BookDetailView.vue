@@ -18,6 +18,7 @@ import { clearLocalBook } from '@/utils/readerLocalCache'
 import ChapterCacheDialog from '@/components/ChapterCacheDialog.vue'
 import { useUserStore } from '@/stores/user'
 import { isNotImplemented } from '@/utils/errors'
+import { canRescanBook } from '@/utils/localBook'
 import type { Book, BookChapter, BookInfo, ContentSearchHit, SearchBook } from '@/types'
 
 const route = useRoute()
@@ -44,6 +45,9 @@ const loadFailed = ref(false)
 const errorMsg = ref('')
 const coverFailed = ref(false)
 const saving = ref(false)
+const isTextBook = computed(() => (shelfBook.value?.type ?? info.value?.type ?? 0) === 0)
+const canExportBook = computed(() => !!shelfBook.value && !shelfBook.value.isTemp && isTextBook.value)
+const isLocalShelfBook = computed(() => !!shelfBook.value && canRescanBook(shelfBook.value))
 
 /* ================= GAP 82：单书缓存信息（GET /reader3/getShelfBookWithCacheInfo，silent——后端已有；未实现降级隐藏） ================= */
 
@@ -124,6 +128,7 @@ async function load() {
   info.value = null
   // 目录预览缓存随书重置（换源/重进详情后重新拉取）
   tocLoaded.value = false
+  tocLoading.value = false
   tocChapters.value = []
   activeTab.value = 'detail'
   try {
@@ -171,6 +176,7 @@ async function load() {
   }
   // GAP 82：书架书 → 拉取单书缓存状态（silent；未实现隐藏）
   if (shelfBook.value) void loadShelfCacheInfo()
+  if (route.query.action === 'export' && canExportBook.value) openExport()
 }
 
 /** 由详情信息组装完整 Book JSON（saveBook 入架 body：type/group 用默认值 0） */
@@ -381,6 +387,10 @@ function tocParams(): { tocUrl: string; origin: string } | null {
 
 async function openToc() {
   activeTab.value = 'toc'
+  await loadToc()
+}
+
+async function loadToc() {
   if (tocLoaded.value) return
   const p = tocParams()
   if (!p) {
@@ -389,15 +399,17 @@ async function openToc() {
   }
   tocLoading.value = true
   tocError.value = false
+  const url = bookUrl.value
   try {
     const res = await getBookToc(p.tocUrl, p.origin)
+    if (url !== bookUrl.value) return
     tocChapters.value = res.data ?? []
     tocLoaded.value = true
     if (tocChapters.value.length === 0) tocError.value = true
   } catch {
-    tocError.value = true
+    if (url === bookUrl.value) tocError.value = true
   } finally {
-    tocLoading.value = false
+    if (url === bookUrl.value) tocLoading.value = false
   }
 }
 
@@ -460,6 +472,7 @@ const searchMsg = ref('')
 const searchMsgError = ref(false)
 
 function openSearch() {
+  if (!isTextBook.value) return
   searchKey.value = ''
   searchHits.value = []
   searchMsg.value = ''
@@ -867,8 +880,11 @@ const exportEncoding = ref<ExportEncoding>('utf-8')
 const exportBusy = ref(false)
 const exportMsg = ref('')
 const exportMsgError = ref(false)
+let exportSession = 0
 
 function openExport() {
+  if (!canExportBook.value) return
+  exportSession++
   exportFormat.value = 'txt'
   exportEncoding.value = 'utf-8'
   exportMsg.value = ''
@@ -885,16 +901,22 @@ function closeExport() {
 
 /** 导出并下载（失败在弹窗内提示，不弹全局 toast——接口可能未实现） */
 async function confirmExport() {
-  if (exportBusy.value) return
+  if (exportBusy.value || !canExportBook.value) return
+  const url = bookUrl.value
+  const format = exportFormat.value
+  const encoding = exportEncoding.value
+  const bookName = display.value.name || 'book'
+  const session = exportSession
   exportBusy.value = true
   exportMsg.value = ''
   exportMsgError.value = false
   try {
     const { blob, warning } = await exportBook(
-      bookUrl.value,
-      exportFormat.value,
-      exportEncoding.value,
+      url,
+      format,
+      encoding,
     )
+    if (url !== bookUrl.value || session !== exportSession) return
     // 后端错误体（HTTP 200 + JSON）：在此识别并展示（encoding 未就绪时后端忽略参数仍输出 UTF-8）
     if (blob.type.includes('application/json')) {
       try {
@@ -908,7 +930,7 @@ async function confirmExport() {
         /* 非错误 JSON：按文件正常下载 */
       }
     }
-    const name = `${(display.value.name || 'book').replace(/[\\/:*?"<>|]/g, '_')}.${exportFormat.value}`
+    const name = `${bookName.replace(/[\\/:*?"<>|]/g, '_')}.${format}`
     const ok = await downloadBlob(blob, name)
     if (ok) {
       // P2：导出警告（并发抓章失败章节 / GBK 不可映射转义）——随下载成功提示展示
@@ -919,17 +941,18 @@ async function confirmExport() {
       exportMsg.value = warnParts.length
         ? `已下载 ${name}（警告：${warnParts.join('；')}）`
         : `已下载 ${name}`
-      window.setTimeout(() => {
-        if (!exportBusy.value) closeExport()
+      if (!warnParts.length) window.setTimeout(() => {
+        if (!exportBusy.value && url === bookUrl.value && session === exportSession) closeExport()
       }, 900)
     }
   } catch (err) {
+    if (url !== bookUrl.value || session !== exportSession) return
     exportMsg.value = isNotImplemented(err)
       ? '导出接口后端暂未提供（GET /reader3/exportBook）'
       : `导出失败：${err instanceof Error ? err.message : '请稍后重试'}`
     exportMsgError.value = true
   } finally {
-    exportBusy.value = false
+    if (session === exportSession) exportBusy.value = false
   }
 }
 
@@ -1031,7 +1054,15 @@ const cacheFrom = ref(1)
 /** 目录实章（过滤卷标题；后端 range 参数按此顺序 0 基） */
 const realTocChapters = computed(() => tocChapters.value.filter((c) => !c.isVolume))
 
-function openCacheDialog() {
+async function openCacheDialog() {
+  if (tocLoading.value || !isTextBook.value) return
+  const url = bookUrl.value
+  await loadToc()
+  if (url !== bookUrl.value) return
+  if (tocError.value || realTocChapters.value.length === 0) {
+    ElMessage.warning('目录加载失败或没有可缓存章节，请重试目录')
+    return
+  }
   cacheScope.value = 'all'
   cacheFrom.value = 1
   cacheOpen.value = true
@@ -1039,6 +1070,7 @@ function openCacheDialog() {
 
 /** 目录页单章缓存：按目录原数组下标定位实章序号（1 基）后打开弹层 */
 function cacheChapter(index: number) {
+  if (!isTextBook.value) return
   const ch = tocChapters.value[index]
   if (!ch || ch.isVolume) return
   const idx = realTocChapters.value.findIndex((x) => x.url === ch.url)
@@ -1061,8 +1093,11 @@ const cacheClearBusy = ref(false)
 async function clearBookCache() {
   const b = shelfBook.value
   if (!b || cacheClearBusy.value) return
+  const local = isLocalShelfBook.value
   try {
-    await ElMessageBox.confirm('清除本书服务器与本机缓存后，正文/目录将重新从书源拉取。确定清除？', '清除缓存', {
+    await ElMessageBox.confirm(local
+      ? '仅清除本书在此浏览器中的章节缓存，导入原书与服务器正文保留。确定清除？'
+      : '清除本书服务器与本机缓存后，正文/目录将重新从书源拉取。不会停止进行中的缓存任务；任务可能继续写入，请先取消任务。确定清除？', '清除缓存', {
       confirmButtonText: '清除',
       cancelButtonText: '取消',
       type: 'warning',
@@ -1070,13 +1105,14 @@ async function clearBookCache() {
   } catch {
     return // 用户取消
   }
+  if (b.bookUrl !== bookUrl.value) return
   cacheClearBusy.value = true
   try {
-    const res = await deleteBookCache(b.bookUrl)
+    const res = local ? null : await deleteBookCache(b.bookUrl)
     // legacy 对齐：deleteBookCache 成功返回 data=""（无删除计数）
     void res
     const localDeleted = await clearLocalBook(b.bookUrl)
-    ElMessage.success(`已清除本书缓存（本机 ${localDeleted} 条）`)
+    ElMessage.success(`已清除${local ? '本机' : '本书'}缓存（本机 ${localDeleted} 条）`)
     // GAP 82：清除后刷新单书缓存状态
     void loadShelfCacheInfo()
   } catch (err) {
@@ -1171,6 +1207,12 @@ onMounted(() => {
 // P2：路由参数变化（/book/A → /book/B 复用同一组件实例）时重新加载——
 // vue-router 仅替换 params，不会重新挂载组件，若不 watch 则展示旧书数据
 watch(bookUrl, () => {
+  exportSession++
+  exportOpen.value = false
+  exportBusy.value = false
+  searchOpen.value = false
+  cacheOpen.value = false
+  document.body.style.overflow = ''
   void load()
 })
 </script>
@@ -1259,7 +1301,7 @@ watch(bookUrl, () => {
                   <span class="toc-title" :title="c.title">{{ c.title }}</span>
                   <span v-if="c.index === currentChapterIndex" class="toc-cur">读到</span>
                 </button>
-                <button class="toc-cache" type="button" title="缓存本章" @click.stop="cacheChapter(c.index)">
+                <button v-if="isTextBook" class="toc-cache" type="button" title="缓存本章" @click.stop="cacheChapter(c.index)">
                   缓存
                 </button>
               </template>
@@ -1374,7 +1416,7 @@ watch(bookUrl, () => {
               </button>
             </template>
             <!-- 全书搜索（书架书本地正文搜索；命中后跳阅读页该章） -->
-            <button v-if="shelfBook" class="search-btn" type="button" @click="openSearch">全书搜索</button>
+            <button v-if="shelfBook" class="search-btn" type="button" :disabled="!isTextBook" :title="isTextBook ? '搜索本书服务器已缓存正文；本地书搜索全部正文' : '暂不支持该书籍类型的正文搜索'" @click="openSearch">{{ isLocalShelfBook ? '全书搜索' : '搜索已缓存正文' }}</button>
             <!-- GAP 145：编辑元数据（书名/作者/标签/简介弹窗） -->
             <button v-if="shelfBook" class="search-btn" type="button" @click="openEdit">编辑</button>
             <!-- 换源（书架书且带书源：搜索同书其他书源并切换） -->
@@ -1382,9 +1424,9 @@ watch(bookUrl, () => {
             <!-- C1：书籍变量（legado 界面变量管理——@put/@get 调试刚需） -->
             <button v-if="canSwitchSource()" class="search-btn" type="button" @click="openVariables">变量</button>
             <!-- 导出（GET /reader3/exportBook：txt/epub/html blob 下载） -->
-            <button class="search-btn" type="button" @click="openExport">导出</button>
+            <button class="search-btn" type="button" :disabled="!canExportBook" :title="!isTextBook ? '暂不支持该书籍类型的文本导出' : !canExportBook ? '加入书架后可导出本书' : '导出本书全部章节（TXT / EPUB / HTML）'" @click="openExport">导出</button>
             <!-- 章节缓存（服务器 / 本机双向：单章、至末尾、全本、指定范围） -->
-            <button class="search-btn" type="button" @click="openCacheDialog">缓存</button>
+            <button class="search-btn" type="button" :disabled="tocLoading || !isTextBook" :title="isTextBook ? '选择本书章节范围并缓存' : '暂不支持该书籍类型的文本缓存'" @click="openCacheDialog">{{ tocLoading ? '加载目录…' : '缓存' }}</button>
             <!-- GAP 82：单书缓存状态（getShelfBookWithCacheInfo silent；后端未实现时隐藏） -->
             <span
               v-if="shelfBook && shelfCache"
@@ -1395,7 +1437,7 @@ watch(bookUrl, () => {
             </span>
             <!-- GAP 79：清除本书缓存（POST /reader3/deleteBookCache：删 book_chapters 该书行） -->
             <button v-if="shelfBook" class="search-btn" type="button" :disabled="cacheClearBusy" @click="clearBookCache">
-              {{ cacheClearBusy ? '清理中…' : '清缓存' }}
+              {{ cacheClearBusy ? '清理中…' : isLocalShelfBook ? '清本机缓存' : '清缓存' }}
             </button>
           </div>
         </div>

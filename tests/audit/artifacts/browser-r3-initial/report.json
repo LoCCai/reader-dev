@@ -1,0 +1,385 @@
+{
+  "target": "http://127.0.0.1:54173",
+  "results": [
+    {
+      "name": "R3 desktop: search result opens detail; cache immediately loads directory; delayed start cancellation is exact",
+      "passed": true
+    },
+    {
+      "name": "R3 desktop: export submits current book only and preserves partial-export warning",
+      "passed": true
+    },
+    {
+      "name": "R3 desktop: EPUB text to HTML reloads HTML; copy is enabled; in-chapter search finds visible text",
+      "passed": false,
+      "error": "locator.waitFor: Timeout 12000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('.epub-html') to be visible\u001b[22m\n"
+    },
+    {
+      "name": "R3 privacy: a second user cannot read the first user offline chapter cache",
+      "passed": true
+    },
+    {
+      "name": "R3 narrow screen: reader controls and current-book export remain reachable without overflow",
+      "passed": true
+    }
+  ],
+  "pageErrors": [],
+  "requests": [
+    {
+      "endpoint": "getBookSources",
+      "method": "GET",
+      "params": {}
+    },
+    {
+      "endpoint": "getBookshelf",
+      "method": "GET",
+      "params": {}
+    },
+    {
+      "endpoint": "getBookSources",
+      "method": "GET",
+      "params": {}
+    },
+    {
+      "endpoint": "getBookshelf",
+      "method": "GET",
+      "params": {}
+    },
+    {
+      "endpoint": "searchBookMultiSSE",
+      "method": "POST",
+      "params": {
+        "key": "验收之书",
+        "bookSourceGroup": "",
+        "lastIndex": -1,
+        "searchSize": 50,
+        "concurrentCount": 24,
+        "exact": 0
+      }
+    },
+    {
+      "endpoint": "getBookshelf",
+      "method": "GET",
+      "params": {}
+    },
+    {
+      "endpoint": "getBookInfo",
+      "method": "GET",
+      "params": {
+        "url": "https://fixture.invalid/book-a",
+        "bookSource": "https://fixture.invalid/source-a",
+        "cover": "",
+        "name": "验收之书"
+      }
+    },
+    {
+      "endpoint": "getShelfBookWithCacheInfo",
+      "method": "GET",
+      "params": {
+        "url": "https://fixture.invalid/book-a"
+      }
+    },
+    {
+      "endpoint": "getBookToc",
+      "method": "GET",
+      "params": {
+        "tocUrl": "https://fixture.invalid/book-a/toc",
+        "bookSource": "https://fixture.invalid/source-a"
+      }
+    },
+    {
+      "endpoint": "cacheBookRangeOnServer",
+      "method": "POST",
+      "params": {
+        "url": "https://fixture.invalid/book-a",
+        "from": 1,
+        "to": 2
+      }
+    },
+    {
+      "endpoint": "cancelCacheBook",
+      "method": "GET",
+      "params": {
+        "taskId": "fixture-task-1"
+      }
+    },
+    {
+      "endpoint": "getBookshelf",
+      "method": "GET",
+      "params": {}
+    },
+    {
+      "endpoint": "getBookInfo",
+      "method": "GET",
+      "params": {
+        "url": "https://fixture.invalid/book-a",
+        "bookSource": "https://fixture.invalid/source-a",
+        "cover": "",
+        "name": ""
+      }
+    },
+    {
+      "endpoint": "getShelfBookWithCacheInfo",
+      "method": "GET",
+      "params": {
+        "url": "https://fixture.invalid/book-a"
+      }
+    },
+    {
+      "endpoint": "exportBook",
+      "method": "GET",
+      "params": {
+        "url": "https://fixture.invalid/book-a",
+        "format": "txt",
+        "encoding": "utf-8"
+      }
+    },
+    {
+      "endpoint": "getBookshelf",
+      "method": "GET",
+      "params": {}
+    },
+    {
+      "endpoint": "getBookToc",
+      "method": "GET",
+      "params": {
+        "tocUrl": "local://audit/book.epub/toc",
+        "bookSource": "https://fixture.invalid/source-a"
+      }
+    },
+    {
+      "endpoint": "getBookInfo",
+      "method": "GET",
+      "params": {
+        "url": "local://audit/book.epub",
+        "bookSource": "https://fixture.invalid/source-a"
+      }
+    },
+    {
+      "endpoint": "getBookCacheChapters",
+      "method": "GET",
+      "params": {
+        "url": "local://audit/book.epub"
+      }
+    },
+    {
+      "endpoint": "getBookContent",
+      "method": "GET",
+      "params": {
+        "chapterUrl": "local://audit/book.epub/chapter/0",
+        "bookSource": "https://fixture.invalid/source-a",
+        "bookUrl": "local://audit/book.epub"
+      }
+    },
+    {
+      "endpoint": "getBookContent",
+      "method": "GET",
+      "params": {
+        "chapterUrl": "local://audit/book.epub/chapter/1",
+        "bookSource": "https://fixture.invalid/source-a",
+        "bookUrl": "local://audit/book.epub"
+      }
+    },
+    {
+      "endpoint": "getBookshelf",
+      "method": "GET",
+      "params": {}
+    },
+    {
+      "endpoint": "getBookToc",
+      "method": "GET",
+      "params": {
+        "tocUrl": "https://fixture.invalid/book-a/toc",
+        "bookSource": "https://fixture.invalid/source-a"
+      }
+    },
+    {
+      "endpoint": "getBookInfo",
+      "method": "GET",
+      "params": {
+        "url": "https://fixture.invalid/book-a",
+        "bookSource": "https://fixture.invalid/source-a"
+      }
+    },
+    {
+      "endpoint": "getBookCacheChapters",
+      "method": "GET",
+      "params": {
+        "url": "https://fixture.invalid/book-a"
+      }
+    },
+    {
+      "endpoint": "getBookContent",
+      "method": "GET",
+      "params": {
+        "chapterUrl": "https://fixture.invalid/book-a/chapter/0",
+        "bookSource": "https://fixture.invalid/source-a",
+        "bookUrl": "https://fixture.invalid/book-a"
+      }
+    },
+    {
+      "endpoint": "getBookContent",
+      "method": "GET",
+      "params": {
+        "chapterUrl": "https://fixture.invalid/book-a/chapter/1",
+        "bookSource": "https://fixture.invalid/source-a",
+        "bookUrl": "https://fixture.invalid/book-a"
+      }
+    },
+    {
+      "endpoint": "getBookshelf",
+      "method": "GET",
+      "params": {}
+    },
+    {
+      "endpoint": "getBookToc",
+      "method": "GET",
+      "params": {
+        "tocUrl": "https://fixture.invalid/book-a/toc",
+        "bookSource": "https://fixture.invalid/source-a"
+      }
+    },
+    {
+      "endpoint": "getBookInfo",
+      "method": "GET",
+      "params": {
+        "url": "https://fixture.invalid/book-a",
+        "bookSource": "https://fixture.invalid/source-a"
+      }
+    },
+    {
+      "endpoint": "getBookCacheChapters",
+      "method": "GET",
+      "params": {
+        "url": "https://fixture.invalid/book-a"
+      }
+    },
+    {
+      "endpoint": "getBookContent",
+      "method": "GET",
+      "params": {
+        "chapterUrl": "https://fixture.invalid/book-a/chapter/0",
+        "bookSource": "https://fixture.invalid/source-a",
+        "bookUrl": "https://fixture.invalid/book-a"
+      }
+    },
+    {
+      "endpoint": "getBookshelf",
+      "method": "GET",
+      "params": {}
+    },
+    {
+      "endpoint": "getBookToc",
+      "method": "GET",
+      "params": {
+        "tocUrl": "https://fixture.invalid/book-a/toc",
+        "bookSource": "https://fixture.invalid/source-a"
+      }
+    },
+    {
+      "endpoint": "getBookInfo",
+      "method": "GET",
+      "params": {
+        "url": "https://fixture.invalid/book-a",
+        "bookSource": "https://fixture.invalid/source-a"
+      }
+    },
+    {
+      "endpoint": "getBookCacheChapters",
+      "method": "GET",
+      "params": {
+        "url": "https://fixture.invalid/book-a"
+      }
+    },
+    {
+      "endpoint": "getBookContent",
+      "method": "GET",
+      "params": {
+        "chapterUrl": "https://fixture.invalid/book-a/chapter/1",
+        "bookSource": "https://fixture.invalid/source-a",
+        "bookUrl": "https://fixture.invalid/book-a"
+      }
+    },
+    {
+      "endpoint": "saveBookProgress",
+      "method": "POST",
+      "params": {
+        "bookUrl": "https://fixture.invalid/book-a",
+        "durChapterIndex": 1,
+        "durChapterPos": 0,
+        "durChapterTime": 1793368164737,
+        "durChapterTitle": "第1章"
+      }
+    },
+    {
+      "endpoint": "getBookshelf",
+      "method": "GET",
+      "params": {}
+    },
+    {
+      "endpoint": "getBookToc",
+      "method": "GET",
+      "params": {
+        "tocUrl": "https://fixture.invalid/book-a/toc",
+        "bookSource": "https://fixture.invalid/source-a"
+      }
+    },
+    {
+      "endpoint": "getBookInfo",
+      "method": "GET",
+      "params": {
+        "url": "https://fixture.invalid/book-a",
+        "bookSource": "https://fixture.invalid/source-a"
+      }
+    },
+    {
+      "endpoint": "getBookCacheChapters",
+      "method": "GET",
+      "params": {
+        "url": "https://fixture.invalid/book-a"
+      }
+    },
+    {
+      "endpoint": "getBookContent",
+      "method": "GET",
+      "params": {
+        "chapterUrl": "https://fixture.invalid/book-a/chapter/1",
+        "bookSource": "https://fixture.invalid/source-a",
+        "bookUrl": "https://fixture.invalid/book-a"
+      }
+    },
+    {
+      "endpoint": "saveBookProgress",
+      "method": "POST",
+      "params": {
+        "bookUrl": "",
+        "durChapterIndex": 1,
+        "durChapterPos": 0,
+        "durChapterTime": 1793368165216,
+        "durChapterTitle": "第1章"
+      }
+    },
+    {
+      "endpoint": "getBookshelf",
+      "method": "GET",
+      "params": {}
+    },
+    {
+      "endpoint": "getBookInfo",
+      "method": "GET",
+      "params": {
+        "url": "https://fixture.invalid/book-a",
+        "bookSource": "https://fixture.invalid/source-a",
+        "cover": "",
+        "name": ""
+      }
+    },
+    {
+      "endpoint": "getShelfBookWithCacheInfo",
+      "method": "GET",
+      "params": {
+        "url": "https://fixture.invalid/book-a"
+      }
+    }
+  ]
+}

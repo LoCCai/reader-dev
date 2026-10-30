@@ -9,6 +9,10 @@ use crate::AppConfig;
 
 pub mod migrate;
 
+// Imported local chapters are primary book data, not disposable network cache.
+// Keep the same predicate for statistics and clearing so the displayed scope is exact.
+const REGENERABLE_CHAPTERS: &str = "book_url NOT LIKE 'local://%' AND book_url NOT LIKE 'storage/%' AND NOT EXISTS (SELECT 1 FROM books b WHERE b.book_url = book_chapters.book_url AND b.user_namespace = book_chapters.user_namespace AND b.origin IN ('local', 'loc_book'))";
+
 /// 存储句柄
 #[derive(Clone)]
 pub struct Storage {
@@ -528,12 +532,20 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
             title TEXT DEFAULT '',
             content TEXT,
             user_namespace TEXT NOT NULL DEFAULT 'default',
+            chapter_order INTEGER,
             PRIMARY KEY (book_url, chapter_index, user_namespace)
         );
         "#,
     )
     .execute(&pool)
     .await?;
+
+    let has_order: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info('book_chapters') WHERE name = 'chapter_order'")
+        .fetch_one(&pool).await?;
+    if has_order == 0 {
+        sqlx::query("ALTER TABLE book_chapters ADD COLUMN chapter_order INTEGER")
+            .execute(&pool).await?;
+    }
 
     // F-10：目录缓存（getBookToc 成功落盘，TTL 5 分钟；book_url 为主键，toc_url 供“同 tocUrl 直读缓存”查找）
     sqlx::query(
@@ -876,6 +888,18 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
     if let Err(e) = crate::storage::migrate::migrate_if_needed(&storage).await {
         tracing::error!("JSON→SQLite 迁移失败（服务继续启动，数据仍保留在 JSON）：{e}");
     }
+    // Idempotent metadata-only backfill. No body rewrite or deletion; already
+    // mapped rows make subsequent startups skip their directory snapshots.
+    let snapshots: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT user_namespace, book_url, toc_url, chapters_json FROM toc_cache t WHERE chapters_json IS NOT NULL AND EXISTS (SELECT 1 FROM book_chapters c WHERE c.user_namespace = t.user_namespace AND c.chapter_order IS NULL AND (c.book_url = t.book_url OR c.book_url = t.toc_url OR c.book_url IN (SELECT book_url FROM books b WHERE b.user_namespace = t.user_namespace AND b.toc_url = t.toc_url))) ORDER BY CASE WHEN EXISTS (SELECT 1 FROM books b WHERE b.user_namespace = t.user_namespace AND b.toc_url = t.toc_url) THEN 1 ELSE 0 END, t.updated_at ASC",
+    ).fetch_all(&storage.pool).await?;
+    if !snapshots.is_empty() {
+        let mut tx = storage.pool.begin().await?;
+        for (ns, book_url, toc_url, json) in snapshots {
+            sync_cached_chapter_order(&mut tx, &ns, &book_url, &toc_url, &json).await?;
+        }
+        tx.commit().await?;
+    }
     // 管理员兜底：旧库/迁移后无管理员时，把最早用户（优先名为 admin）提升为管理员
     if let Err(e) = storage.ensure_admin_user().await {
         tracing::warn!("初始化管理员兜底失败: {e:#}");
@@ -896,6 +920,41 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
         sqlx::query("BEGIN; COMMIT;").execute(&mut *conn).await?;
     }
     Ok(storage)
+}
+
+/// Persist order only for existing bodies; a TOC with thousands of uncached
+/// chapters must not generate thousands of writes. Duplicate URLs have no
+/// unambiguous single position and deliberately retain NULL after TOC clearing.
+async fn sync_cached_chapter_order(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, ns: &str,
+    book_url: &str, toc_url: &str, json: &str,
+) -> Result<()> {
+    let Ok(toc) = serde_json::from_str::<Vec<crate::model::book_chapter::BookChapter>>(json) else { return Ok(()); };
+    let mut positions = std::collections::HashMap::new();
+    for (pos, chapter) in toc.into_iter().filter(|c| !c.is_volume).enumerate() {
+        let key = crate::util::md5::chapter_url_hash(&chapter.url);
+        positions.entry(key).and_modify(|v: &mut (Option<i64>, String)| v.0 = None).or_insert((Some(pos as i64), chapter.title));
+    }
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT book_url, chapter_index FROM book_chapters WHERE user_namespace = ?1 AND (book_url = ?2 OR book_url = ?3 OR book_url IN (SELECT book_url FROM books WHERE user_namespace = ?1 AND toc_url = ?3))",
+    ).bind(ns).bind(book_url).bind(toc_url).fetch_all(&mut **tx).await?;
+    for (url, key) in rows {
+        // A removed or ambiguous URL must lose stale position metadata too.
+        // Its body remains intact, and cache-only export requests a fresh TOC
+        // instead of reviving deleted chapters after directory clearing.
+        let pos = positions.get(&key).and_then(|v| v.0);
+        let title = positions.get(&key).map(|v| v.1.as_str()).unwrap_or("");
+        sqlx::query("UPDATE book_chapters SET chapter_order = ?1, title = CASE WHEN ?5 != '' THEN ?5 ELSE title END WHERE user_namespace = ?2 AND book_url = ?3 AND chapter_index = ?4")
+            .bind(pos).bind(ns).bind(url).bind(key).bind(title).execute(&mut **tx).await?;
+    }
+    Ok(())
+}
+
+/// Only the known, actionable cache-order error is shown to API clients.
+pub fn cache_read_error(error: &anyhow::Error) -> &'static str {
+    if error.to_string() == "目录缓存缺失，请先刷新目录" { "目录缓存缺失，请先刷新目录" }
+    else if error.to_string() == "暂不支持该书籍类型的文本导出" { "暂不支持该书籍类型的文本导出" }
+    else { "系统错误" }
 }
 
 impl Storage {
@@ -1834,19 +1893,23 @@ impl Storage {
 
     /// 缓存统计：toc_cache 行数 / book_chapters 行数 / 章节正文近似大小（sum length(content)）/
     /// 目录缓存大小（sum length(chapters_json)）/ 总大小（两者之和）
-    pub async fn get_cache_info(&self) -> Result<CacheInfo> {
-        let toc_cache_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM toc_cache")
+    pub async fn get_cache_info(&self, ns: &str) -> Result<CacheInfo> {
+        let toc_cache_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM toc_cache WHERE user_namespace = ?1")
+            .bind(ns)
             .fetch_one(&self.pool)
             .await?;
         let toc_cache_size: i64 =
-            sqlx::query_scalar("SELECT COALESCE(SUM(length(chapters_json)), 0) FROM toc_cache")
+            sqlx::query_scalar("SELECT COALESCE(SUM(length(chapters_json)), 0) FROM toc_cache WHERE user_namespace = ?1")
+                .bind(ns)
                 .fetch_one(&self.pool)
                 .await?;
-        let chapter_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM book_chapters")
+        let chapter_count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM book_chapters WHERE user_namespace = ?1 AND {REGENERABLE_CHAPTERS}"))
+            .bind(ns)
             .fetch_one(&self.pool)
             .await?;
         let chapter_size: i64 =
-            sqlx::query_scalar("SELECT COALESCE(SUM(length(content)), 0) FROM book_chapters")
+            sqlx::query_scalar(&format!("SELECT COALESCE(SUM(length(content)), 0) FROM book_chapters WHERE user_namespace = ?1 AND {REGENERABLE_CHAPTERS}"))
+                .bind(ns)
                 .fetch_one(&self.pool)
                 .await?;
         Ok(CacheInfo {
@@ -1860,21 +1923,25 @@ impl Storage {
 
     /// 清空缓存（type: "toc" 清目录缓存 / "chapters" 清章节缓存 / "all" 全清）；
     /// 返回 (toc 删除行数, 章节删除行数)
-    pub async fn clear_cache(&self, cache_type: &str) -> Result<(u64, u64)> {
+    pub async fn clear_cache(&self, ns: &str, cache_type: &str) -> Result<(u64, u64)> {
+        let mut tx = self.pool.begin().await?;
         let mut toc_deleted = 0u64;
         let mut chapters_deleted = 0u64;
         if cache_type == "toc" || cache_type == "all" {
-            let r = sqlx::query("DELETE FROM toc_cache")
-                .execute(&self.pool)
+            let r = sqlx::query("DELETE FROM toc_cache WHERE user_namespace = ?1")
+                .bind(ns)
+                .execute(&mut *tx)
                 .await?;
             toc_deleted = r.rows_affected();
         }
         if cache_type == "chapters" || cache_type == "all" {
-            let r = sqlx::query("DELETE FROM book_chapters")
-                .execute(&self.pool)
+            let r = sqlx::query(&format!("DELETE FROM book_chapters WHERE user_namespace = ?1 AND {REGENERABLE_CHAPTERS}"))
+                .bind(ns)
+                .execute(&mut *tx)
                 .await?;
             chapters_deleted = r.rows_affected();
         }
+        tx.commit().await?;
         Ok((toc_deleted, chapters_deleted))
     }
 
@@ -1896,7 +1963,7 @@ impl Storage {
     /// 不影响书架 books 行。返回删除行数——P0 按命名空间隔离
     pub async fn delete_book_cache(&self, ns: &str, book_url: &str) -> Result<u64> {
         let r =
-            sqlx::query("DELETE FROM book_chapters WHERE book_url = ?1 AND user_namespace = ?2")
+            sqlx::query(&format!("DELETE FROM book_chapters WHERE book_url = ?1 AND user_namespace = ?2 AND {REGENERABLE_CHAPTERS}"))
                 .bind(book_url)
                 .bind(ns)
                 .execute(&self.pool)
@@ -2166,16 +2233,17 @@ impl Storage {
     }
 
     /// 保存章节（本地书）
-    pub async fn save_chapters(&self, book_url: &str, chapters: &[(String, String)]) -> Result<()> {
+    pub async fn save_chapters(&self, ns: &str, book_url: &str, chapters: &[(String, String)]) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         for (i, (title, content)) in chapters.iter().enumerate() {
             sqlx::query(
-                "INSERT OR REPLACE INTO book_chapters (book_url, chapter_index, title, content) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT OR REPLACE INTO book_chapters (book_url, chapter_index, title, content, user_namespace) VALUES (?1, ?2, ?3, ?4, ?5)",
             )
             .bind(book_url)
             .bind(i as i64)
             .bind(title)
             .bind(content)
+            .bind(ns)
             .execute(&mut *tx)
             .await?;
         }
@@ -2184,11 +2252,12 @@ impl Storage {
     }
 
     /// 本地书章节列表
-    pub async fn list_chapters(&self, book_url: &str) -> Result<Vec<(i64, String)>> {
+    pub async fn list_chapters(&self, ns: &str, book_url: &str) -> Result<Vec<(i64, String)>> {
         let rows = sqlx::query_as::<_, (i64, String)>(
-            "SELECT chapter_index, title FROM book_chapters WHERE book_url = ?1 ORDER BY chapter_index",
+            "SELECT chapter_index, title FROM book_chapters WHERE book_url = ?1 AND user_namespace = ?2 ORDER BY chapter_index",
         )
         .bind(book_url)
+        .bind(ns)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
@@ -2209,12 +2278,14 @@ impl Storage {
     /// 本地书章节列表（含字数：SQLite length() 对 TEXT 按字符数统计正文，避免整章内容回传）
     pub async fn list_chapters_with_word_count(
         &self,
+        ns: &str,
         book_url: &str,
     ) -> Result<Vec<(i64, String, i64)>> {
         let rows = sqlx::query_as::<_, (i64, String, i64)>(
-            "SELECT chapter_index, title, length(content) FROM book_chapters WHERE book_url = ?1 ORDER BY chapter_index",
+            "SELECT chapter_index, title, length(content) FROM book_chapters WHERE book_url = ?1 AND user_namespace = ?2 ORDER BY chapter_index",
         )
         .bind(book_url)
+        .bind(ns)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
@@ -2254,6 +2325,64 @@ impl Storage {
         Ok(rows)
     }
 
+    /// Cache-only view in real chapter order. Network rows retain their URL-hash keys
+    /// on disk, while API consumers receive safe, zero-based chapter positions.
+    /// Directory age is irrelevant here: an expired fetch cache still describes
+    /// the cached body's order. Missing bodies can be retained for placeholders.
+    pub async fn ordered_cached_chapters(
+        &self,
+        ns: &str,
+        book_url: &str,
+        include_missing: bool,
+    ) -> Result<Vec<(i64, String, String)>> {
+        let rows = self.list_cached_chapters(ns, book_url).await?;
+        let book = self.find_book(ns, book_url).await?;
+        if book_url.starts_with("local://")
+            || book_url.starts_with("storage/")
+            || book.as_ref().is_some_and(|b| {
+                crate::service::local_book::is_local_book(&b.book_url, &b.origin)
+            })
+        {
+            return Ok(rows);
+        }
+        let toc_url = book.as_ref().map(|b| b.toc_url.as_str()).unwrap_or("");
+        let json: Option<String> = sqlx::query_scalar(
+            "SELECT chapters_json FROM toc_cache WHERE user_namespace = ?1 AND (book_url = ?2 OR toc_url = ?2 OR (?3 != '' AND (book_url = ?3 OR toc_url = ?3))) ORDER BY CASE WHEN ?3 != '' AND (toc_url = ?3 OR book_url = ?3) THEN 0 ELSE 1 END, updated_at DESC LIMIT 1",
+        )
+        .bind(ns)
+        .bind(book_url)
+        .bind(toc_url)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(json) = json else {
+            // Persisted positions survive clearing the fetchable directory cache.
+            // Existing sequential rows predate URL-hash storage and remain valid.
+            let ordered = sqlx::query_as::<_, (i64, String, String)>(
+                "SELECT COALESCE(chapter_order, chapter_index), title, content FROM book_chapters WHERE user_namespace = ?1 AND book_url = ?2 AND (chapter_order IS NOT NULL OR chapter_index < 1000000) ORDER BY COALESCE(chapter_order, chapter_index)",
+            ).bind(ns).bind(book_url).fetch_all(&self.pool).await?;
+            if ordered.len() < rows.len() {
+                anyhow::bail!("目录缓存缺失，请先刷新目录");
+            }
+            return Ok(ordered);
+        };
+        let toc: Vec<crate::model::book_chapter::BookChapter> = serde_json::from_str(&json)?;
+        let bodies: std::collections::HashMap<_, _> = rows
+            .into_iter()
+            .map(|(i, title, body)| (i, (title, body)))
+            .collect();
+        let mut ordered = Vec::new();
+        for (pos, chapter) in toc.into_iter().filter(|c| !c.is_volume).enumerate() {
+            let key = crate::util::md5::chapter_url_hash(&chapter.url);
+            if let Some((title, body)) = bodies.get(&key).or_else(|| bodies.get(&(pos as i64))).cloned() {
+                let title = if chapter.title.is_empty() { title } else { chapter.title };
+                ordered.push((pos as i64, title, body));
+            } else if include_missing {
+                ordered.push((pos as i64, chapter.title, String::new()));
+            }
+        }
+        Ok(ordered)
+    }
+
     /// 书源书正文缓存写回（chapter_index = chapterUrl md5 哈希；与本地书顺序索引键域不重叠）
     /// P0 跨用户隔离：缓存行按 user_namespace 隔离
     pub async fn cache_chapter_content(
@@ -2264,14 +2393,40 @@ impl Storage {
         title: &str,
         content: &str,
     ) -> Result<()> {
+        self.cache_chapter_content_with_order(ns, book_url, index, title, content, None).await
+    }
+
+    /// Batch callers already know real chapter positions and avoid reparsing a
+    /// full directory for every body write. None retains legacy inference.
+    pub async fn cache_chapter_content_with_order(
+        &self, ns: &str, book_url: &str, index: i64, title: &str,
+        content: &str, explicit_order: Option<i64>,
+    ) -> Result<()> {
+        let toc: Option<String> = if explicit_order.is_some() || index < 1_000_000 { None } else {
+            sqlx::query_scalar(
+                "SELECT chapters_json FROM toc_cache WHERE user_namespace = ?1 AND (book_url = ?2 OR toc_url = ?2 OR toc_url = (SELECT toc_url FROM books WHERE user_namespace = ?1 AND book_url = ?2)) ORDER BY updated_at DESC LIMIT 1",
+            ).bind(ns).bind(book_url).fetch_optional(&self.pool).await?
+        };
+        let has_directory = toc.is_some();
+        let mut resolved_title = title.to_string();
+        let order = if explicit_order.is_some() { explicit_order } else if index < 1_000_000 { Some(index) } else {
+            let positions: Vec<(usize, String)> = toc.and_then(|json| serde_json::from_str::<Vec<crate::model::book_chapter::BookChapter>>(&json).ok())
+                .map(|toc| toc.into_iter().filter(|c| !c.is_volume).enumerate().filter(|(_, c)| crate::util::md5::chapter_url_hash(&c.url) == index).map(|(i, c)| (i, c.title)).collect()).unwrap_or_default();
+            if resolved_title.is_empty() {
+                if let Some((_, title)) = positions.first() { resolved_title = title.clone(); }
+            }
+            if positions.len() == 1 { Some(positions[0].0 as i64) } else { None }
+        };
         sqlx::query(
-            "INSERT OR REPLACE INTO book_chapters (book_url, chapter_index, title, content, user_namespace) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO book_chapters (book_url, chapter_index, title, content, user_namespace, chapter_order) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(book_url, chapter_index, user_namespace) DO UPDATE SET title = CASE WHEN excluded.title != '' THEN excluded.title ELSE book_chapters.title END, content = excluded.content, chapter_order = CASE WHEN ?7 THEN excluded.chapter_order ELSE COALESCE(excluded.chapter_order, book_chapters.chapter_order) END",
         )
         .bind(book_url)
         .bind(index)
-        .bind(title)
+        .bind(&resolved_title)
         .bind(content)
         .bind(ns)
+        .bind(order)
+        .bind(has_directory)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -2286,7 +2441,7 @@ impl Storage {
     pub async fn delete_local_book(&self, ns: &str, book_url: &str) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         sqlx::query(
-            "DELETE FROM book_chapters WHERE book_url = ?1              AND book_url IN (SELECT book_url FROM books WHERE user_namespace = ?2)",
+            "DELETE FROM book_chapters WHERE book_url = ?1 AND user_namespace = ?2 AND book_url IN (SELECT book_url FROM books WHERE user_namespace = ?2)",
         )
         .bind(book_url)
         .bind(ns)
@@ -2315,7 +2470,7 @@ impl Storage {
         let mut tx = self.pool.begin().await?;
         // P1-C1：book_chapters/toc_cache 无命名空间列——按书架归属过滤后删（跨用户删除防护）
         sqlx::query(
-            "DELETE FROM book_chapters WHERE book_url = ?1              AND book_url IN (SELECT book_url FROM books WHERE user_namespace = ?2)",
+            "DELETE FROM book_chapters WHERE book_url = ?1 AND user_namespace = ?2 AND book_url IN (SELECT book_url FROM books WHERE user_namespace = ?2)",
         )
         .bind(book_url)
         .bind(ns)
@@ -2424,7 +2579,7 @@ impl Storage {
         if old_url != new_url {
             // 旧 URL 章节表/目录缓存清理——必须在 UPDATE 前做（守卫子查询依赖旧 URL 仍归属本用户）
             sqlx::query(
-                "DELETE FROM book_chapters WHERE book_url = ?1                  AND book_url IN (SELECT book_url FROM books WHERE user_namespace = ?2)",
+                "DELETE FROM book_chapters WHERE book_url = ?1 AND user_namespace = ?2 AND book_url IN (SELECT book_url FROM books WHERE user_namespace = ?2)",
             )
             .bind(old_url)
             .bind(ns)
@@ -2645,6 +2800,7 @@ impl Storage {
         toc_url: &str,
         chapters_json: &str,
     ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT OR REPLACE INTO toc_cache (book_url, toc_url, chapters_json, updated_at, user_namespace)              VALUES (?1, ?2, ?3, ?4, ?5)",
         )
@@ -2653,8 +2809,10 @@ impl Storage {
         .bind(chapters_json)
         .bind(chrono::Utc::now().timestamp_millis())
         .bind(ns)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        sync_cached_chapter_order(&mut tx, ns, book_url, toc_url, chapters_json).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -3147,7 +3305,7 @@ impl Storage {
             }
             // P1-C1：章节/目录缓存删除按书架归属过滤（跨用户删除防护）
             sqlx::query(
-                "DELETE FROM book_chapters WHERE book_url = ?1              AND book_url IN (SELECT book_url FROM books WHERE user_namespace = ?2)",
+                "DELETE FROM book_chapters WHERE book_url = ?1 AND user_namespace = ?2 AND book_url IN (SELECT book_url FROM books WHERE user_namespace = ?2)",
             )
             .bind(url)
             .bind(ns)
@@ -3873,14 +4031,17 @@ impl Storage {
             .iter()
             .map(|c| (c.title.clone(), c.content.clone()))
             .collect();
+        sqlx::query("DELETE FROM book_chapters WHERE book_url = ?1 AND user_namespace = ?2")
+            .bind(&info.book_url).bind(ns).execute(&mut *tx).await?;
         for (i, (title, content)) in chapters.iter().enumerate() {
             sqlx::query(
-                "INSERT OR REPLACE INTO book_chapters (book_url, chapter_index, title, content) VALUES (?1,?2,?3,?4)",
+                "INSERT OR REPLACE INTO book_chapters (book_url, chapter_index, title, content, user_namespace) VALUES (?1,?2,?3,?4,?5)",
             )
             .bind(&info.book_url)
             .bind(i as i64)
             .bind(title)
             .bind(content)
+            .bind(ns)
             .execute(&mut *tx)
             .await?;
         }
@@ -3916,18 +4077,20 @@ impl Storage {
         }
         let mut tx = self.pool.begin().await?;
         // 覆盖式重建章节（重复迁移幂等）
-        sqlx::query("DELETE FROM book_chapters WHERE book_url = ?1")
+        sqlx::query("DELETE FROM book_chapters WHERE book_url = ?1 AND user_namespace = ?2")
             .bind(book_url)
+            .bind(ns)
             .execute(&mut *tx)
             .await?;
         for (i, (title, content)) in chapters.iter().enumerate() {
             sqlx::query(
-                "INSERT OR REPLACE INTO book_chapters (book_url, chapter_index, title, content) VALUES (?1,?2,?3,?4)",
+                "INSERT OR REPLACE INTO book_chapters (book_url, chapter_index, title, content, user_namespace) VALUES (?1,?2,?3,?4,?5)",
             )
             .bind(book_url)
             .bind(i as i64)
             .bind(title)
             .bind(content)
+            .bind(ns)
             .execute(&mut *tx)
             .await?;
         }
@@ -4045,7 +4208,7 @@ impl Storage {
         }
         let mut tx = self.pool.begin().await?;
         sqlx::query(
-            "DELETE FROM book_chapters WHERE book_url = ?1              AND book_url IN (SELECT book_url FROM books WHERE user_namespace = ?2)",
+            "DELETE FROM book_chapters WHERE book_url = ?1 AND user_namespace = ?2 AND book_url IN (SELECT book_url FROM books WHERE user_namespace = ?2)",
         )
         .bind(book_url)
         .bind(ns)
@@ -4053,12 +4216,13 @@ impl Storage {
         .await?;
         for (i, (title, content)) in chapters.iter().enumerate() {
             sqlx::query(
-                "INSERT INTO book_chapters (book_url, chapter_index, title, content) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO book_chapters (book_url, chapter_index, title, content, user_namespace) VALUES (?1, ?2, ?3, ?4, ?5)",
             )
             .bind(book_url)
             .bind(i as i64)
             .bind(title)
             .bind(content)
+            .bind(ns)
             .execute(&mut *tx)
             .await?;
         }
@@ -4067,11 +4231,12 @@ impl Storage {
     }
 
     /// 本地书章节（含正文，全量——对账任务 epub 生成用）
-    pub async fn list_chapters_full(&self, book_url: &str) -> Result<Vec<(i64, String, String)>> {
+    pub async fn list_chapters_full(&self, ns: &str, book_url: &str) -> Result<Vec<(i64, String, String)>> {
         let rows = sqlx::query_as::<_, (i64, String, String)>(
-            "SELECT chapter_index, title, content FROM book_chapters WHERE book_url = ?1 ORDER BY chapter_index",
+            "SELECT chapter_index, title, content FROM book_chapters WHERE book_url = ?1 AND user_namespace = ?2 ORDER BY chapter_index",
         )
         .bind(book_url)
+        .bind(ns)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
@@ -5809,22 +5974,10 @@ async fn delete_user_rows(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     username: &str,
 ) -> Result<()> {
-    sqlx::query(
-        "DELETE FROM book_chapters WHERE book_url IN (
-            SELECT book_url FROM books WHERE user_namespace = ?1
-              AND book_url NOT IN (SELECT book_url FROM books WHERE user_namespace != ?1))",
-    )
-    .bind(username)
-    .execute(&mut **tx)
-    .await?;
-    sqlx::query(
-        "DELETE FROM toc_cache WHERE book_url IN (
-            SELECT book_url FROM books WHERE user_namespace = ?1
-              AND book_url NOT IN (SELECT book_url FROM books WHERE user_namespace != ?1))",
-    )
-    .bind(username)
-    .execute(&mut **tx)
-    .await?;
+    sqlx::query("DELETE FROM book_chapters WHERE user_namespace = ?1")
+        .bind(username).execute(&mut **tx).await?;
+    sqlx::query("DELETE FROM toc_cache WHERE user_namespace = ?1")
+        .bind(username).execute(&mut **tx).await?;
     // 表名单为内部硬编码常量，无注入面
     // （book_source_candidates/book_vars_cache/js_cache 为后加三表——
     //   含用户登录态/书级变量等私有中间量，删用户时需一并清理）
@@ -8101,14 +8254,9 @@ mod tests {
         storage.upsert_book("alice", &shared).await.unwrap();
         storage.upsert_book("bob", &shared).await.unwrap();
         storage.upsert_book("alice", &alice_only).await.unwrap();
-        // 章节（共享书章节两用户共用；独有书章节仅 alice）
-        for (url, idx) in [("https://s.com/shared", 0), ("https://a.com/only", 0)] {
-            sqlx::query("INSERT INTO book_chapters (book_url, chapter_index, title, content) VALUES (?1, ?2, '章', '文')")
-                .bind(url)
-                .bind(idx)
-                .execute(&storage.pool)
-                .await
-                .unwrap();
+        // 同URL有各自命名空间的正文，删除alice必须保留bob那一行。
+        for (ns, url) in [("alice", "https://s.com/shared"), ("bob", "https://s.com/shared"), ("alice", "https://a.com/only")] {
+            storage.save_chapters(ns, url, &[("章".into(), "文".into())]).await.unwrap();
         }
         // 用户级数据铺满各表
         storage
@@ -9563,6 +9711,95 @@ mod tests {
         cleanup(storage, "activetok").await;
     }
 
+    #[tokio::test]
+    async fn cache_clear_is_scoped_and_preserves_imported_bodies() {
+        let storage = test_storage("audit-cache-scope").await;
+        for ns in ["alice", "bob"] {
+            storage.cache_toc(ns, "https://source.test/book", "https://source.test/toc", "[]").await.unwrap();
+            storage.cache_chapter_content(ns, "https://source.test/book", 10, "remote", "cache").await.unwrap();
+            storage.cache_chapter_content(ns, "local://original", 0, "local", "original").await.unwrap();
+            storage.cache_chapter_content(ns, "storage/original.txt", 0, "file", "original").await.unwrap();
+            storage.upsert_book(ns, &Book { book_url: "custom-import".into(), origin: "local".into(), ..Default::default() }).await.unwrap();
+            storage.cache_chapter_content(ns, "custom-import", 0, "local", "original").await.unwrap();
+        }
+        assert_eq!(storage.get_cache_info("alice").await.unwrap().chapter_count, 1);
+        assert_eq!(storage.clear_cache("alice", "all").await.unwrap(), (1, 1));
+        assert_eq!(storage.get_cache_info("alice").await.unwrap().total_size, 0);
+        assert_eq!(storage.get_cache_info("bob").await.unwrap().chapter_count, 1);
+        for url in ["local://original", "storage/original.txt", "custom-import"] {
+            assert_eq!(storage.get_chapter_content("alice", url, 0).await.unwrap().as_deref(), Some("original"));
+        }
+        cleanup(storage, "audit-cache-scope").await;
+    }
+
+    #[tokio::test]
+    async fn cached_bodies_follow_expired_directory_order_without_volumes() {
+        let storage = test_storage("audit-cache-order").await;
+        let url = "https://source.test/ordered";
+        let toc = serde_json::json!([
+            {"title":"volume", "url":"volume", "isVolume":true},
+            {"title":"first", "url":"https://source.test/ch/9"},
+            {"title":"missing", "url":"https://source.test/ch/8"},
+            {"title":"last", "url":"https://source.test/ch/1"}
+        ]);
+        storage.cache_toc("alice", url, "https://source.test/toc", &toc.to_string()).await.unwrap();
+        sqlx::query("UPDATE toc_cache SET updated_at = 1").execute(&storage.pool).await.unwrap();
+        for (chapter, content) in [("https://source.test/ch/1", "last body"), ("https://source.test/ch/9", "first body")] {
+            storage.cache_chapter_content("alice", url, crate::util::md5::chapter_url_hash(chapter), "", content).await.unwrap();
+        }
+        let cached = storage.ordered_cached_chapters("alice", url, false).await.unwrap();
+        assert_eq!(cached, vec![(0, "first".into(), "first body".into()), (2, "last".into(), "last body".into())]);
+        let all = storage.ordered_cached_chapters("alice", url, true).await.unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[1], (1, "missing".into(), String::new()));
+        assert!(storage.ordered_cached_chapters("bob", url, false).await.unwrap().is_empty());
+        storage.clear_cache("alice", "toc").await.unwrap();
+        assert_eq!(storage.ordered_cached_chapters("alice", url, false).await.unwrap(), cached);
+        cleanup(storage, "audit-cache-order").await;
+    }
+
+    #[tokio::test]
+    async fn shared_book_url_replacement_and_deletion_preserve_other_namespace() {
+        let storage = test_storage("audit-shared-url").await;
+        let url = "local://shared-synthetic";
+        for ns in ["alice", "bob"] {
+            storage.upsert_book(ns, &Book { book_url: url.into(), origin: "local".into(), ..Default::default() }).await.unwrap();
+            storage.save_chapters(ns, url, &[(ns.into(), format!("{ns} original"))]).await.unwrap();
+        }
+        storage.replace_chapters("alice", url, &[("updated".into(), "alice changed".into())]).await.unwrap();
+        assert_eq!(storage.list_chapters_full("bob", url).await.unwrap(), vec![(0, "bob".into(), "bob original".into())]);
+        storage.delete_book("alice", url).await.unwrap();
+        assert!(storage.list_chapters_full("alice", url).await.unwrap().is_empty());
+        assert_eq!(storage.list_chapters_full("bob", url).await.unwrap().len(), 1);
+        cleanup(storage, "audit-shared-url").await;
+    }
+
+    #[tokio::test]
+    async fn historical_order_backfill_is_idempotent_and_duplicate_urls_remain_explicit() {
+        let storage = test_storage("audit-order-backfill").await;
+        let book = "https://backfill.test/book";
+        let chapter = "https://backfill.test/chapter";
+        let key = crate::util::md5::chapter_url_hash(chapter);
+        storage.cache_chapter_content("alice", book, key, "old", "body").await.unwrap();
+        let toc = serde_json::json!([{"title":"chapter", "url":chapter}]).to_string();
+        sqlx::query("INSERT INTO toc_cache (user_namespace, book_url, toc_url, chapters_json) VALUES ('alice', ?1, ?1, ?2)")
+            .bind(book).bind(&toc).execute(&storage.pool).await.unwrap();
+        let config = storage.config.clone();
+        storage.pool.close().await;
+        let storage = init(&config).await.unwrap();
+        let order: Option<i64> = sqlx::query_scalar("SELECT chapter_order FROM book_chapters WHERE user_namespace = 'alice'")
+            .fetch_one(&storage.pool).await.unwrap();
+        assert_eq!(order, Some(0));
+        storage.cache_toc("alice", book, book, &toc).await.unwrap();
+        assert_eq!(storage.list_cached_chapters("alice", book).await.unwrap().len(), 1);
+        let duplicate = serde_json::json!([{"title":"first", "url":chapter}, {"title":"second", "url":chapter}]).to_string();
+        storage.cache_toc("alice", book, book, &duplicate).await.unwrap();
+        assert_eq!(storage.ordered_cached_chapters("alice", book, false).await.unwrap().len(), 2);
+        storage.clear_cache("alice", "toc").await.unwrap();
+        assert_eq!(storage.ordered_cached_chapters("alice", book, false).await.unwrap_err().to_string(), "目录缓存缺失，请先刷新目录");
+        cleanup(storage, "audit-order-backfill").await;
+    }
+
     /// 缓存管理：getCacheInfo 统计（toc_cache 行数 / book_chapters 行数 / sum length 大小）+
     /// clearCache 按 type 清空（toc / chapters / all）
     #[tokio::test]
@@ -9570,7 +9807,7 @@ mod tests {
         let storage = test_storage("cache").await;
 
         // 空库：全零
-        let info = storage.get_cache_info().await.unwrap();
+        let info = storage.get_cache_info("default").await.unwrap();
         assert_eq!(info.toc_cache_count, 0);
         assert_eq!(info.chapter_count, 0);
         assert_eq!(info.chapter_size, 0);
@@ -9596,8 +9833,8 @@ mod tests {
             .await
             .unwrap();
         storage
-            .save_chapters(
-                "local://book1",
+            .save_chapters("default",
+                "https://cache.test/book1",
                 &[
                     ("第一章".to_string(), "正文一甲乙丙丁".to_string()),
                     ("第二章".to_string(), "正文二戊己庚辛壬癸".to_string()),
@@ -9607,7 +9844,7 @@ mod tests {
             .await
             .unwrap();
 
-        let info = storage.get_cache_info().await.unwrap();
+        let info = storage.get_cache_info("default").await.unwrap();
         assert_eq!(info.toc_cache_count, 2);
         assert_eq!(
             info.toc_cache_size, 34,
@@ -9618,18 +9855,18 @@ mod tests {
         assert_eq!(info.total_size, info.toc_cache_size + info.chapter_size);
 
         // 只清 toc
-        let (toc_del, chap_del) = storage.clear_cache("toc").await.unwrap();
+        let (toc_del, chap_del) = storage.clear_cache("default", "toc").await.unwrap();
         assert_eq!(toc_del, 2);
         assert_eq!(chap_del, 0);
-        let info = storage.get_cache_info().await.unwrap();
+        let info = storage.get_cache_info("default").await.unwrap();
         assert_eq!(info.toc_cache_count, 0);
         assert_eq!(info.chapter_count, 3, "章节缓存不受影响");
 
         // 只清 chapters
-        let (toc_del, chap_del) = storage.clear_cache("chapters").await.unwrap();
+        let (toc_del, chap_del) = storage.clear_cache("default", "chapters").await.unwrap();
         assert_eq!(toc_del, 0);
         assert_eq!(chap_del, 3);
-        let info = storage.get_cache_info().await.unwrap();
+        let info = storage.get_cache_info("default").await.unwrap();
         assert_eq!(info.chapter_count, 0);
         assert_eq!(info.total_size, 0);
 
@@ -9644,22 +9881,22 @@ mod tests {
             .await
             .unwrap();
         storage
-            .save_chapters(
-                "local://book1",
+            .save_chapters("default",
+                "https://cache.test/book1",
                 &[("第四章".to_string(), "正文四".to_string())],
             )
             .await
             .unwrap();
-        let (toc_del, chap_del) = storage.clear_cache("all").await.unwrap();
+        let (toc_del, chap_del) = storage.clear_cache("default", "all").await.unwrap();
         assert_eq!(toc_del, 1);
         assert_eq!(chap_del, 1);
-        let info = storage.get_cache_info().await.unwrap();
+        let info = storage.get_cache_info("default").await.unwrap();
         assert_eq!(info.toc_cache_count, 0);
         assert_eq!(info.chapter_count, 0);
         assert_eq!(info.total_size, 0);
 
         // 未知 type：不删任何表
-        let (toc_del, chap_del) = storage.clear_cache("unknown").await.unwrap();
+        let (toc_del, chap_del) = storage.clear_cache("default", "unknown").await.unwrap();
         assert_eq!(toc_del, 0);
         assert_eq!(chap_del, 0);
 
@@ -9672,7 +9909,7 @@ mod tests {
         let storage = test_storage("bookcache").await;
         // 书 A：本地书章节 + 书源书正文缓存（md5 键）混合
         storage
-            .save_chapters(
+            .save_chapters("default",
                 "https://book.com/a",
                 &[
                     ("第一章".to_string(), "正文一二三四五".to_string()),
@@ -9692,7 +9929,7 @@ mod tests {
             .await
             .unwrap();
         storage
-            .save_chapters(
+            .save_chapters("default",
                 "https://book.com/b",
                 &[("第一章".to_string(), "另一本".to_string())],
             )
@@ -9782,7 +10019,7 @@ mod tests {
         assert_eq!(timeout, 5000, "busy_timeout 应为 5000ms");
         // WAL 副作用文件存在（reader.db-wal 惰性创建——写一次触发）
         storage
-            .save_chapters(
+            .save_chapters("default",
                 "local://waltest",
                 &[("第一章".to_string(), "正文".to_string())],
             )
@@ -9854,7 +10091,7 @@ mod tests {
     async fn test_search_book_content() {
         let storage = test_storage("search").await;
         storage
-            .save_chapters(
+            .save_chapters("default",
                 "local://book1",
                 &[
                     ("第一章".to_string(), "这是第一章的正文，关键词出现了。".to_string()),
@@ -9865,7 +10102,7 @@ mod tests {
             .await
             .unwrap();
         storage
-            .save_chapters(
+            .save_chapters("default",
                 "local://book2",
                 &[("第一章".to_string(), "另一本书里的关键词。".to_string())],
             )
@@ -9912,7 +10149,7 @@ mod tests {
 
         // 大小写不敏感（ASCII）
         storage
-            .save_chapters(
+            .save_chapters("default",
                 "local://book3",
                 &[("Ch1".to_string(), "Hello World here".to_string())],
             )
@@ -9934,7 +10171,7 @@ mod tests {
 
         // %/_ 作为字面量转义（不当作 LIKE 通配符）
         storage
-            .save_chapters(
+            .save_chapters("default",
                 "local://book4",
                 &[
                     ("C1".to_string(), "进度5_0%完成。".to_string()),
@@ -10000,7 +10237,7 @@ mod tests {
         let storage = test_storage("search-ns").await;
         // default ns 本地书章节（save_chapters 落 default）
         storage
-            .save_chapters(
+            .save_chapters("default",
                 "local://shared",
                 &[("第一章".to_string(), "default 缓存的秘密词正文".to_string())],
             )
@@ -10424,7 +10661,7 @@ mod tests {
 
         // 与本地书顺序索引共存：哈希键域（~2^60）不重叠 0..n
         storage
-            .save_chapters(book_url, &[("本地1".to_string(), "本地内容1".to_string())])
+            .save_chapters("default", book_url, &[("本地1".to_string(), "本地内容1".to_string())])
             .await
             .unwrap();
         assert_eq!(
@@ -11259,7 +11496,7 @@ mod tests {
             .await
             .unwrap();
         storage
-            .save_chapters(url, &[("第一章".into(), "正文一".into())])
+            .save_chapters("default", url, &[("第一章".into(), "正文一".into())])
             .await
             .unwrap();
         storage
@@ -11324,7 +11561,7 @@ mod tests {
             .await
             .unwrap();
         storage
-            .save_chapters(url, &[("第一章".into(), "正文".into())])
+            .save_chapters("default", url, &[("第一章".into(), "正文".into())])
             .await
             .unwrap();
         storage.cache_toc("default", url, url, "[]").await.unwrap();
@@ -11374,7 +11611,7 @@ mod tests {
             .await
             .unwrap();
         storage
-            .save_chapters(url, &[("第一章".into(), "正文".into())])
+            .save_chapters("default", url, &[("第一章".into(), "正文".into())])
             .await
             .unwrap();
 
@@ -11408,7 +11645,7 @@ mod tests {
             .await
             .unwrap();
         storage
-            .save_chapters(url, &[("旧章".into(), "旧正文".into())])
+            .save_chapters("default", url, &[("旧章".into(), "旧正文".into())])
             .await
             .unwrap();
 
@@ -11419,7 +11656,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("无权"), "应拒绝跨用户替换: {err}");
-        let list = storage.list_chapters(url).await.unwrap();
+        let list = storage.list_chapters("default", url).await.unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].1, "旧章");
 
@@ -11428,7 +11665,7 @@ mod tests {
             .replace_chapters("default", url, &[("新章".into(), "新正文".into())])
             .await
             .unwrap();
-        let list = storage.list_chapters(url).await.unwrap();
+        let list = storage.list_chapters("default", url).await.unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].1, "新章");
         assert_eq!(

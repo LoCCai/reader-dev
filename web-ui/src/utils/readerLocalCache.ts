@@ -1,3 +1,5 @@
+import { useUserStore } from '@/stores/user'
+
 /**
  * 本机章节缓存（IndexedDB）——阅读页离线/快速回读用。
  *
@@ -8,6 +10,7 @@
 
 export interface LocalCachedChapter {
   key: string
+  owner: string
   bookUrl: string
   chapterUrl: string
   title: string
@@ -22,8 +25,14 @@ const DB_VERSION = 1
 const STORE = 'chapters'
 const KEY_PREFIX = 'ch:'
 
-function cacheKey(bookUrl: string, chapterUrl: string): string {
-  return `${KEY_PREFIX}${bookUrl}\u0000${chapterUrl}`
+/** Freeze this before a network request so a late response cannot enter another account's cache. */
+export function localCacheOwner(): string {
+  const user = useUserStore()
+  return JSON.stringify([user.username || '', !!(user.isAdmin && user.defaultConfigMode)])
+}
+
+function cacheKey(owner: string, bookUrl: string, chapterUrl: string): string {
+  return `${KEY_PREFIX}${owner}\u0000${bookUrl}\u0000${chapterUrl}`
 }
 
 let dbPromise: Promise<IDBDatabase> | null = null
@@ -53,16 +62,18 @@ function openDb(): Promise<IDBDatabase> {
 export async function getLocalChapter(
   bookUrl: string,
   chapterUrl: string,
+  owner = localCacheOwner(),
 ): Promise<LocalCachedChapter | null> {
   try {
     const db = await openDb()
-    const key = cacheKey(bookUrl, chapterUrl)
-    return await new Promise<LocalCachedChapter | null>((resolve, reject) => {
+    const key = cacheKey(owner, bookUrl, chapterUrl)
+    const result = await new Promise<LocalCachedChapter | null>((resolve, reject) => {
       const tx = db.transaction(STORE, 'readonly')
       const req = tx.objectStore(STORE).get(key)
       req.onsuccess = () => resolve((req.result as LocalCachedChapter | undefined) ?? null)
       req.onerror = () => reject(req.error)
     })
+    return owner === localCacheOwner() && result?.owner === owner ? result : null
   } catch {
     return null
   }
@@ -75,11 +86,15 @@ export async function saveLocalChapter(input: {
   title: string
   index: number
   content: string
+  owner?: string
 }): Promise<boolean> {
+  const owner = input.owner ?? localCacheOwner()
   try {
     const db = await openDb()
+    if (owner !== localCacheOwner()) return false
     const rec: LocalCachedChapter = {
-      key: cacheKey(input.bookUrl, input.chapterUrl),
+      key: cacheKey(owner, input.bookUrl, input.chapterUrl),
+      owner,
       bookUrl: input.bookUrl,
       chapterUrl: input.chapterUrl,
       title: input.title,
@@ -108,13 +123,16 @@ export async function saveLocalChapters(
     index: number
     content: string
   }>,
+  owner = localCacheOwner(),
 ): Promise<number> {
   if (items.length === 0) return 0
   try {
     const db = await openDb()
+    if (owner !== localCacheOwner()) return 0
     const now = Date.now()
     const recs: LocalCachedChapter[] = items.map((item) => ({
-      key: cacheKey(item.bookUrl, item.chapterUrl),
+      key: cacheKey(owner, item.bookUrl, item.chapterUrl),
+      owner,
       bookUrl: item.bookUrl,
       chapterUrl: item.chapterUrl,
       title: item.title,
@@ -141,18 +159,21 @@ export async function saveLocalChapters(
 
 /** 清空某书本机缓存；返回删除条数 */
 export async function clearLocalBook(bookUrl: string): Promise<number> {
+  const owner = localCacheOwner()
   try {
     const db = await openDb()
     return await new Promise<number>((resolve, reject) => {
       const tx = db.transaction(STORE, 'readwrite')
       const store = tx.objectStore(STORE)
-      const req = store.index('bookUrl').openKeyCursor(IDBKeyRange.only(bookUrl))
+      const req = store.index('bookUrl').openCursor(IDBKeyRange.only(bookUrl))
       let deleted = 0
       req.onsuccess = () => {
         const cursor = req.result
         if (cursor) {
-          store.delete(cursor.primaryKey)
-          deleted++
+          if ((cursor.value as LocalCachedChapter).owner === owner) {
+            store.delete(cursor.primaryKey)
+            deleted++
+          }
           cursor.continue()
         }
       }
@@ -167,6 +188,7 @@ export async function clearLocalBook(bookUrl: string): Promise<number> {
 
 /** 列出某书本机已缓存章节 URL（目录缓存标记用；失败返回空数组） */
 export async function listLocalChapterUrls(bookUrl: string): Promise<string[]> {
+  const owner = localCacheOwner()
   try {
     const db = await openDb()
     return await new Promise<string[]>((resolve, reject) => {
@@ -177,7 +199,8 @@ export async function listLocalChapterUrls(bookUrl: string): Promise<string[]> {
       req.onsuccess = () => {
         const cursor = req.result
         if (cursor) {
-          urls.push((cursor.value as LocalCachedChapter).chapterUrl)
+          const record = cursor.value as LocalCachedChapter
+          if (record.owner === owner) urls.push(record.chapterUrl)
           cursor.continue()
         }
       }

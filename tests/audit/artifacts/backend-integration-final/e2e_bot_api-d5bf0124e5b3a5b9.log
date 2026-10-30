@@ -1,0 +1,10 @@
+
+running 5 tests
+test bot_api_auth_and_search ... ok
+test bot_api_toc_content_download_changesource ... ok
+test bot_download_global_running_cap ... ok
+test bot_job_ns_isolation_returns_404 ... ok
+test bot_jobs_deadlock_regression_concurrent_register_and_list ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 51.76s
+

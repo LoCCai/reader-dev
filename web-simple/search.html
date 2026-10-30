@@ -201,9 +201,10 @@
     if (!b || !b.isInShelf) return;
     mStatus.textContent = "更新中…";
     fetch(apiUrl("/reader3/getBookToc", {
-      url: b.tocUrl || b.bookUrl,
+      url: b.bookUrl,
       tocUrl: b.tocUrl || b.bookUrl,
-      bookSource: b.origin || ""
+      bookSource: b.origin || "",
+      refresh: 1
     }))
       .then(function (r) { return r.json(); })
       .then(function (j) {
@@ -238,14 +239,14 @@
         if (!arr.length) { mSources.innerHTML = "<div class='src'>暂无可用书源</div>"; return; }
         mSources.innerHTML = "";
         arr.forEach(function (s) {
-          var url = s.bookSourceUrl || "";
-          var name = s.bookSourceName || url;
+          var url = s.origin || "";
+          var name = s.originName || url;
           var btn = document.createElement("button");
           btn.type = "button";
           btn.className = "src" + (url === b.origin ? " cur" : "");
           btn.textContent = name;
           btn.addEventListener("click", function () {
-            switchBookSource(url, name);
+            switchBookSource(s);
           });
           mSources.appendChild(btn);
         });
@@ -255,42 +256,30 @@
       });
   }
 
-  function switchBookSource(url, name) {
+  function switchBookSource(candidate) {
     var b = currentBook;
     if (!b || !b.isInShelf) return;
+    if (!candidate.origin || !candidate.bookUrl) {
+      mStatus.textContent = "换源失败：候选缺少书源或书籍链接";
+      return;
+    }
     mStatus.textContent = "切换书源中…";
-    // 先取新书源详情拿到 tocUrl，再增量更新书架书（bookUrl 主键不变）
-    fetch(apiUrl("/reader3/getBookInfo", { url: b.bookUrl, bookSource: url }))
-      .then(function (r) { return r.json(); })
-      .then(function (info) {
-        if (!info || info.isSuccess === false) {
-          mStatus.textContent = "换源失败：" + ((info && info.errorMsg) || "获取新书源详情失败");
-          return null;
-        }
-        var data = info.data || {};
-        var body = {
-          bookUrl: b.bookUrl,
-          origin: url,
-          originName: name,
-          tocUrl: data.tocUrl || b.tocUrl || b.bookUrl
-        };
-        return fetch(apiUrl("/reader3/saveBook", {}), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body)
-        }).then(function (r) { return r.json(); });
-      })
+    // 候选是 SearchBook（origin + bookUrl），换源须让服务端同步迁移主键和目录。
+    fetch(apiUrl("/reader3/setBookSource", {}), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bookUrl: b.bookUrl, newUrl: candidate.bookUrl, bookSourceUrl: candidate.origin })
+    }).then(function (r) { return r.json(); })
       .then(function (j) {
-        if (!j) return;
-        if (!j || j.isSuccess === false) {
+        if (!j || j.isSuccess === false || !j.data || !j.data.bookUrl) {
           mStatus.textContent = "换源失败：" + (j && j.errorMsg || "未知错误");
           return;
         }
-        b.origin = url;
-        b.originName = name;
+        for (var k in j.data) b[k] = j.data[k];
         b.isInShelf = true;
-        mStatus.textContent = "已切换书源";
+        if (currentBook !== b) return;
         renderBookModal();
+        mStatus.textContent = "已切换书源";
         showSourcesForBook();
       })
       .catch(function (e) {

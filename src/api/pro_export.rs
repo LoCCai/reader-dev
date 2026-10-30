@@ -44,7 +44,7 @@ pub async fn get_all_contents(
         .flatten();
     match state
         .storage
-        .list_cached_chapters(&namespace, &book_url)
+        .ordered_cached_chapters(&namespace, &book_url, true)
         .await
     {
         Ok(rows) => {
@@ -71,7 +71,7 @@ pub async fn get_all_contents(
         }
         Err(e) => {
             tracing::error!("getAllContents [{namespace}/{book_url}] 失败: {e}");
-            Json(ReturnData::err("系统错误"))
+            Json(ReturnData::err(crate::storage::cache_read_error(&e)))
         }
     }
 }
@@ -109,7 +109,7 @@ pub async fn search_chapter(
 
     match state
         .storage
-        .list_cached_chapters(&namespace, &book_url)
+        .ordered_cached_chapters(&namespace, &book_url, true)
         .await
     {
         Ok(rows) => {
@@ -138,7 +138,7 @@ pub async fn search_chapter(
         }
         Err(e) => {
             tracing::error!("searchChapter [{namespace}/{book_url}] 失败: {e}");
-            Json(ReturnData::err("系统错误"))
+            Json(ReturnData::err(crate::storage::cache_read_error(&e)))
         }
     }
 }
@@ -153,7 +153,10 @@ async fn export_chapters(
     Vec<crate::service::export_book::ExportChapter>,
 )> {
     let book = state.storage.find_book(ns, book_url).await.ok().flatten();
-    let rows = state.storage.list_cached_chapters(ns, book_url).await?;
+    if book.as_ref().is_some_and(|b| b.book_type != 0) {
+        anyhow::bail!("暂不支持该书籍类型的文本导出");
+    }
+    let rows = state.storage.ordered_cached_chapters(ns, book_url, false).await?;
     let chapters = rows
         .into_iter()
         .filter(|(_, _, c)| !c.trim().is_empty())
@@ -199,7 +202,7 @@ pub async fn export_to_txt(
         Ok(v) => v,
         Err(e) => {
             tracing::error!("exportToTxt [{namespace}/{book_url}] 失败: {e}");
-            return Json(ReturnData::err("系统错误")).into_response();
+            return Json(ReturnData::err(crate::storage::cache_read_error(&e))).into_response();
         }
     };
     let name = book
@@ -216,7 +219,14 @@ pub async fn export_to_txt(
         Ok(v) => v,
         Err(e) => return Json(ReturnData::err(format!("编码不支持: {e}"))).into_response(),
     };
-    file_download(bytes, &format!("{name}.txt"), "text/plain; charset=utf-8")
+    let content_type = if matches!(encoding.trim().to_ascii_lowercase().as_str(), "utf-8" | "utf8" | "utf_8") {
+        "text/plain; charset=utf-8"
+    } else if encoding.trim().eq_ignore_ascii_case("gb18030") {
+        "text/plain; charset=gb18030"
+    } else {
+        "text/plain; charset=gbk"
+    };
+    file_download(bytes, &format!("{name}.txt"), content_type)
 }
 
 /// GET/POST /reader3/exportToEpub：服务端 EPUB 导出下载。元数据 publisher="Legado" /
@@ -240,7 +250,7 @@ pub async fn export_to_epub(
         Ok(v) => v,
         Err(e) => {
             tracing::error!("exportToEpub [{namespace}/{book_url}] 失败: {e}");
-            return Json(ReturnData::err("系统错误")).into_response();
+            return Json(ReturnData::err(crate::storage::cache_read_error(&e))).into_response();
         }
     };
     let name = book

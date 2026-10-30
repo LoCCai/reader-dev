@@ -1,0 +1,158 @@
+TAP version 13
+# Subtest: R1: cancelling a delayed start cancels its eventual taskId and never subscribes
+not ok 1 - R1: cancelling a delayed start cancels its eventual taskId and never subscribes
+  ---
+  duration_ms: 156.246649
+  type: 'test'
+  location: '/www/wwwroot/bot/QIQI/qq/github_git/reader-dev-audit-20261030/tests/audit/frontend_cache_dialog.mjs:70:1'
+  failureType: 'testCodeFailure'
+  error: 'late server task must be cancelled by exact taskId'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (file:///www/wwwroot/bot/QIQI/qq/github_git/reader-dev-audit-20261030/tests/audit/frontend_cache_dialog.mjs:77:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: R1: cancelling established stream uses exact taskId, not book URL
+not ok 2 - R1: cancelling established stream uses exact taskId, not book URL
+  ---
+  duration_ms: 44.130387
+  type: 'test'
+  location: '/www/wwwroot/bot/QIQI/qq/github_git/reader-dev-audit-20261030/tests/audit/frontend_cache_dialog.mjs:83:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+    
+      [
+        [
+    +     'https://fixture.invalid/book/a',
+    +     false
+    -     'task-a',
+    -     true
+        ]
+      ]
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    0:
+      0: 'task-a'
+      1: true
+  actual:
+    0:
+      0: 'https://fixture.invalid/book/a'
+      1: false
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///www/wwwroot/bot/QIQI/qq/github_git/reader-dev-audit-20261030/tests/audit/frontend_cache_dialog.mjs:88:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: R1: cancelling during SSE handshake closes the late handle and ignores late completion
+not ok 3 - R1: cancelling during SSE handshake closes the late handle and ignores late completion
+  ---
+  duration_ms: 48.166497
+  type: 'test'
+  location: '/www/wwwroot/bot/QIQI/qq/github_git/reader-dev-audit-20261030/tests/audit/frontend_cache_dialog.mjs:92:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The expression evaluated to a falsy value:
+    
+      assert.ok(calls.cancel.some(([key, isId]) => key === 'task-a' && isId === true))
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (file:///www/wwwroot/bot/QIQI/qq/github_git/reader-dev-audit-20261030/tests/audit/frontend_cache_dialog.mjs:101:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: R1: local storage rejecting writes cannot count successfully cached chapters
+not ok 4 - R1: local storage rejecting writes cannot count successfully cached chapters
+  ---
+  duration_ms: 28.986308
+  type: 'test'
+  location: '/www/wwwroot/bot/QIQI/qq/github_git/reader-dev-audit-20261030/tests/audit/frontend_cache_dialog.mjs:107:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    
+    2 !== 0
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 0
+  actual: 2
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///www/wwwroot/bot/QIQI/qq/github_git/reader-dev-audit-20261030/tests/audit/frontend_cache_dialog.mjs:113:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: R1: normal EOF without a finished frame must not report successful caching
+not ok 5 - R1: normal EOF without a finished frame must not report successful caching
+  ---
+  duration_ms: 28.050188
+  type: 'test'
+  location: '/www/wwwroot/bot/QIQI/qq/github_git/reader-dev-audit-20261030/tests/audit/frontend_cache_dialog.mjs:117:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    
+    true !== false
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: false
+  actual: true
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///www/wwwroot/bot/QIQI/qq/github_git/reader-dev-audit-20261030/tests/audit/frontend_cache_dialog.mjs:123:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: R1: details cache button loads directory before opening without visiting directory tab
+not ok 6 - R1: details cache button loads directory before opening without visiting directory tab
+  ---
+  duration_ms: 116.554617
+  type: 'test'
+  location: '/www/wwwroot/bot/QIQI/qq/github_git/reader-dev-audit-20261030/tests/audit/frontend_cache_dialog.mjs:127:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    
+    0 !== 1
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 1
+  actual: 0
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///www/wwwroot/bot/QIQI/qq/github_git/reader-dev-audit-20261030/tests/audit/frontend_cache_dialog.mjs:137:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: R1 positive: range selection uses zero-based real chapter positions and emits exact scope
+ok 7 - R1 positive: range selection uses zero-based real chapter positions and emits exact scope
+  ---
+  duration_ms: 20.319404
+  type: 'test'
+  ...
+1..7
+# tests 7
+# suites 0
+# pass 1
+# fail 6
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 750.142128
