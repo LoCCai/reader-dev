@@ -119,7 +119,8 @@ async function scenario(name, action) {
 const waitVisible = async locator => { await locator.waitFor({ state: 'visible', timeout: 12000 }); return locator }
 try {
   await scenario('R1 baseline privacy proof: original IndexedDB module returns A private chapter after account switches', async () => {
-    const baseline = execFileSync('git', ['show', '7efd557:web-ui/src/utils/readerLocalCache.ts'], { cwd: root, encoding: 'utf8' })
+    const baselineRef = process.env.AUDIT_BASELINE_REF || 'd1a4cc4'
+    const baseline = execFileSync('git', ['show', `${baselineRef}:web-ui/src/utils/readerLocalCache.ts`], { cwd: root, encoding: 'utf8' })
     const javascript = requireWeb('typescript').transpileModule(baseline, { compilerOptions: { target: 9, module: 99 } }).outputText
     await page.goto(`${base}/search`)
     const leaked = await page.evaluate(async code => {

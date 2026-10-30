@@ -2,6 +2,8 @@
 
 权威修前版本为 193 `/home/ccai/docker/reader-dev` 的 `7efd557`，所有执行仅使用隔离候选、临时数据库、合成用户和本机 fixture。未访问用户正文、未改生产数据库、未重启生产、未推送 GitHub。
 
+面向 fork 历史的整合分支中，`d1a4cc4` 是与 `7efd557` 完全相同源码树的部署对照提交，可在全新克隆中访问；没有将服务器重建仓库的历史并入。SQL 与浏览器基线证明默认读取 `d1a4cc4`，可用 `AUDIT_BASELINE_REF` 覆盖。下面的 SFC 修前复现命令，在仅克隆整合分支的环境中将 `AUDIT_BASELINE=7efd557` 改为 `AUDIT_BASELINE=d1a4cc4`。此调整只改变相同基线 blob 的取证引用，不改变产品或测试断言。
+
 ## 第一轮：修前行为与最短复现
 
 `frontend_cache_dialog.mjs` 用 Vue 官方 SFC 编译器编译实际组件 `<script setup>`，仅替换 HTTP、IndexedDB 边界，直接调用真实操作函数并检查请求参数与响应式状态。

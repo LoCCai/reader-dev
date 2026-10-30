@@ -1,5 +1,6 @@
 {
   "baseline": "7efd557",
+  "baseline_ref": "d1a4cc4",
   "executed_actual_sql": [
     "DELETE FROM toc_cache",
     "DELETE FROM book_chapters"

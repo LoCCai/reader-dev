@@ -4,14 +4,18 @@ This intentionally proves the baseline failure, not the patched API behavior.
 No application database, environment secrets, or network connection is opened.
 """
 import json
+import os
 import re
 import sqlite3
 import subprocess
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[2]
+# This fork-history commit has exactly the deployed 7efd557 tree, without
+# publishing the server's unrelated history. It is reachable in a fresh clone.
+baseline_ref = os.environ.get("AUDIT_BASELINE_REF", "d1a4cc4")
 source = subprocess.check_output(
-    ["git", "show", "7efd557:src/storage/mod.rs"], cwd=root, text=True
+    ["git", "show", f"{baseline_ref}:src/storage/mod.rs"], cwd=root, text=True
 )
 clear = source.split("pub async fn clear_cache(", 1)[1].split(
     "// ----------------", 1
@@ -43,7 +47,7 @@ after = {table: db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 assert before == {"toc_cache": 2, "book_chapters": 4}
 assert stat_counts == [2, 4], stat_counts
 assert after == {"toc_cache": 0, "book_chapters": 0}
-print(json.dumps({"baseline": "7efd557", "executed_actual_sql": sql,
+print(json.dumps({"baseline": "7efd557", "baseline_ref": baseline_ref, "executed_actual_sql": sql,
                   "before": before, "after": after,
                   "confirmed": ["statistics includes both users and local primary data",
                                 "clearCache removes both users' cache",
