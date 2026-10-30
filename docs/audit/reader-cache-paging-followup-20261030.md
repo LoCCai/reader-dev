@@ -57,6 +57,8 @@ PATH=/root/.nvm/versions/node/v22.23.4/bin:$PATH node tests/audit/cache_paging_p
 
 发布候选保留 fork 正常祖先，部署快照作为独立提交进入审阅分支；不强推 master、不把 193 重建仓库的历史或运行数据并入 GitHub。授权发布时先复核生产 HEAD 是否变化，沿用 `/home/ccai/docker/reader-dev/docker-compose.yml` 仅构建和更新 reader-dev，保留原镜像作为回退。上一批 chapter_order 兼容增量及回填仍是该次上线需核验的数据库变更；本批分页没有再增加 schema 变更。
 
-当前未构建完整 Docker 运行镜像、未做生产迁移/负载测试，也未推送 GitHub。生产重启/数据库操作仍适用 `/www/wwwroot/bot/QIQI/qq/AGENTS.md` 的明确授权要求；完成候选验收与来源核对后再进入该步骤。
+本批业务与验收提交为本地 `290167c`、fork 整合谱系 `2a46538`，两者完整源码树一致。整合分支 [`audit/reader-reconcile-193-20261030`](https://github.com/LoCCai/reader-dev/tree/audit/reader-reconcile-193-20261030) 已成功推送 GitHub，未修改 master、未合并上游翻译参考分支。推送后的状态说明仅为文档更新，不改已验证业务代码。
+
+当前未构建完整 Docker 运行镜像、未做生产迁移/负载测试、未上线 193。生产重启/数据库操作仍适用 `/www/wwwroot/bot/QIQI/qq/AGENTS.md:67-68` 的明确授权要求："重启任何 bot / 服务前先向用户弹窗提示，经授权后再执行"，"数据库相关处理（读改/迁移/清理等）同样先弹窗提示征得同意"。本次若发布，会仅更新 reader-dev 并执行上一批 chapter_order 兼容元数据初始化；不重启数据站或其他 bot，不擅自备份整库。
 
 后续仍可分别评估：目录缓存标记目前只消费 index，却仍拉取分页正文，可通过兼容的元数据请求减少总网络字节；无目录路径可评估章序查询索引；整书导出可评估流式写入。三者均未混入本批，避免把单次有界读取误写成整站所有缓存/导出已流式化。普通批量换源搜索的资源预算等未完成项继续按三轮主报告跟踪。
