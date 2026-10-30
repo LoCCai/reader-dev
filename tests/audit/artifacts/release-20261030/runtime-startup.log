@@ -1,0 +1,12 @@
+image=sha256:8b5008039383492e5b176e336fdccc15351ac98882b3909be28afb93370325f0 status=running health=healthy restarts=0 oom=false started=2026-10-30T15:42:35.326488794Z
+[2m2026-10-30T15:42:35.571020Z[0m [32m INFO[0m [2mreader_dev::util::db_backup[0m[2m:[0m 数据库已备份 → /data/storage/reader.db.bak-20261030234235499（保留最近 3 份，清理 1 份旧备份）
+[2m2026-10-30T15:42:35.571051Z[0m [32m INFO[0m [2mreader_dev[0m[2m:[0m 启动备份完成: /data/storage/reader.db.bak-20261030234235499
+[2m2026-10-30T15:42:35.582619Z[0m [32m INFO[0m [2mreader_dev::storage[0m[2m:[0m storage initialized at /data/storage/reader.db
+[2m2026-10-30T15:42:35.584247Z[0m [32m INFO[0m [2mreader_dev::storage::migrate[0m[2m:[0m 未发现 legacy JSON 数据（/data/storage/data/users.json 不存在），跳过迁移
+[2m2026-10-30T15:42:35.592192Z[0m [32m INFO[0m [2mreader_dev[0m[2m:[0m JS cache 已从库恢复 1 条
+[2m2026-10-30T15:42:35.592231Z[0m [32m INFO[0m [2mreader_dev::service::schedule[0m[2m:[0m 自动备份定时任务：每天 03:00 执行
+[2m2026-10-30T15:42:35.597277Z[0m [32m INFO[0m [2mreader_dev::service::local_sync[0m[2m:[0m 本地书监听已启动: /data/storage/data
+[2m2026-10-30T15:42:35.626872Z[0m [32m INFO[0m [2mreader_dev::api::bot[0m[2m:[0m [bot] /bot/v1 已启用（1 个 API Key）
+[2m2026-10-30T15:42:35.627256Z[0m [32m INFO[0m [2mreader_dev[0m[2m:[0m reader-dev (Rust) listening on 0.0.0.0:8080
+[2m2026-10-30T15:42:37.383658Z[0m [32m INFO[0m [2mreader_dev::service::schedule[0m[2m:[0m 书架更新检查完成：更新 1 本
+[2m2026-10-30T15:45:07.541722Z[0m [33m WARN[0m [2mreader_dev::api::router[0m[2m:[0m 鉴权失败：请求未携带 accessToken [reader-release-smoke/1]

@@ -1,0 +1,4 @@
+2026-10-30T15:42:34Z
+{"Status":"healthy","FailingStreak":0,"Log":[{"Start":"2026-10-30T15:44:11.093804525Z","End":"2026-10-30T15:44:11.227747113Z","ExitCode":0,"Output":""},{"Start":"2026-10-30T15:44:41.228895671Z","End":"2026-10-30T15:44:41.339085208Z","ExitCode":0,"Output":""},{"Start":"2026-10-30T15:45:11.340433367Z","End":"2026-10-30T15:45:11.474542713Z","ExitCode":0,"Output":""},{"Start":"2026-10-30T15:45:41.475588817Z","End":"2026-10-30T15:45:41.582291882Z","ExitCode":0,"Output":""},{"Start":"2026-10-30T15:46:11.583891951Z","End":"2026-10-30T15:46:11.688887723Z","ExitCode":0,"Output":""}]}
+{"image":"sha256:8b5008039383492e5b176e336fdccc15351ac98882b3909be28afb93370325f0","status":"running","healthy":"healthy","restartCount":0,"oomKilled":false,"startedAt":"2026-10-30T15:42:35.326488794Z","memoryLimitBytes":2147483648,"restartPolicy":"unless-stopped"}
+envMode=600 envBytes=110

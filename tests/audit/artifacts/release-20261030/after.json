@@ -1,0 +1,66 @@
+{
+  "at": "2026-10-30T15:45:54.238273+00:00",
+  "host": "192.168.31.193",
+  "releaseSource": "ed79d94eb745074fb1ada3d290109bee7600c531",
+  "databaseBytes": 53485568,
+  "counts": {
+    "users": 2,
+    "books": 2,
+    "book_sources": 2619,
+    "book_chapters": 9,
+    "toc_cache": 9
+  },
+  "chapters": {
+    "rows": 9,
+    "bodyChars": 19681,
+    "nullBodies": 0,
+    "orphans": 0,
+    "orderedRows": 9
+  },
+  "orderColumn": [
+    [
+      5,
+      "chapter_order",
+      "INTEGER",
+      0,
+      null,
+      0
+    ]
+  ],
+  "http": {
+    "index": {
+      "status": 200,
+      "contentType": "text/html; charset=utf-8",
+      "cacheControl": "no-cache",
+      "bytes": 637,
+      "sha256": "a4cdb7388ced78618c482b61ec27f3bb832c1645d6c6e08cf4fd7af582a6338d"
+    },
+    "assets": [
+      {
+        "url": "/static/index-CnlKVpl7.js",
+        "status": 200,
+        "contentType": "application/javascript; charset=utf-8",
+        "cacheControl": "public, max-age=2592000, immutable",
+        "bytes": 1060294,
+        "sha256": "c4a5d4322b904d80ef43efa546cb218874ae5decced96e02105408bd37842e6a"
+      },
+      {
+        "url": "/static/index-BZ3RcFQF.css",
+        "status": 200,
+        "contentType": "text/css; charset=utf-8",
+        "cacheControl": "public, max-age=2592000, immutable",
+        "bytes": 369985,
+        "sha256": "dee9e2bcfb72730a9919d7ae9f84e24db3256d53d08a5606d90addac36ab5b6a"
+      }
+    ],
+    "simple": {
+      "status": 200,
+      "contentType": "text/html",
+      "cacheControl": "no-cache",
+      "bytes": 5435,
+      "sha256": "04764f4ec0553c63420019bd1ce171e88c7fabd03e5dd26cb15b0e5b7426e4a5"
+    }
+  },
+  "binarySha256": "b0f439ce3dd32d8c60cc33cbd2ae08434b4e0bd57d78442edc92ab9a4bf4caae",
+  "passed": true
+}

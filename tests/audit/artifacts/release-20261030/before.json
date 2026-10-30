@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-30T15:19:05.740297+00:00",
+  "host": "192.168.31.193",
+  "originalSource": "7efd557fe9d612552d5e92dceb214e7cb619693c",
+  "releaseSource": "ed79d94eb745074fb1ada3d290109bee7600c531",
+  "releaseTree": "c2e2b60822f4acf8b62a333d14c76eabe8df062a",
+  "originalImage": "sha256:569386069bd69ae8a24a0bb4dc398d1edc6d914a19664eb609e2f3a90286b343",
+  "rollbackImageTag": "reader-dev:rollback-20261030-7efd557",
+  "databaseBytes": 53485568,
+  "counts": {"users": 2, "books": 2, "book_sources": 2619, "book_chapters": 9, "toc_cache": 9},
+  "chapters": {"rows": 9, "bodyChars": 19681, "nullBodies": 0, "orphans": 0},
+  "orderColumn": [],
+  "legacyUsersJsonExists": false,
+  "scope": "Metadata and aggregates only; no preexisting credentials or body text emitted."
+}

@@ -1,0 +1,1394 @@
+ Image reader-dev:local Building 
+#1 [internal] load local bake definitions
+#1 reading from stdin 525B done
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile
+#2 transferring dockerfile: 30B
+#2 transferring dockerfile: 4.73kB done
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/python:3.12-slim
+#3 DONE 0.1s
+
+#4 [internal] load metadata for docker.io/library/rust:1.97-slim
+#4 DONE 0.1s
+
+#5 [internal] load metadata for docker.io/library/node:24-bookworm-slim
+#5 DONE 0.1s
+
+#6 [internal] load .dockerignore
+#6 transferring context: 438B done
+#6 DONE 0.0s
+
+#7 [internal] load build context
+#7 transferring context: 2.67MB 0.0s done
+#7 DONE 0.0s
+
+#8 [builder 1/8] FROM docker.io/library/rust:1.97-slim@sha256:8e8cf8f7fd54a2d23d5a743b3a03f56e26b6c774276c33fa0595111704ebb15c
+#8 resolve docker.io/library/rust:1.97-slim@sha256:8e8cf8f7fd54a2d23d5a743b3a03f56e26b6c774276c33fa0595111704ebb15c 0.0s done
+#8 DONE 0.0s
+
+#9 [camo 1/3] FROM docker.io/library/python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
+#9 resolve docker.io/library/python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea 0.0s done
+#9 DONE 0.0s
+
+#10 [web 1/6] FROM docker.io/library/node:24-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553
+#10 resolve docker.io/library/node:24-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 0.0s done
+#10 DONE 0.0s
+
+#11 [builder 2/8] WORKDIR /app
+#11 CACHED
+
+#12 [web 2/6] WORKDIR /web
+#12 CACHED
+
+#13 [web 3/6] COPY web-ui/package.json web-ui/package-lock.json* ./
+#13 CACHED
+
+#14 [builder 3/8] COPY Cargo.toml Cargo.lock ./
+#14 CACHED
+
+#15 [web 4/6] RUN npm config set registry https://registry.npmmirror.com && npm ci
+#15 CACHED
+
+#16 [web 5/6] COPY web-ui ./
+#16 ...
+
+#17 [builder 4/8] COPY src ./src
+#17 DONE 0.3s
+
+#16 [web 5/6] COPY web-ui ./
+#16 DONE 0.3s
+
+#18 [builder 5/8] COPY .cargo ./.cargo
+#18 DONE 0.0s
+
+#19 [builder 6/8] COPY web-ui/public/fonts ./web-ui/public/fonts
+#19 DONE 0.0s
+
+#20 [web 6/6] RUN npx vite build
+#20 1.328 vite v7.3.6 building client environment for production...
+#20 1.445 transforming...
+#20 2.961 node_modules/@vueuse/core/dist/index.js (3362:0): A comment
+#20 2.961 
+#20 2.961 "/* #__PURE__ */"
+#20 2.961 
+#20 2.961 in "node_modules/@vueuse/core/dist/index.js" contains an annotation that Rollup cannot interpret due to the position of the comment. The comment will be removed to avoid issues.
+#20 2.963 node_modules/@vueuse/core/dist/index.js (5780:22): A comment
+#20 2.963 
+#20 2.963 "/* #__PURE__ */"
+#20 2.963 
+#20 2.963 in "node_modules/@vueuse/core/dist/index.js" contains an annotation that Rollup cannot interpret due to the position of the comment. The comment will be removed to avoid issues.
+#20 10.21 ✓ 1793 modules transformed.
+#20 10.73 rendering chunks...
+#20 11.20 computing gzip size...
+#20 11.28 dist/index.html                                  0.64 kB │ gzip:   0.37 kB
+#20 11.29 dist/static/NotFoundView-Bzz8cCEl.css            0.87 kB │ gzip:   0.43 kB
+#20 11.29 dist/static/TopNav-BMlyiw8d.css                  2.93 kB │ gzip:   0.76 kB
+#20 11.29 dist/static/LoginView-B_vJ-bzA.css               3.87 kB │ gzip:   1.08 kB
+#20 11.29 dist/static/ChapterCacheDialog-Ctj3DIL2.css      4.32 kB │ gzip:   1.09 kB
+#20 11.29 dist/static/ServerStatsView-BbY3rdTt.css         4.84 kB │ gzip:   1.35 kB
+#20 11.29 dist/static/StoreView-BkuhHpYN.css               6.31 kB │ gzip:   1.52 kB
+#20 11.29 dist/static/ExploreView-vpiJRsMJ.css            11.88 kB │ gzip:   2.36 kB
+#20 11.29 dist/static/UserManageView-DyMVUNkI.css         11.89 kB │ gzip:   2.19 kB
+#20 11.29 dist/static/ReplaceRuleView-Bo8pHBkd.css        13.83 kB │ gzip:   2.66 kB
+#20 11.29 dist/static/FileManageView-CgCyd8N_.css         14.15 kB │ gzip:   2.64 kB
+#20 11.29 dist/static/SearchView-ngDd4B6Q.css             14.25 kB │ gzip:   2.62 kB
+#20 11.29 dist/static/RssView-kh8EIEFW.css                17.32 kB │ gzip:   3.20 kB
+#20 11.29 dist/static/SettingsView-Dwp5LWXp.css           19.41 kB │ gzip:   3.40 kB
+#20 11.29 dist/static/BookDetailView-Bkpod93t.css         24.65 kB │ gzip:   4.19 kB
+#20 11.29 dist/static/SourceManageView-BW4F4SZT.css       28.72 kB │ gzip:   4.42 kB
+#20 11.29 dist/static/BookshelfView-Yhx4PQc5.css          42.01 kB │ gzip:   6.42 kB
+#20 11.29 dist/static/ReaderView-CfLCBSe5.css             43.96 kB │ gzip:   7.16 kB
+#20 11.29 dist/static/index-BZ3RcFQF.css                 369.99 kB │ gzip:  51.02 kB
+#20 11.29 dist/static/logo-Ft4BtHHg.js                     0.04 kB │ gzip:   0.06 kB
+#20 11.29 dist/static/auth-BE30PILp.js                     0.09 kB │ gzip:   0.11 kB
+#20 11.29 dist/static/errors-CFX6gM2E.js                   0.18 kB │ gzip:   0.16 kB
+#20 11.29 dist/static/system-CGaL9Mnz.js                   0.22 kB │ gzip:   0.18 kB
+#20 11.29 dist/static/txtTocRules-B7rp7OgP.js              0.27 kB │ gzip:   0.17 kB
+#20 11.29 dist/static/localBook-CnBY-MVx.js                0.34 kB │ gzip:   0.23 kB
+#20 11.29 dist/static/imageProxy-q7LeLoUT.js               0.37 kB │ gzip:   0.26 kB
+#20 11.29 dist/static/searchHistory-DUItju9S.js            0.40 kB │ gzip:   0.26 kB
+#20 11.29 dist/static/cache-Bd_iqtfI.js                    0.42 kB │ gzip:   0.24 kB
+#20 11.29 dist/static/NotFoundView-B0D5oOWq.js             0.48 kB │ gzip:   0.33 kB
+#20 11.29 dist/static/download-CnvETwuO.js                 0.49 kB │ gzip:   0.38 kB
+#20 11.29 dist/static/export-_XtHtkEw.js                   0.58 kB │ gzip:   0.39 kB
+#20 11.29 dist/static/sources-GJr1Z7DC.js                  0.70 kB │ gzip:   0.31 kB
+#20 11.29 dist/static/backup-D9zg46nj.js                   0.87 kB │ gzip:   0.49 kB
+#20 11.29 dist/static/bookshelf-C-a7fcsh.js                0.96 kB │ gzip:   0.35 kB
+#20 11.29 dist/static/sanitize-BeTyoJNg.js                 1.09 kB │ gzip:   0.54 kB
+#20 11.29 dist/static/books-T03GZxni.js                    1.10 kB │ gzip:   0.47 kB
+#20 11.29 dist/static/bookmarks--mEKyuVi.js                1.12 kB │ gzip:   0.48 kB
+#20 11.29 dist/static/users-DvJ8IMmo.js                    1.32 kB │ gzip:   0.64 kB
+#20 11.29 dist/static/file-4Tdeb1IK.js                     1.35 kB │ gzip:   0.55 kB
+#20 11.29 dist/static/sse-DR-gwzCG.js                      1.89 kB │ gzip:   1.09 kB
+#20 11.29 dist/static/regexGuard-DvuRJi97.js               2.33 kB │ gzip:   1.09 kB
+#20 11.29 dist/static/TopNav-ptYTSJ4S.js                   3.54 kB │ gzip:   1.55 kB
+#20 11.29 dist/static/LoginView-BQ8h8Bl6.js                4.06 kB │ gzip:   1.67 kB
+#20 11.29 dist/static/ServerStatsView-C043eq7_.js          6.91 kB │ gzip:   2.50 kB
+#20 11.29 dist/static/StoreView-BUX_Kt0I.js                7.21 kB │ gzip:   3.24 kB
+#20 11.29 dist/static/readerConfig-DJ0ClR6s.js            10.22 kB │ gzip:   3.72 kB
+#20 11.29 dist/static/ChapterCacheDialog-D5FclaGH.js      13.17 kB │ gzip:   5.25 kB
+#20 11.29 dist/static/ExploreView-JJH9m-Af.js             15.31 kB │ gzip:   5.90 kB
+#20 11.29 dist/static/SearchView-C3TTBICu.js              18.23 kB │ gzip:   6.69 kB
+#20 11.29 dist/static/UserManageView-joXxQmsH.js          24.44 kB │ gzip:   6.67 kB
+#20 11.29 dist/static/FileManageView-DwRgbOKB.js          25.32 kB │ gzip:   8.60 kB
+#20 11.29 dist/static/RssView-BSAWZBMD.js                 25.55 kB │ gzip:   7.79 kB
+#20 11.29 dist/static/ReplaceRuleView-WcyH3ekE.js         28.44 kB │ gzip:   8.61 kB
+#20 11.29 dist/static/BookDetailView-BWIzuDxf.js          38.59 kB │ gzip:  12.77 kB
+#20 11.29 dist/static/request-DsdTx7nP.js                 50.11 kB │ gzip:  19.28 kB
+#20 11.29 dist/static/SettingsView-DIfU8PJp.js            68.96 kB │ gzip:  20.49 kB
+#20 11.29 dist/static/SourceManageView-KpXEPZ6W.js        72.42 kB │ gzip:  21.00 kB
+#20 11.29 dist/static/BookshelfView-C1Q4HJTs.js           72.95 kB │ gzip:  22.20 kB
+#20 11.29 dist/static/ReaderView-D3ONmgiO.js             140.61 kB │ gzip:  45.23 kB
+#20 11.29 dist/static/hls-WrVSMb3K.js                    591.75 kB │ gzip: 185.21 kB
+#20 11.29 dist/static/index-CnlKVpl7.js                1,060.29 kB │ gzip: 352.11 kB
+#20 11.29 dist/static/hanMode-CKd4-TC3.js              1,080.39 kB │ gzip: 464.50 kB
+#20 11.29 ✓ built in 9.94s
+#20 DONE 11.8s
+
+#21 [builder 7/8] COPY --from=web /web/dist ./web-ui/dist
+#21 DONE 0.0s
+
+#22 [builder 8/8] RUN cargo build --release --locked -j2
+#22 0.413     Updating crates.io index
+#22 264.4  Downloading crates ...
+#22 265.1   Downloaded adler2 v2.0.1
+#22 265.6   Downloaded atoi v2.0.0
+#22 265.6   Downloaded atomic-waker v1.1.2
+#22 265.7   Downloaded alloc-no-stdlib v2.0.4
+#22 265.7   Downloaded block-buffer v0.10.4
+#22 265.8   Downloaded bit-set v0.8.0
+#22 265.8   Downloaded block-padding v0.3.3
+#22 265.8   Downloaded boa_macros v0.19.1
+#22 265.8   Downloaded boa_interner v0.19.1
+#22 265.9   Downloaded mac v0.1.1
+#22 265.9   Downloaded mime v0.3.17
+#22 265.9   Downloaded inotify-sys v0.1.8
+#22 265.9   Downloaded macro_magic v0.5.1
+#22 265.9   Downloaded jiff-static v0.2.35
+#22 265.9   Downloaded macro_magic_core v0.5.1
+#22 265.9   Downloaded matchers v0.2.0
+#22 265.9   Downloaded mongodb-internal-macros v3.8.0
+#22 265.9   Downloaded byteorder-lite v0.1.0
+#22 266.0   Downloaded itoa v1.0.18
+#22 266.0   Downloaded num_threads v0.1.7
+#22 266.0   Downloaded phf_shared v0.11.3
+#22 266.1   Downloaded lazy_static v1.5.0
+#22 266.1   Downloaded crypto-common v0.1.7
+#22 266.1   Downloaded cssparser-macros v0.6.1
+#22 266.1   Downloaded num-conv v0.2.2
+#22 266.1   Downloaded compression-core v0.4.32
+#22 266.2   Downloaded powerfmt v0.2.0
+#22 266.2   Downloaded block-padding v0.4.2
+#22 266.2   Downloaded cpufeatures v0.3.0
+#22 266.3   Downloaded color_quant v1.1.0
+#22 266.4   Downloaded peresil v0.3.0
+#22 266.4   Downloaded phf_codegen v0.11.3
+#22 266.4   Downloaded potential_utf v0.1.5
+#22 266.4   Downloaded phf_shared v0.10.0
+#22 266.4   Downloaded new_debug_unreachable v1.0.6
+#22 266.4   Downloaded percent-encoding v2.3.2
+#22 266.4   Downloaded phf_generator v0.10.0
+#22 266.4   Downloaded pollster v0.3.0
+#22 266.5   Downloaded phf v0.10.1
+#22 266.5   Downloaded num-iter v0.1.46
+#22 266.5   Downloaded phf_generator v0.11.3
+#22 266.5   Downloaded phf_codegen v0.10.0
+#22 266.5   Downloaded inout v0.1.4
+#22 266.5   Downloaded inout v0.2.2
+#22 266.5   Downloaded lru-slab v0.1.2
+#22 266.5   Downloaded md-5 v0.10.6
+#22 266.5   Downloaded memoffset v0.9.1
+#22 266.5   Downloaded macro_magic_core_macros v0.5.1
+#22 266.5   Downloaded macro_magic_macros v0.5.1
+#22 266.5   Downloaded try-lock v0.2.5
+#22 266.5   Downloaded urlencoding v2.1.3
+#22 266.6   Downloaded inotify v0.9.6
+#22 266.7   Downloaded mongocrypt-sys v0.1.6+1.18.2
+#22 266.7   Downloaded lock_api v0.4.14
+#22 266.7   Downloaded multer v3.1.0
+#22 266.7   Downloaded paste v1.0.15
+#22 266.7   Downloaded md-5 v0.11.0
+#22 266.7   Downloaded phf v0.11.3
+#22 266.7   Downloaded pkg-config v0.3.33
+#22 266.7   Downloaded nu-ansi-term v0.50.3
+#22 266.7   Downloaded pbkdf2 v0.13.0
+#22 266.7   Downloaded mobi v0.8.0
+#22 266.7   Downloaded num_enum_derive v0.7.6
+#22 266.7   Downloaded num-integer v0.1.46
+#22 266.7   Downloaded num_enum v0.7.6
+#22 266.8   Downloaded phf_macros v0.11.3
+#22 266.8   Downloaded alloc-stdlib v0.2.4
+#22 266.8   Downloaded pin-project-lite v0.2.17
+#22 266.8   Downloaded ipnet v2.12.1
+#22 266.8   Downloaded boa_profiler v0.19.1
+#22 266.8   Downloaded cpubits v0.1.1
+#22 266.8   Downloaded matchit v0.7.3
+#22 266.9   Downloaded cfg-if v1.0.4
+#22 266.9   Downloaded crunchy v0.2.4
+#22 266.9   Downloaded pem-rfc7468 v0.7.0
+#22 266.9   Downloaded mime_guess v2.0.5
+#22 267.0   Downloaded pkcs8 v0.10.2
+#22 267.1   Downloaded unicase v2.9.0
+#22 267.1   Downloaded walkdir v2.5.0
+#22 267.1   Downloaded document-features v0.2.12
+#22 267.1   Downloaded cpufeatures v0.2.17
+#22 267.1   Downloaded ecb v0.2.0
+#22 267.1   Downloaded ego-tree v0.6.3
+#22 267.1   Downloaded errno v0.3.14
+#22 267.1   Downloaded event-listener v2.5.3
+#22 267.1   Downloaded futures-macro v0.3.33
+#22 267.2   Downloaded futures-io v0.3.33
+#22 267.2   Downloaded litemap v0.7.5
+#22 267.2   Downloaded once_cell v1.21.4
+#22 267.2   Downloaded parking_lot_core v0.9.12
+#22 267.3   Downloaded crypto-common v0.2.2
+#22 267.4   Downloaded crc v3.4.0
+#22 267.7   Downloaded jobserver v0.1.35
+#22 267.7   Downloaded mongocrypt v0.4.0
+#22 267.7   Downloaded notify v6.1.1
+#22 267.7   Downloaded password-hash v0.5.0
+#22 267.7   Downloaded pkcs1 v0.7.5
+#22 267.7   Downloaded ppv-lite86 v0.2.21
+#22 267.7   Downloaded derive-where v1.6.1
+#22 267.7   Downloaded h3-quinn v0.0.10
+#22 267.7   Downloaded image-webp v0.2.4
+#22 267.7   Downloaded proc-macro-crate v3.5.0
+#22 267.7   Downloaded tokio-rustls v0.26.4
+#22 267.7   Downloaded tokio-stream v0.1.19
+#22 267.7   Downloaded zerovec-derive v0.11.3
+#22 267.7   Downloaded http-body v1.1.0
+#22 267.7   Downloaded quick-error v1.2.3
+#22 267.8   Downloaded const-random-macro v0.1.16
+#22 267.8   Downloaded darling_macro v0.23.0
+#22 267.8   Downloaded const-random v0.1.18
+#22 267.8   Downloaded ident_case v1.0.1
+#22 267.8   Downloaded strum v0.27.2
+#22 267.8   Downloaded sync_wrapper v1.0.2
+#22 267.8   Downloaded take_mut v0.2.2
+#22 267.8   Downloaded ahash v0.8.12
+#22 267.8   Downloaded num-traits v0.2.19
+#22 267.8   Downloaded unicode-xid v0.2.6
+#22 267.8   Downloaded litemap v0.8.2
+#22 267.8   Downloaded markup5ever v0.12.1
+#22 267.9   Downloaded intrusive-collections v0.9.7
+#22 267.9   Downloaded write16 v1.0.0
+#22 267.9   Downloaded log v0.4.33
+#22 267.9   Downloaded litrs v1.0.0
+#22 268.0   Downloaded parking_lot v0.12.5
+#22 268.1   Downloaded sha1 v0.10.7
+#22 268.1   Downloaded serde_urlencoded v0.7.1
+#22 268.2   Downloaded base64ct v1.8.3
+#22 268.2   Downloaded scopeguard v1.2.0
+#22 268.2   Downloaded axum-core v0.4.5
+#22 268.3   Downloaded sptr v0.3.2
+#22 268.3   Downloaded argon2 v0.5.3
+#22 268.3   Downloaded uuid v1.24.0
+#22 268.3   Downloaded weezl v0.1.12
+#22 268.3   Downloaded boa_gc v0.19.1
+#22 268.3   Downloaded cbc v0.1.2
+#22 268.4   Downloaded futures-channel v0.3.33
+#22 268.4   Downloaded find-msvc-tools v0.1.9
+#22 268.4   Downloaded getrandom v0.2.17
+#22 268.4   Downloaded http-body-util v0.1.4
+#22 268.4   Downloaded cfg_aliases v0.2.2
+#22 268.5   Downloaded rand_core v0.9.5
+#22 268.5   Downloaded dashmap v5.5.3
+#22 268.5   Downloaded sqlx-macros v0.7.4
+#22 268.6   Downloaded cipher v0.4.4
+#22 268.6   Downloaded compression-codecs v0.4.38
+#22 268.6   Downloaded data-encoding v2.11.1
+#22 268.7   Downloaded convert_case v0.10.0
+#22 268.7   Downloaded bit-vec v0.8.0
+#22 268.8   Downloaded indexmap v1.9.3
+#22 268.8   Downloaded mediatype v0.21.0
+#22 268.8   Downloaded miniz_oxide v0.8.9
+#22 268.8   Downloaded byteorder v1.5.0
+#22 268.9   Downloaded bitflags v1.3.2
+#22 269.0   Downloaded block-buffer v0.12.1
+#22 269.0   Downloaded deranged v0.5.8
+#22 269.1   Downloaded crossbeam-queue v0.3.13
+#22 269.1   Downloaded crossbeam-deque v0.8.7
+#22 269.2   Downloaded boa_string v0.19.1
+#22 269.2   Downloaded cmov v0.5.4
+#22 269.3   Downloaded defmt-parser v1.0.0
+#22 269.3   Downloaded cbc v0.2.1
+#22 269.3   Downloaded defmt-macros v1.1.1
+#22 269.3   Downloaded derive-syn-parse v0.2.0
+#22 269.3   Downloaded simd-adler32 v0.3.10
+#22 269.3   Downloaded utf8_iter v1.0.4
+#22 269.4   Downloaded untrusted v0.9.0
+#22 269.4   Downloaded bytemuck_derive v1.11.0
+#22 269.4   Downloaded ctutils v0.4.2
+#22 269.4   Downloaded utf16_iter v1.0.5
+#22 269.4   Downloaded utf-8 v0.7.6
+#22 269.4   Downloaded yoke-derive v0.7.5
+#22 269.4   Downloaded critical-section v1.2.0
+#22 269.8   Downloaded thiserror v1.0.69
+#22 269.9   Downloaded string_cache v0.8.9
+#22 269.9   Downloaded thiserror v2.0.19
+#22 269.9   Downloaded tinystr v0.8.3
+#22 269.9   Downloaded sha1 v0.11.0
+#22 269.9   Downloaded yoke v0.7.5
+#22 269.9   Downloaded zstd v0.13.3
+#22 270.0   Downloaded futf v0.1.5
+#22 270.1   Downloaded icu_provider_macros v1.5.0
+#22 270.1   Downloaded precomputed-hash v0.1.1
+#22 270.2   Downloaded same-file v1.0.6
+#22 270.3   Downloaded servo_arc v0.3.0
+#22 270.4   Downloaded strsim v0.11.1
+#22 270.4   Downloaded tinyvec_macros v0.1.1
+#22 270.5   Downloaded async-trait v0.1.91
+#22 270.5   Downloaded cookie v0.18.1
+#22 270.6   Downloaded minimal-lexical v0.2.1
+#22 270.6   Downloaded defmt v1.1.1
+#22 270.6   Downloaded httpdate v1.0.3
+#22 270.7   Downloaded crc-catalog v2.5.0
+#22 270.7   Downloaded chacha20 v0.10.1
+#22 271.1   Downloaded anyhow v1.0.104
+#22 271.1   Downloaded arrayvec v0.7.8
+#22 271.1   Downloaded autocfg v1.5.1
+#22 271.1   Downloaded axum-macros v0.4.2
+#22 271.1   Downloaded cipher v0.5.2
+#22 271.1   Downloaded crc32fast v1.5.0
+#22 271.2   Downloaded rust-embed-utils v8.12.0
+#22 271.2   Downloaded smallvec v1.15.2
+#22 271.2   Downloaded yoke-derive v0.8.2
+#22 271.2   Downloaded serde_bytes v0.11.19
+#22 271.2   Downloaded siphasher v1.0.3
+#22 271.3   Downloaded const-oid v0.9.6
+#22 271.4   Downloaded darling v0.23.0
+#22 271.5   Downloaded crossbeam-utils v0.8.22
+#22 271.5   Downloaded crossbeam-epoch v0.9.20
+#22 271.6   Downloaded icu_normalizer v1.5.0
+#22 271.6   Downloaded tower-service v0.3.3
+#22 271.6   Downloaded icu_provider v1.5.0
+#22 271.8   Downloaded strum_macros v0.27.2
+#22 271.8   Downloaded typed-builder v0.22.0
+#22 271.9   Downloaded tokio-tungstenite v0.24.0
+#22 271.9   Downloaded toml_parser v1.1.3+spec-1.1.0
+#22 271.9   Downloaded displaydoc v0.2.7
+#22 272.0   Downloaded digest v0.10.7
+#22 272.0   Downloaded dotenvy v0.15.7
+#22 272.0   Downloaded encoding_index_tests v0.1.4
+#22 272.0   Downloaded thread_local v1.1.10
+#22 272.1   Downloaded mio v0.8.11
+#22 272.2   Downloaded memchr v2.8.3
+#22 272.2   Downloaded futures-sink v0.3.33
+#22 272.3   Downloaded sxd-xpath v0.4.2
+#22 272.4   Downloaded thin-vec v0.2.19
+#22 272.4   Downloaded time-macros v0.2.32
+#22 272.4   Downloaded tracing-attributes v0.1.31
+#22 272.5   Downloaded des v0.9.0
+#22 272.5   Downloaded semver v1.0.28
+#22 272.6   Downloaded filetime v0.2.29
+#22 272.6   Downloaded icu_locid_transform v1.5.0
+#22 272.6   Downloaded psm v0.1.32
+#22 272.6   Downloaded funty v2.0.0
+#22 272.8   Downloaded getopts v0.2.24
+#22 272.8   Downloaded indexmap v2.14.0
+#22 272.9   Downloaded sha2 v0.10.9
+#22 273.1   Downloaded spki v0.7.3
+#22 273.2   Downloaded sqlformat v0.2.6
+#22 273.4   Downloaded string_cache_codegen v0.5.4
+#22 273.4   Downloaded tap v1.0.1
+#22 273.5   Downloaded http-range-header v0.4.2
+#22 273.5   Downloaded blake2 v0.10.6
+#22 273.6   Downloaded rustc_version_runtime v0.3.0
+#22 273.6   Downloaded serde_path_to_error v0.1.20
+#22 273.6   Downloaded synstructure v0.13.2
+#22 273.6   Downloaded const-oid v0.10.2
+#22 273.7   Downloaded yoke v0.8.3
+#22 273.7   Downloaded cookie_store v0.22.1
+#22 273.8   Downloaded flate2 v1.1.9
+#22 273.8   Downloaded allocator-api2 v0.2.21
+#22 273.9   Downloaded bitflags v2.13.1
+#22 274.0   Downloaded chardetng v0.1.17
+#22 274.0   Downloaded icu_locale_core v2.2.0
+#22 274.0   Downloaded icu_properties v1.5.1
+#22 274.0   Downloaded bytemuck v1.25.2
+#22 274.0   Downloaded icu_provider v2.2.0
+#22 274.0   Downloaded sqlx-sqlite v0.7.4
+#22 274.3   Downloaded daachorse v1.0.1
+#22 274.4   Downloaded fast-float v0.2.0
+#22 274.4   Downloaded wyz v0.5.1
+#22 274.5   Downloaded typed-arena v1.7.0
+#22 274.5   Downloaded digest v0.11.3
+#22 274.6   Downloaded whoami v1.6.1
+#22 274.6   Downloaded rayon-core v1.13.0
+#22 274.6   Downloaded signature v2.2.0
+#22 274.8   Downloaded num-bigint v0.4.8
+#22 275.0   Downloaded dtoa v1.0.11
+#22 275.0   Downloaded zune-core v0.5.1
+#22 275.0   Downloaded fastrand v2.5.0
+#22 275.0   Downloaded foldhash v0.2.0
+#22 275.1   Downloaded futures-executor v0.3.33
+#22 275.2   Downloaded quote v1.0.47
+#22 275.2   Downloaded rand_chacha v0.9.0
+#22 275.4   Downloaded nom v7.1.3
+#22 275.7   Downloaded version_check v0.9.5
+#22 275.9   Downloaded rustls-pki-types v1.15.1
+#22 276.0   Downloaded gif v0.14.2
+#22 276.0   Downloaded iana-time-zone v0.1.65
+#22 276.0   Downloaded rand_core v0.6.4
+#22 276.3   Downloaded tempfile v3.27.0
+#22 276.4   Downloaded rustversion v1.0.23
+#22 276.7   Downloaded tiny-keccak v2.0.2
+#22 276.7   Downloaded toml_datetime v1.1.1+spec-1.1.0
+#22 277.5   Downloaded futures-task v0.3.33
+#22 277.6   Downloaded boa_ast v0.19.1
+#22 277.6   Downloaded futures-core v0.3.33
+#22 277.6   Downloaded fxhash v0.2.1
+#22 277.8   Downloaded cssparser v0.31.2
+#22 278.0   Downloaded typenum v1.20.1
+#22 278.1   Downloaded stable_deref_trait v1.2.1
+#22 278.2   Downloaded writeable v0.5.5
+#22 278.3   Downloaded zerovec-derive v0.10.3
+#22 278.3   Downloaded zmij v1.0.23
+#22 278.4   Downloaded zstd-safe v7.2.4
+#22 278.4   Downloaded zerofrom-derive v0.1.7
+#22 278.5   Downloaded heck v0.5.0
+#22 278.5   Downloaded form_urlencoded v1.2.2
+#22 278.6   Downloaded home v0.5.12
+#22 278.6   Downloaded siphasher v0.3.11
+#22 278.7   Downloaded rand_chacha v0.3.1
+#22 278.8   Downloaded hyper-rustls v0.27.9
+#22 279.0   Downloaded scraper v0.20.0
+#22 279.1   Downloaded thiserror-impl v1.0.69
+#22 279.3   Downloaded equivalent v1.0.2
+#22 279.3   Downloaded psl-types v2.0.11
+#22 279.5   Downloaded tinyvec v1.12.0
+#22 279.7   Downloaded getrandom v0.3.4
+#22 279.7   Downloaded getrandom v0.4.3
+#22 280.0   Downloaded sha2 v0.11.0
+#22 280.4   Downloaded rsa v0.9.10
+#22 280.5   Downloaded want v0.3.1
+#22 280.9   Downloaded publicsuffix v2.3.0
+#22 280.9   Downloaded ar_archive_writer v0.5.3
+#22 280.9   Downloaded base64 v0.21.7
+#22 280.9   Downloaded base64 v0.22.1
+#22 280.9   Downloaded der v0.7.10
+#22 281.1   Downloaded bytes v1.12.1
+#22 281.2   Downloaded cc v1.4.0
+#22 281.2   Downloaded darling_core v0.23.0
+#22 281.6   Downloaded radium v0.7.0
+#22 281.7   Downloaded png v0.18.1
+#22 281.9   Downloaded zeroize v1.9.0
+#22 281.9   Downloaded tower-layer v0.3.3
+#22 282.0   Downloaded hex v0.4.3
+#22 282.3   Downloaded hex-literal v1.1.0
+#22 282.5   Downloaded rustls-pemfile v1.0.4
+#22 282.5   Downloaded stringprep v0.1.5
+#22 282.6   Downloaded rand v0.10.2
+#22 282.8   Downloaded rustc_version v0.4.1
+#22 282.8   Downloaded dtoa-short v0.3.5
+#22 282.8   Downloaded rust-embed-impl v8.12.0
+#22 283.0   Downloaded icu_locid_transform_data v1.5.1
+#22 283.0   Downloaded num-bigint-dig v0.8.6
+#22 283.1   Downloaded mio v1.2.2
+#22 283.1   Downloaded jiff-core v0.1.0
+#22 283.2   Downloaded zerofrom v0.1.8
+#22 283.2   Downloaded zerotrie v0.2.4
+#22 283.3   Downloaded serde v1.0.229
+#22 283.3   Downloaded zune-jpeg v0.5.15
+#22 283.5   Downloaded ryu v1.0.23
+#22 283.5   Downloaded unicode-bidi v0.3.18
+#22 283.6   Downloaded heck v0.4.1
+#22 283.6   Downloaded spin v0.9.9
+#22 284.0   Downloaded hmac v0.13.0
+#22 284.2   Downloaded tinystr v0.7.6
+#22 284.6   Downloaded crossbeam-channel v0.5.16
+#22 284.7   Downloaded serde_stacker v0.1.14
+#22 284.7   Downloaded boa_parser v0.19.1
+#22 284.8   Downloaded tungstenite v0.24.0
+#22 285.5   Downloaded generic-array v0.14.7
+#22 285.5   Downloaded idna_adapter v1.2.2
+#22 285.7   Downloaded subtle v2.6.1
+#22 285.7   Downloaded zip v0.6.6
+#22 285.9   Downloaded icu_normalizer v2.2.0
+#22 286.0   Downloaded signal-hook-registry v1.4.8
+#22 286.2   Downloaded encoding-index-tradchinese v1.20141219.5
+#22 286.3   Downloaded proc-macro2 v1.0.107
+#22 286.4   Downloaded tagptr v0.2.0
+#22 286.4   Downloaded rand_pcg v0.10.2
+#22 286.5   Downloaded hybrid-array v0.4.14
+#22 286.7   Downloaded time-core v0.1.9
+#22 287.1   Downloaded nom v8.0.0
+#22 287.3   Downloaded rustc-hash v2.1.3
+#22 287.4   Downloaded unicode-ident v1.0.24
+#22 287.5   Downloaded static_assertions v1.1.0
+#22 287.5   Downloaded tokio-macros v2.7.2
+#22 288.0   Downloaded twox-hash v2.1.3
+#22 288.2   Downloaded async-compression v0.4.43
+#22 288.4   Downloaded futures-intrusive v0.5.0
+#22 288.5   Downloaded resolv-conf v0.7.6
+#22 288.7   Downloaded rand_core v0.10.1
+#22 288.8   Downloaded shlex v2.0.1
+#22 288.9   Downloaded encoding-index-singlebyte v1.20141219.5
+#22 289.4   Downloaded writeable v0.6.3
+#22 289.5   Downloaded hashlink v0.8.4
+#22 289.5   Downloaded stacker v0.1.25
+#22 289.5   Downloaded ryu-js v1.0.3
+#22 289.7   Downloaded sqlx-macros-core v0.7.4
+#22 289.8   Downloaded serde_derive v1.0.229
+#22 289.9   Downloaded aes v0.9.2
+#22 290.0   Downloaded fdeflate v0.3.7
+#22 290.1   Downloaded rangemap v1.7.1
+#22 290.1   Downloaded quick-error v2.0.1
+#22 290.3   Downloaded derive_more v0.99.20
+#22 290.5   Downloaded slab v0.4.12
+#22 290.7   Downloaded encoding-index-japanese v1.20141219.5
+#22 290.7   Downloaded icu_properties v2.2.0
+#22 291.5   Downloaded ruzstd v0.8.3
+#22 291.6   Downloaded flume v0.11.1
+#22 291.7   Downloaded bson v2.15.0
+#22 291.9   Downloaded hashbrown v0.12.3
+#22 291.9   Downloaded unicode_categories v0.1.1
+#22 291.9   Downloaded url v2.5.8
+#22 292.6   Downloaded icu_collections v1.5.0
+#22 292.6   Downloaded sqlx-mysql v0.7.4
+#22 293.0   Downloaded either v1.17.0
+#22 293.2   Downloaded icu_normalizer_data v1.5.1
+#22 293.2   Downloaded aes v0.8.4
+#22 293.2   Downloaded thiserror-impl v2.0.19
+#22 293.6   Downloaded serde_core v1.0.229
+#22 293.7   Downloaded icu_normalizer_data v2.2.0
+#22 294.3   Downloaded tracing-log v0.2.0
+#22 294.9   Downloaded futures v0.3.33
+#22 295.0   Downloaded tower-http v0.5.2
+#22 295.1   Downloaded hmac v0.12.1
+#22 295.2   Downloaded icu_locid v1.5.0
+#22 295.8   Downloaded socket2 v0.6.5
+#22 296.9   Downloaded rand v0.9.5
+#22 297.0   Downloaded sharded-slab v0.1.7
+#22 297.1   Downloaded typed-builder-macro v0.22.0
+#22 297.2   Downloaded h3 v0.0.8
+#22 297.4   Downloaded selectors v0.25.0
+#22 297.6   Downloaded axum v0.7.9
+#22 297.7   Downloaded derive_more v2.1.1
+#22 297.8   Downloaded icu_collections v2.2.0
+#22 297.8   Downloaded quinn v0.11.11
+#22 298.0   Downloaded sqlx-postgres v0.7.4
+#22 298.1   Downloaded httparse v1.10.1
+#22 298.6   Downloaded itertools v0.13.0
+#22 299.6   Downloaded hyper-util v0.1.20
+#22 299.6   Downloaded zerovec v0.11.6
+#22 299.9   Downloaded quinn-udp v0.5.15
+#22 300.0   Downloaded sct v0.7.1
+#22 300.4   Downloaded unicode-normalization v0.1.25
+#22 300.4   Downloaded aho-corasick v1.1.4
+#22 301.6   Downloaded encoding v0.2.33
+#22 301.8   Downloaded hashbrown v0.17.1
+#22 302.5   Downloaded rand v0.8.7
+#22 303.1   Downloaded zerovec v0.10.4
+#22 303.2   Downloaded tendril v0.4.3
+#22 303.4   Downloaded sxd-document v0.3.2
+#22 303.6   Downloaded libm v0.2.16
+#22 303.7   Downloaded reqwest v0.12.28
+#22 303.8   Downloaded serde_with_macros v3.21.0
+#22 304.4   Downloaded derive_more-impl v2.1.1
+#22 304.5   Downloaded tower-http v0.6.11
+#22 305.4   Downloaded encoding-index-korean v1.20141219.5
+#22 305.7   Downloaded rustls-webpki v0.103.13
+#22 306.5   Downloaded unicode-properties v0.1.4
+#22 306.5   Downloaded vergen v8.3.2
+#22 307.2   Downloaded prefix-trie v0.8.4
+#22 307.3   Downloaded tracing-core v0.1.36
+#22 307.6   Downloaded brotli-decompressor v5.0.3
+#22 307.6   Downloaded hickory-resolver v0.26.1
+#22 307.8   Downloaded futures-util v0.3.33
+#22 307.9   Downloaded itertools v0.14.0
+#22 308.3   Downloaded rustls-webpki v0.101.7
+#22 308.4   Downloaded hashbrown v0.14.5
+#22 308.8   Downloaded icu_properties_data v2.2.0
+#22 309.2   Downloaded bitvec v1.1.1
+#22 309.5   Downloaded hashbrown v0.16.1
+#22 309.8   Downloaded idna v1.1.0
+#22 310.2   Downloaded tokio-util v0.7.19
+#22 310.4   Downloaded winnow v1.0.4
+#22 310.5   Downloaded feed-rs v2.4.0
+#22 312.3   Downloaded hkdf v0.12.4
+#22 312.4   Downloaded chrono v0.4.45
+#22 312.5   Downloaded serde_json v1.0.151
+#22 313.2   Downloaded ttf-parser v0.24.1
+#22 313.8   Downloaded hyper v1.11.0
+#22 314.2   Downloaded moxcms v0.8.1
+#22 314.4   Downloaded fancy-regex v0.19.0
+#22 314.9   Downloaded toml_edit v0.25.13+spec-1.1.0
+#22 315.1   Downloaded webpki-roots v0.25.4
+#22 316.4   Downloaded html5ever v0.27.0
+#22 316.5   Downloaded portable-atomic v1.14.0
+#22 316.6   Downloaded rustls v0.21.12
+#22 317.6   Downloaded weezl v0.2.1
+#22 317.9   Downloaded quick-xml v0.41.0
+#22 318.6   Downloaded syn v3.0.3
+#22 320.1   Downloaded regress v0.10.5
+#22 320.7   Downloaded rayon v1.12.0
+#22 320.9   Downloaded sqlx v0.7.4
+#22 321.0   Downloaded unicode-segmentation v1.13.3
+#22 321.7   Downloaded sqlx-core v0.7.4
+#22 322.6   Downloaded http v1.5.0
+#22 322.7   Downloaded moka v0.12.15
+#22 322.8   Downloaded regex v1.13.1
+#22 323.7   Downloaded tower v0.5.3
+#22 324.5   Downloaded tracing-subscriber v0.3.23
+#22 326.1   Downloaded encoding-index-simpchinese v1.20141219.5
+#22 327.8   Downloaded lopdf v0.44.0
+#22 329.5   Downloaded hickory-net v0.26.1
+#22 332.7   Downloaded boa_engine v0.19.1
+#22 336.3   Downloaded brotli v8.0.4
+#22 336.3   Downloaded jsonpath_lib v0.3.0
+#22 337.7   Downloaded syn v1.0.109
+#22 339.1   Downloaded zstd-sys v2.0.16+zstd.1.5.7
+#22 339.8   Downloaded sysinfo v0.30.13
+#22 342.1   Downloaded quinn-proto v0.11.16
+#22 342.2   Downloaded zerocopy v0.8.55
+#22 342.9   Downloaded vcpkg v0.2.15
+#22 344.0   Downloaded icu_properties_data v1.5.1
+#22 344.5   Downloaded time v0.3.55
+#22 345.4   Downloaded tokio v1.53.1
+#22 345.5   Downloaded rust-embed v8.12.0
+#22 347.3   Downloaded serde_with v3.21.0
+#22 349.0   Downloaded webpki-roots v1.0.9
+#22 349.2   Downloaded syn v2.0.119
+#22 350.9   Downloaded unicode-width v0.2.2
+#22 352.0   Downloaded object v0.39.1
+#22 355.7   Downloaded image v0.25.10
+#22 355.8   Downloaded encoding_rs v0.8.35
+#22 360.4   Downloaded hickory-proto v0.26.1
+#22 362.9   Downloaded mongodb v3.8.0
+#22 365.7   Downloaded regex-syntax v0.8.11
+#22 371.0   Downloaded rustix v1.1.4
+#22 373.0   Downloaded tracing v0.1.44
+#22 373.6   Downloaded rustls v0.23.43
+#22 385.2   Downloaded jiff v0.2.35
+#22 387.4   Downloaded regex-automata v0.4.16
+#22 391.8   Downloaded libc v0.2.189
+#22 393.3   Downloaded pxfm v0.1.30
+#22 393.6   Downloaded zhconv v0.4.1
+#22 403.2   Downloaded ring v0.17.14
+#22 419.5   Downloaded linux-raw-sys v0.12.1
+#22 429.2   Downloaded libsqlite3-sys v0.27.0
+#22 429.4    Compiling proc-macro2 v1.0.107
+#22 429.4    Compiling unicode-ident v1.0.24
+#22 429.6    Compiling quote v1.0.47
+#22 429.9    Compiling libc v0.2.189
+#22 430.9    Compiling syn v2.0.119
+#22 432.3    Compiling syn v3.0.3
+#22 452.6    Compiling cfg-if v1.0.4
+#22 453.4    Compiling synstructure v0.13.2
+#22 453.5    Compiling version_check v0.9.5
+#22 454.2    Compiling serde_core v1.0.229
+#22 454.5    Compiling zerocopy v0.8.55
+#22 455.3    Compiling jobserver v0.1.35
+#22 455.9    Compiling find-msvc-tools v0.1.9
+#22 456.3    Compiling shlex v2.0.1
+#22 456.5    Compiling cc v1.4.0
+#22 459.4    Compiling zerofrom-derive v0.1.7
+#22 462.1    Compiling serde v1.0.229
+#22 462.5    Compiling serde_derive v1.0.229
+#22 473.5    Compiling displaydoc v0.2.7
+#22 477.3    Compiling memchr v2.8.3
+#22 478.1    Compiling smallvec v1.15.2
+#22 478.3    Compiling yoke-derive v0.8.2
+#22 478.3    Compiling portable-atomic v1.14.0
+#22 479.2    Compiling parking_lot_core v0.9.12
+#22 480.0    Compiling getrandom v0.2.17
+#22 480.2    Compiling typenum v1.20.1
+#22 480.9    Compiling stable_deref_trait v1.2.1
+#22 481.0    Compiling critical-section v1.2.0
+#22 481.1    Compiling once_cell v1.21.4
+#22 481.2    Compiling zerovec-derive v0.11.3
+#22 487.0    Compiling autocfg v1.5.1
+#22 488.5    Compiling zerofrom v0.1.8
+#22 488.6    Compiling scopeguard v1.2.0
+#22 488.6    Compiling lock_api v0.4.14
+#22 488.9    Compiling log v0.4.33
+#22 489.1    Compiling pin-project-lite v0.2.17
+#22 489.2    Compiling generic-array v0.14.7
+#22 489.3    Compiling itoa v1.0.18
+#22 489.5    Compiling bytes v1.12.1
+#22 490.0    Compiling parking_lot v0.12.5
+#22 490.5    Compiling futures-core v0.3.33
+#22 490.6    Compiling ring v0.17.14
+#22 491.6    Compiling icu_properties_data v2.2.0
+#22 491.7    Compiling icu_normalizer_data v2.2.0
+#22 492.4    Compiling tracing-attributes v0.1.31
+#22 500.4    Compiling futures-sink v0.3.33
+#22 500.5    Compiling yoke v0.8.3
+#22 500.6    Compiling socket2 v0.6.5
+#22 501.0    Compiling errno v0.3.14
+#22 501.3    Compiling slab v0.4.12
+#22 501.4    Compiling signal-hook-registry v1.4.8
+#22 501.7    Compiling futures-channel v0.3.33
+#22 501.8    Compiling ahash v0.8.12
+#22 501.9    Compiling tokio-macros v2.7.2
+#22 503.0    Compiling mio v1.2.2
+#22 503.3    Compiling futures-io v0.3.33
+#22 504.3    Compiling zerovec v0.11.6
+#22 504.8    Compiling ppv-lite86 v0.2.21
+#22 505.1    Compiling tracing-core v0.1.36
+#22 505.6    Compiling rand_core v0.6.4
+#22 508.0    Compiling tokio v1.53.1
+#22 508.6    Compiling futures-macro v0.3.33
+#22 514.6    Compiling futures-task v0.3.33
+#22 514.7    Compiling futures-util v0.3.33
+#22 515.0    Compiling rand_chacha v0.3.1
+#22 515.5    Compiling num-traits v0.2.19
+#22 515.6    Compiling subtle v2.6.1
+#22 516.4    Compiling equivalent v1.0.2
+#22 516.5    Compiling rand v0.8.7
+#22 516.9    Compiling tracing v0.1.44
+#22 517.2    Compiling zmij v1.0.23
+#22 517.2    Compiling utf8_iter v1.0.4
+#22 517.3    Compiling getrandom v0.3.4
+#22 517.6    Compiling tinystr v0.8.3
+#22 518.0    Compiling hybrid-array v0.4.14
+#22 518.2    Compiling litemap v0.8.2
+#22 518.3    Compiling percent-encoding v2.3.2
+#22 518.4    Compiling writeable v0.6.3
+#22 518.6    Compiling icu_locale_core v2.2.0
+#22 518.6    Compiling potential_utf v0.1.5
+#22 518.7    Compiling zerotrie v0.2.4
+#22 519.1    Compiling pkg-config v0.3.33
+#22 520.2    Compiling icu_provider v2.2.0
+#22 520.3    Compiling icu_collections v2.2.0
+#22 520.5    Compiling hashbrown v0.17.1
+#22 520.7    Compiling siphasher v1.0.3
+#22 520.9    Compiling crossbeam-utils v0.8.22
+#22 521.1    Compiling rand_core v0.10.1
+#22 521.1    Compiling indexmap v2.14.0
+#22 521.2    Compiling phf_shared v0.11.3
+#22 521.5    Compiling cpufeatures v0.3.0
+#22 521.5    Compiling getrandom v0.4.3
+#22 521.7    Compiling untrusted v0.9.0
+#22 521.8    Compiling icu_normalizer v2.2.0
+#22 522.6    Compiling icu_properties v2.2.0
+#22 523.6    Compiling phf_generator v0.11.3
+#22 524.3    Compiling crypto-common v0.2.2
+#22 524.6    Compiling crypto-common v0.1.7
+#22 524.7    Compiling http v1.5.0
+#22 525.1    Compiling either v1.17.0
+#22 525.3    Compiling paste v1.0.15
+#22 525.5    Compiling idna_adapter v1.2.2
+#22 525.7    Compiling form_urlencoded v1.2.2
+#22 525.8    Compiling thiserror v1.0.69
+#22 525.8    Compiling num-conv v0.2.2
+#22 525.9    Compiling time-core v0.1.9
+#22 526.1    Compiling idna v1.1.0
+#22 527.0    Compiling thiserror-impl v1.0.69
+#22 527.0    Compiling serde_json v1.0.151
+#22 527.1    Compiling allocator-api2 v0.2.21
+#22 527.7    Compiling block-buffer v0.10.4
+#22 530.4    Compiling bitflags v2.13.1
+#22 530.6    Compiling simd-adler32 v0.3.10
+#22 530.9    Compiling crc32fast v1.5.0
+#22 531.1    Compiling tinyvec_macros v0.1.1
+#22 531.3    Compiling rustversion v1.0.23
+#22 531.7    Compiling tinyvec v1.12.0
+#22 534.1    Compiling digest v0.10.7
+#22 534.4    Compiling url v2.5.8
+#22 535.9    Compiling yoke-derive v0.7.5
+#22 535.9    Compiling cmov v0.5.4
+#22 536.2    Compiling zeroize v1.9.0
+#22 536.4    Compiling crunchy v0.2.4
+#22 536.5    Compiling adler2 v2.0.1
+#22 536.6    Compiling thiserror v2.0.19
+#22 538.3    Compiling miniz_oxide v0.8.9
+#22 539.0    Compiling rustls-pki-types v1.15.1
+#22 540.0    Compiling ctutils v0.4.2
+#22 542.5    Compiling hashbrown v0.14.5
+#22 543.1    Compiling phf_macros v0.11.3
+#22 545.3    Compiling yoke v0.7.5
+#22 545.4    Compiling chacha20 v0.10.1
+#22 545.6    Compiling block-buffer v0.12.1
+#22 545.7    Compiling thiserror-impl v2.0.19
+#22 546.3    Compiling zerovec-derive v0.10.3
+#22 551.1    Compiling const-oid v0.10.2
+#22 551.2    Compiling crossbeam-epoch v0.9.20
+#22 551.4    Compiling httparse v1.10.1
+#22 552.1    Compiling rustls v0.21.12
+#22 552.2    Compiling rustc-hash v2.1.3
+#22 552.3    Compiling tiny-keccak v2.0.2
+#22 552.7    Compiling digest v0.11.3
+#22 552.8    Compiling zerovec v0.10.4
+#22 553.8    Compiling phf v0.11.3
+#22 553.9    Compiling rand v0.10.2
+#22 554.6    Compiling flate2 v1.1.9
+#22 554.7    Compiling http-body v1.1.0
+#22 555.0    Compiling ipnet v2.12.1
+#22 555.1    Compiling rustls v0.23.43
+#22 555.2    Compiling vcpkg v0.2.15
+#22 555.5    Compiling unicase v2.9.0
+#22 555.7    Compiling byteorder v1.5.0
+#22 555.9    Compiling cpufeatures v0.2.17
+#22 557.3    Compiling libsqlite3-sys v0.27.0
+#22 557.7    Compiling sha2 v0.10.9
+#22 560.4    Compiling rustls-webpki v0.103.13
+#22 560.4    Compiling time-macros v0.2.32
+#22 561.6    Compiling zstd-sys v2.0.16+zstd.1.5.7
+#22 562.4    Compiling deranged v0.5.8
+#22 563.2    Compiling cfg_aliases v0.2.2
+#22 563.3    Compiling alloc-no-stdlib v2.0.4
+#22 563.4    Compiling powerfmt v0.2.0
+#22 563.6    Compiling object v0.39.1
+#22 563.7    Compiling unicode-segmentation v1.13.3
+#22 564.1    Compiling num_threads v0.1.7
+#22 564.1    Compiling tower-service v0.3.3
+#22 564.2    Compiling time v0.3.55
+#22 564.2    Compiling alloc-stdlib v0.2.4
+#22 573.9    Compiling const-random-macro v0.1.16
+#22 601.3    Compiling tinystr v0.7.6
+#22 601.6    Compiling block-padding v0.4.2
+#22 602.2    Compiling aho-corasick v1.1.4
+#22 606.5    Compiling icu_locid_transform_data v1.5.1
+#22 606.7    Compiling writeable v0.5.5
+#22 606.9    Compiling minimal-lexical v0.2.1
+#22 608.0    Compiling new_debug_unreachable v1.0.6
+#22 608.2    Compiling regex-syntax v0.8.11
+#22 612.5    Compiling anyhow v1.0.104
+#22 612.8    Compiling siphasher v0.3.11
+#22 613.0    Compiling litemap v0.7.5
+#22 613.1    Compiling encoding_index_tests v0.1.4
+#22 613.5    Compiling icu_locid v1.5.0
+#22 615.4    Compiling phf_shared v0.10.0
+#22 615.5    Compiling regex-automata v0.4.16
+#22 623.1    Compiling nom v7.1.3
+#22 624.5    Compiling inout v0.2.2
+#22 625.2    Compiling const-random v0.1.18
+#22 625.8    Compiling brotli-decompressor v5.0.3
+#22 627.8    Compiling rustls-webpki v0.101.7
+#22 629.0    Compiling sct v0.7.1
+#22 629.7    Compiling encoding_rs v0.8.35
+#22 630.0    Compiling icu_provider_macros v1.5.0
+#22 631.8    Compiling macro_magic_core_macros v0.5.1
+#22 632.0    Compiling derive-syn-parse v0.2.0
+#22 632.9    Compiling sptr v0.3.2
+#22 633.1    Compiling data-encoding v2.11.1
+#22 634.2    Compiling crossbeam-deque v0.8.7
+#22 634.3    Compiling zstd-safe v7.2.4
+#22 634.4    Compiling base64 v0.22.1
+#22 634.7    Compiling unicode_categories v0.1.1
+#22 634.8    Compiling ident_case v1.0.1
+#22 634.9    Compiling strsim v0.11.1
+#22 635.4    Compiling icu_properties_data v1.5.1
+#22 635.5    Compiling crc-catalog v2.5.0
+#22 635.7    Compiling utf-8 v0.7.6
+#22 635.8    Compiling winnow v1.0.4
+#22 636.9    Compiling static_assertions v1.1.0
+#22 636.9    Compiling httpdate v1.0.3
+#22 637.0    Compiling fast-float v0.2.0
+#22 637.1    Compiling try-lock v0.2.5
+#22 637.1    Compiling base64 v0.21.7
+#22 637.2    Compiling rustix v1.1.4
+#22 637.4    Compiling tower-layer v0.3.3
+#22 637.6    Compiling rustls-pemfile v1.0.4
+#22 637.6    Compiling want v0.3.1
+#22 637.7    Compiling boa_string v0.19.1
+#22 637.8    Compiling macro_magic_core v0.5.1
+#22 638.1    Compiling toml_parser v1.1.3+spec-1.1.0
+#22 639.3    Compiling crc v3.4.0
+#22 639.5    Compiling darling_core v0.23.0
+#22 640.2    Compiling sqlformat v0.2.6
+#22 646.5    Compiling icu_provider v1.5.0
+#22 647.0    Compiling ar_archive_writer v0.5.3
+#22 653.8    Compiling crossbeam-queue v0.3.13
+#22 654.0    Compiling brotli v8.0.4
+#22 656.6    Compiling atoi v2.0.0
+#22 656.6    Compiling futures-intrusive v0.5.0
+#22 657.0    Compiling cipher v0.5.2
+#22 657.2    Compiling tokio-stream v0.1.19
+#22 657.6    Compiling hashlink v0.8.4
+#22 657.8    Compiling phf_generator v0.10.0
+#22 658.5    Compiling quinn-udp v0.5.15
+#22 658.9    Compiling http-body-util v0.1.4
+#22 659.0    Compiling spin v0.9.9
+#22 659.1    Compiling vergen v8.3.2
+#22 659.2    Compiling uuid v1.24.0
+#22 659.2    Compiling phf_codegen v0.11.3
+#22 659.3    Compiling string_cache_codegen v0.5.4
+#22 659.5    Compiling tokio-util v0.7.19
+#22 660.2    Compiling futures-executor v0.3.33
+#22 660.6    Compiling sync_wrapper v1.0.2
+#22 660.8    Compiling boa_macros v0.19.1
+#22 664.5    Compiling async-trait v0.1.91
+#22 664.8    Compiling hex v0.4.3
+#22 665.0    Compiling mac v0.1.1
+#22 665.1    Compiling atomic-waker v1.1.2
+#22 665.1    Compiling tap v1.0.1
+#22 665.2    Compiling syn v1.0.109
+#22 665.8    Compiling radium v0.7.0
+#22 671.8    Compiling linux-raw-sys v0.12.1
+#22 672.1    Compiling webpki-roots v0.25.4
+#22 672.2    Compiling boa_profiler v0.19.1
+#22 672.2    Compiling rayon-core v1.13.0
+#22 672.3    Compiling semver v1.0.28
+#22 673.0    Compiling toml_datetime v1.1.1+spec-1.1.0
+#22 673.2    Compiling compression-core v0.4.32
+#22 673.3    Compiling precomputed-hash v0.1.1
+#22 674.7    Compiling thin-vec v0.2.19
+#22 675.3    Compiling event-listener v2.5.3
+#22 675.5    Compiling mime v0.3.17
+#22 675.8    Compiling sqlx-core v0.7.4
+#22 680.9    Compiling boa_gc v0.19.1
+#22 682.4    Compiling compression-codecs v0.4.38
+#22 684.4    Compiling toml_edit v0.25.13+spec-1.1.0
+#22 685.6    Compiling rustc_version v0.4.1
+#22 688.6    Compiling hyper v1.11.0
+#22 690.5    Compiling futf v0.1.5
+#22 690.6    Compiling markup5ever v0.12.1
+#22 691.8    Compiling flume v0.11.1
+#22 692.2    Compiling phf_codegen v0.10.0
+#22 692.3    Compiling icu_locid_transform v1.5.0
+#22 694.0    Compiling darling_macro v0.23.0
+#22 696.1    Compiling psm v0.1.32
+#22 697.4    Compiling macro_magic_macros v0.5.1
+#22 699.4    Compiling quinn v0.11.11
+#22 699.6    Compiling mime_guess v2.0.5
+#22 700.5    Compiling prefix-trie v0.8.4
+#22 701.1    Compiling icu_collections v1.5.0
+#22 701.4    Compiling sha2 v0.11.0
+#22 701.8    Compiling crossbeam-channel v0.5.16
+#22 702.4    Compiling rand_pcg v0.10.2
+#22 702.5    Compiling rand_core v0.9.5
+#22 702.6    Compiling block-padding v0.3.3
+#22 702.7    Compiling num-integer v0.1.46
+#22 703.1    Compiling memoffset v0.9.1
+#22 703.2    Compiling cookie v0.18.1
+#22 703.3    Compiling urlencoding v2.1.3
+#22 703.5    Compiling same-file v1.0.6
+#22 703.6    Compiling lru-slab v0.1.2
+#22 703.6    Compiling icu_normalizer_data v1.5.1
+#22 703.7    Compiling fastrand v2.5.0
+#22 703.7    Compiling inotify-sys v0.1.8
+#22 704.0    Compiling foldhash v0.2.0
+#22 704.1    Compiling dtoa v1.0.11
+#22 704.2    Compiling dtoa-short v0.3.5
+#22 704.3    Compiling hashbrown v0.16.1
+#22 704.7    Compiling walkdir v2.5.0
+#22 705.0    Compiling tempfile v3.27.0
+#22 705.7    Compiling quinn-proto v0.11.16
+#22 711.2    Compiling sqlx-sqlite v0.7.4
+#22 712.6    Compiling num-bigint v0.4.8
+#22 715.3    Compiling inout v0.1.4
+#22 719.7    Compiling rand_chacha v0.9.0
+#22 719.8    Compiling icu_properties v1.5.1
+#22 720.0    Compiling hickory-proto v0.26.1
+#22 724.9    Compiling darling v0.23.0
+#22 725.0    Compiling selectors v0.25.0
+#22 725.2    Compiling zstd v0.13.3
+#22 725.8    Compiling tendril v0.4.3
+#22 725.9    Compiling regex v1.13.1
+#22 726.0    Compiling hyper-util v0.1.20
+#22 727.8    Compiling rustc_version_runtime v0.3.0
+#22 728.0    Compiling proc-macro-crate v3.5.0
+#22 729.3    Compiling async-compression v0.4.43
+#22 729.6    Compiling boa_interner v0.19.1
+#22 730.2    Compiling string_cache v0.8.9
+#22 730.3    Compiling wyz v0.5.1
+#22 730.5    Compiling tower v0.5.3
+#22 730.9    Compiling tokio-rustls v0.26.4
+#22 731.1    Compiling convert_case v0.10.0
+#22 731.6    Compiling heck v0.4.1
+#22 733.1    Compiling itertools v0.14.0
+#22 734.6    Compiling webpki-roots v1.0.9
+#22 734.7    Compiling unicode-normalization v0.1.25
+#22 736.0    Compiling indexmap v1.9.3
+#22 736.1    Compiling stacker v0.1.25
+#22 736.3    Compiling multer v3.1.0
+#22 736.4    Compiling bytemuck_derive v1.11.0
+#22 742.6    Compiling html5ever v0.27.0
+#22 744.1    Compiling cssparser-macros v0.6.1
+#22 746.3    Compiling unicode-properties v0.1.4
+#22 746.4    Compiling ryu v1.0.23
+#22 747.0    Compiling tagptr v0.2.0
+#22 747.1    Compiling daachorse v1.0.1
+#22 748.0    Compiling litrs v1.0.0
+#22 748.9    Compiling unicode-bidi v0.3.18
+#22 749.5    Compiling heck v0.5.0
+#22 750.2    Compiling hex-literal v1.1.0
+#22 750.3    Compiling dotenvy v0.15.7
+#22 750.6    Compiling psl-types v2.0.11
+#22 750.7    Compiling iana-time-zone v0.1.65
+#22 750.9    Compiling unicode-xid v0.2.6
+#22 750.9    Compiling funty v2.0.0
+#22 751.0    Compiling derive_more-impl v2.1.1
+#22 751.4    Compiling bitvec v1.1.1
+#22 753.4    Compiling chrono v0.4.45
+#22 755.4    Compiling publicsuffix v2.3.0
+#22 755.8    Compiling sqlx-macros-core v0.7.4
+#22 761.9    Compiling zhconv v0.4.1
+#22 763.7    Compiling strum_macros v0.27.2
+#22 765.2    Compiling stringprep v0.1.5
+#22 769.0    Compiling document-features v0.2.12
+#22 770.1    Compiling h3 v0.0.8
+#22 771.5    Compiling moka v0.12.15
+#22 773.0    Compiling serde_urlencoded v0.7.1
+#22 773.2    Compiling cssparser v0.31.2
+#22 773.3    Compiling bytemuck v1.25.2
+#22 774.2    Compiling boa_ast v0.19.1
+#22 774.3    Compiling num_enum_derive v0.7.6
+#22 780.2    Compiling serde_with_macros v3.21.0
+#22 780.8    Compiling rayon v1.12.0
+#22 782.7    Compiling hickory-net v0.26.1
+#22 784.1    Compiling rand v0.9.5
+#22 784.6    Compiling cipher v0.4.4
+#22 785.8    Compiling rust-embed-utils v8.12.0
+#22 786.0    Compiling phf v0.10.1
+#22 786.2    Compiling regress v0.10.5
+#22 787.6    Compiling macro_magic v0.5.1
+#22 787.9    Compiling futures v0.3.33
+#22 788.9    Compiling encoding-index-korean v1.20141219.5
+#22 789.1    Compiling encoding-index-tradchinese v1.20141219.5
+#22 789.3    Compiling encoding-index-simpchinese v1.20141219.5
+#22 789.4    Compiling encoding-index-singlebyte v1.20141219.5
+#22 789.6    Compiling encoding-index-japanese v1.20141219.5
+#22 789.7    Compiling sha1 v0.10.7
+#22 789.7    Compiling fxhash v0.2.1
+#22 789.8    Compiling md-5 v0.11.0
+#22 789.9    Compiling fdeflate v0.3.7
+#22 789.9    Compiling servo_arc v0.3.0
+#22 790.1    Compiling serde_bytes v0.11.19
+#22 790.2    Compiling derive_more v0.99.20
+#22 790.3    Compiling typed-builder-macro v0.22.0
+#22 794.2    Compiling peresil v0.3.0
+#22 794.3    Compiling weezl v0.1.12
+#22 794.8    Compiling zune-core v0.5.1
+#22 795.1    Compiling quick-error v2.0.1
+#22 795.2    Compiling twox-hash v2.1.3
+#22 795.3    Compiling color_quant v1.1.0
+#22 795.5    Compiling write16 v1.0.0
+#22 795.5    Compiling unicode-width v0.2.2
+#22 795.7    Compiling cpubits v0.1.1
+#22 795.8    Compiling hashbrown v0.12.3
+#22 796.3    Compiling resolv-conf v0.7.6
+#22 796.8    Compiling lazy_static v1.5.0
+#22 796.8    Compiling utf16_iter v1.0.5
+#22 796.9    Compiling pxfm v0.1.30
+#22 800.9    Compiling jiff-core v0.1.0
+#22 801.3    Compiling byteorder-lite v0.1.0
+#22 801.7    Compiling typed-arena v1.7.0
+#22 801.8    Compiling bitflags v1.3.2
+#22 801.9    Compiling bit-vec v0.8.0
+#22 802.1    Compiling base64ct v1.8.3
+#22 802.3    Compiling bit-set v0.8.0
+#22 802.4    Compiling password-hash v0.5.0
+#22 802.4    Compiling inotify v0.9.6
+#22 802.7    Compiling jiff v0.2.35
+#22 802.8    Compiling sxd-document v0.3.2
+#22 805.5    Compiling image-webp v0.2.4
+#22 807.3    Compiling typed-builder v0.22.0
+#22 807.3    Compiling moxcms v0.8.1
+#22 808.2    Compiling icu_normalizer v1.5.0
+#22 809.9    Compiling sharded-slab v0.1.7
+#22 816.2    Compiling hickory-resolver v0.26.1
+#22 818.9    Compiling aes v0.9.2
+#22 819.3    Compiling getopts v0.2.24
+#22 819.8    Compiling gif v0.14.2
+#22 820.6    Compiling ruzstd v0.8.3
+#22 820.7    Compiling zune-jpeg v0.5.15
+#22 822.7    Compiling bson v2.15.0
+#22 823.2    Compiling png v0.18.1
+#22 824.5    Compiling tungstenite v0.24.0
+#22 825.5    Compiling encoding v0.2.33
+#22 826.3    Compiling h3-quinn v0.0.10
+#22 826.5    Compiling boa_parser v0.19.1
+#22 828.4    Compiling mongodb-internal-macros v3.8.0
+#22 829.0    Compiling serde_with v3.21.0
+#22 829.7    Compiling rust-embed-impl v8.12.0
+#22 832.0    Compiling cookie_store v0.22.1
+#22 833.0    Compiling intrusive-collections v0.9.7
+#22 833.4    Compiling num_enum v0.7.6
+#22 834.3    Compiling strum v0.27.2
+#22 834.4    Compiling sqlx-macros v0.7.4
+#22 835.8    Compiling derive_more v2.1.1
+#22 835.9    Compiling hyper-rustls v0.27.9
+#22 836.1    Compiling tower-http v0.6.11
+#22 837.3    Compiling axum-core v0.4.5
+#22 838.8    Compiling cbc v0.2.1
+#22 838.9    Compiling ecb v0.2.0
+#22 839.0    Compiling quick-xml v0.41.0
+#22 839.6    Compiling matchers v0.2.0
+#22 839.6    Compiling sha1 v0.11.0
+#22 839.9    Compiling hmac v0.13.0
+#22 840.0    Compiling pbkdf2 v0.13.0
+#22 840.0    Compiling dashmap v5.5.3
+#22 840.1    Compiling blake2 v0.10.6
+#22 840.4    Compiling itertools v0.13.0
+#22 841.2    Compiling tracing-log v0.2.0
+#22 841.4    Compiling serde_path_to_error v0.1.20
+#22 841.5    Compiling mio v0.8.11
+#22 841.8    Compiling mediatype v0.21.0
+#22 841.8    Compiling nom v8.0.0
+#22 842.6    Compiling filetime v0.2.29
+#22 842.8    Compiling thread_local v1.1.10
+#22 842.9    Compiling derive-where v1.6.1
+#22 844.0    Compiling axum-macros v0.4.2
+#22 852.5    Compiling quick-error v1.2.3
+#22 852.9    Compiling arrayvec v0.7.8
+#22 853.1    Compiling ego-tree v0.6.3
+#22 853.2    Compiling nu-ansi-term v0.50.3
+#22 853.3    Compiling http-range-header v0.4.2
+#22 853.4    Compiling pollster v0.3.0
+#22 853.5    Compiling take_mut v0.2.2
+#22 853.5    Compiling ryu-js v1.0.3
+#22 853.8    Compiling matchit v0.7.3
+#22 854.0    Compiling weezl v0.2.1
+#22 854.1    Compiling rangemap v1.7.1
+#22 854.4    Compiling lopdf v0.44.0
+#22 854.5    Compiling axum v0.7.9
+#22 859.3    Compiling boa_engine v0.19.1
+#22 874.3    Compiling mongodb v3.8.0
+#22 922.6    Compiling tower-http v0.5.2
+#22 924.2    Compiling tracing-subscriber v0.3.23
+#22 927.9    Compiling scraper v0.20.0
+#22 934.6    Compiling sxd-xpath v0.4.2
+#22 937.1    Compiling notify v6.1.1
+#22 939.5    Compiling feed-rs v2.4.0
+#22 941.5    Compiling argon2 v0.5.3
+#22 942.0    Compiling sqlx v0.7.4
+#22 942.3    Compiling rust-embed v8.12.0
+#22 942.4    Compiling reqwest v0.12.28
+#22 948.8    Compiling serde_stacker v0.1.14
+#22 948.9    Compiling mobi v0.8.0
+#22 949.7    Compiling tokio-tungstenite v0.24.0
+#22 949.9    Compiling image v0.25.10
+#22 951.6    Compiling fancy-regex v0.19.0
+#22 954.4    Compiling cbc v0.1.2
+#22 954.5    Compiling aes v0.8.4
+#22 955.0    Compiling sysinfo v0.30.13
+#22 957.5    Compiling des v0.9.0
+#22 957.6    Compiling chardetng v0.1.17
+#22 958.4    Compiling zip v0.6.6
+#22 959.0    Compiling jsonpath_lib v0.3.0
+#22 961.9    Compiling md-5 v0.10.6
+#22 962.0    Compiling hmac v0.12.1
+#22 962.5    Compiling ttf-parser v0.24.1
+#22 964.1    Compiling reader-dev v6.0.46 (/app)
+#22 974.0 warning: unused import: `axum::handler::Handler`
+#22 974.0  --> src/api/router.rs:7:5
+#22 974.0   |
+#22 974.0 7 | use axum::handler::Handler as _;
+#22 974.0   |     ^^^^^^^^^^^^^^^^^^^^^^
+#22 974.0   |
+#22 974.0   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+#22 974.0 
+#22 975.2 warning: unused variable: `namespace`
+#22 975.2    --> src/api/router.rs:933:9
+#22 975.2     |
+#22 975.2 933 |     let namespace = match resolve_namespace(&state, &params, &headers).await {
+#22 975.2     |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_namespace`
+#22 975.2     |
+#22 975.2     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+#22 975.2 
+#22 975.7 warning: value assigned to `updated` is never read
+#22 975.7     --> src/storage/mod.rs:6009:23
+#22 975.7      |
+#22 975.7 6009 |     let mut updated = 0usize;
+#22 975.7      |                       ^^^^^^ this value is reassigned later and never used
+#22 975.7 ...
+#22 975.7 6081 |     updated = updated_counter.load(std::sync::atomic::Ordering::Relaxed);
+#22 975.7      |     -------------------------------------------------------------------- `updated` is overwritten here before the previous value is read
+#22 975.7      |
+#22 975.7      = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+#22 975.7 
+#22 975.7 warning: unused variable: `namespace`
+#22 975.7     --> src/api/router.rs:6476:9
+#22 975.7      |
+#22 975.7 6476 |     let namespace = match resolve_namespace(&state, &params, &headers).await {
+#22 975.7      |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_namespace`
+#22 975.7 
+#22 975.7 warning: unused variable: `namespace`
+#22 975.7     --> src/api/router.rs:6519:9
+#22 975.7      |
+#22 975.7 6519 |     let namespace = match resolve_namespace(&state, &params, &headers).await {
+#22 975.7      |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_namespace`
+#22 975.7 
+#22 975.7 warning: unused variable: `namespace`
+#22 975.7     --> src/api/router.rs:6701:9
+#22 975.7      |
+#22 975.7 6701 |     let namespace = match resolve_namespace(&state, &params, &headers).await {
+#22 975.7      |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_namespace`
+#22 975.7 
+#22 975.8 warning: unused variable: `namespace`
+#22 975.8     --> src/api/router.rs:8000:9
+#22 975.8      |
+#22 975.8 8000 |     let namespace = match resolve_namespace(&state, &params, &headers).await {
+#22 975.8      |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_namespace`
+#22 975.8 
+#22 976.1 warning: unused variable: `path`
+#22 976.1   --> src/middleware/stats.rs:53:13
+#22 976.1    |
+#22 976.1 53 |         let path = path.to_string();
+#22 976.1    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_path`
+#22 976.1 
+#22 976.8 warning: unused variable: `context`
+#22 976.8     --> src/parser/js.rs:4236:5
+#22 976.8      |
+#22 976.8 4236 |     context: &mut Context,
+#22 976.8      |     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_context`
+#22 976.8 
+#22 976.9 warning: unnecessary `unsafe` block
+#22 976.9     --> src/parser/js.rs:6072:29
+#22 976.9      |
+#22 976.9 6059 |             unsafe {
+#22 976.9      |             ------ because it's nested under this `unsafe` block
+#22 976.9 ...
+#22 976.9 6072 |                             unsafe {
+#22 976.9      |                             ^^^^^^ unnecessary `unsafe` block
+#22 976.9      |
+#22 976.9      = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+#22 976.9 
+#22 977.5 warning: variable does not need to be mutable
+#22 977.5    --> src/service/local_book.rs:237:9
+#22 977.5     |
+#22 977.5 237 |     let mut stack: Vec<(usize, String)> = Vec::new();
+#22 977.5     |         ----^^^^^
+#22 977.5     |         |
+#22 977.5     |         help: remove this `mut`
+#22 977.5     |
+#22 977.5     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+#22 977.5 
+#22 978.5 warning: field `book_url` is never read
+#22 978.5   --> src/api/bot.rs:72:5
+#22 978.5    |
+#22 978.5 70 | struct BotJob {
+#22 978.5    |        ------ field in this struct
+#22 978.5 71 |     ns: String,
+#22 978.5 72 |     book_url: String,
+#22 978.5    |     ^^^^^^^^
+#22 978.5    |
+#22 978.5    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+#22 978.5 
+#22 978.5 warning: function `add_invalid_book_source` is never used
+#22 978.5     --> src/api/router.rs:4678:10
+#22 978.5      |
+#22 978.5 4678 | async fn add_invalid_book_source(
+#22 978.5      |          ^^^^^^^^^^^^^^^^^^^^^^^
+#22 978.5 
+#22 978.5 warning: function `java_base64_encode` is never used
+#22 978.5     --> src/parser/js.rs:4095:4
+#22 978.5      |
+#22 978.5 4095 | fn java_base64_encode(
+#22 978.5      |    ^^^^^^^^^^^^^^^^^^
+#22 978.5 
+#22 978.5 warning: function `java_base64_decode` is never used
+#22 978.5     --> src/parser/js.rs:4259:4
+#22 978.5      |
+#22 978.5 4259 | fn java_base64_decode(
+#22 978.5      |    ^^^^^^^^^^^^^^^^^^
+#22 978.5 
+#22 978.5 warning: function `expand_inline_depth` is never used
+#22 978.5     --> src/parser/rule.rs:1219:4
+#22 978.5      |
+#22 978.5 1219 | fn expand_inline_depth(body: &str, text: &str, depth: usize) -> String {
+#22 978.5      |    ^^^^^^^^^^^^^^^^^^^
+#22 978.5 
+#22 978.5 warning: function `ssrf_redirect_policy` is never used
+#22 978.5    --> src/service/crawler.rs:270:15
+#22 978.5     |
+#22 978.5 270 | pub(crate) fn ssrf_redirect_policy() -> reqwest::redirect::Policy {
+#22 978.5     |               ^^^^^^^^^^^^^^^^^^^^
+#22 978.5 
+#22 978.5 warning: function `concurrent_rate_sleep_ms` is never used
+#22 978.5    --> src/service/search.rs:493:15
+#22 978.5     |
+#22 978.5 493 | pub(crate) fn concurrent_rate_sleep_ms(rate: Option<&str>) -> u64 {
+#22 978.5     |               ^^^^^^^^^^^^^^^^^^^^^^^^
+#22 978.5 
+#22 978.5 warning: function `analyze_book_list` is never used
+#22 978.5    --> src/service/search.rs:854:4
+#22 978.5     |
+#22 978.5 854 | fn analyze_book_list(
+#22 978.5     |    ^^^^^^^^^^^^^^^^^
+#22 978.5 
+#22 978.5 warning: function `field_url` is never used
+#22 978.5     --> src/service/search.rs:1226:4
+#22 978.5      |
+#22 978.5 1226 | fn field_url(context: &str, rule: Option<&str>, default: &str, base: &str) -> String {
+#22 978.5      |    ^^^^^^^^^
+#22 978.5 
+#22 978.5 warning: function `expand_embedded` is never used
+#22 978.5     --> src/service/search.rs:1295:15
+#22 978.5      |
+#22 978.5 1295 | pub(crate) fn expand_embedded(rule: &str, context: &str) -> String {
+#22 978.5      |               ^^^^^^^^^^^^^^^
+#22 978.5 
+#22 978.5 warning: function `field_with_bridge` is never used
+#22 978.5     --> src/service/search.rs:1445:15
+#22 978.5      |
+#22 978.5 1445 | pub(crate) fn field_with_bridge(
+#22 978.5      |               ^^^^^^^^^^^^^^^^^
+#22 978.5 
+#22 978.5 warning: function `opt_field` is never used
+#22 978.5     --> src/service/search.rs:1677:15
+#22 978.5      |
+#22 978.5 1677 | pub(crate) fn opt_field(context: &str, rule: Option<&str>) -> Option<String> {
+#22 978.5      |               ^^^^^^^^^
+#22 978.5 
+#22 978.5 warning: function `opt_field_with_bridge` is never used
+#22 978.5     --> src/service/search.rs:1681:15
+#22 978.5      |
+#22 978.5 1681 | pub(crate) fn opt_field_with_bridge(
+#22 978.5      |               ^^^^^^^^^^^^^^^^^^^^^
+#22 978.5 
+#22 978.5 warning: method `len` is never used
+#22 978.5   --> src/util/regex.rs:86:8
+#22 978.5    |
+#22 978.5 45 | impl RegexCache {
+#22 978.5    | --------------- method in this implementation
+#22 978.5 ...
+#22 978.5 86 |     fn len(&self) -> usize {
+#22 978.5    |        ^^^
+#22 978.5 
+#22 1091.0 warning: `reader-dev` (lib) generated 25 warnings (run `cargo fix --lib -p reader-dev` to apply 8 suggestions)
+#22 1337.7     Finished `release` profile [optimized] target(s) in 22m 17s
+#22 DONE 1339.6s
+
+#23 [camo 2/3] RUN pip install --no-cache-dir camoufox==0.5.4     && python -m camoufox fetch
+#23 CACHED
+
+#24 [camo 3/3] RUN python -c "from camoufox.addons import download_and_extract, get_addon_path; download_and_extract('https://github.com/gorhill/uBlock/releases/download/1.75.0/uBlock0_1.75.0.firefox.signed.xpi', get_addon_path('UBO'), 'UBO')"     && test -f /root/.cache/camoufox/addons/UBO/manifest.json
+#24 CACHED
+
+#25 [stage-3 5/9] COPY --from=camo /root/.cache/camoufox /root/.cache/camoufox
+#25 CACHED
+
+#26 [stage-3 2/9] RUN apt-get update     && apt-get install -y --no-install-recommends         ca-certificates         tzdata         fonts-noto-cjk     && rm -rf /var/lib/apt/lists/*
+#26 CACHED
+
+#27 [stage-3 3/9] RUN apt-get update     && apt-get install -y --no-install-recommends         tini         libnss3 libnspr4 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0         libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1         libxfixes3 libxrandr2 libgbm1 libasound2 libpango-1.0-0 libcairo2         libgtk-3-0     && ln -sf /usr/bin/tini /sbin/tini     && rm -rf /var/lib/apt/lists/*
+#27 CACHED
+
+#28 [stage-3 4/9] COPY --from=camo /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+#28 CACHED
+
+#29 [stage-3 6/9] COPY scripts/camoufox_solver.py /usr/local/bin/camoufox_solver.py
+#29 CACHED
+
+#30 [stage-3 7/9] COPY --from=builder /app/target/release/reader-dev /usr/local/bin/reader-dev
+#30 DONE 0.1s
+
+#31 [stage-3 8/9] COPY --from=builder /app/web-ui/dist /app/web-ui/dist
+#31 DONE 0.0s
+
+#32 [stage-3 9/9] COPY web-simple /app/web-simple
+#32 DONE 0.0s
+
+#33 exporting to image
+#33 exporting layers
+#33 exporting layers 1.6s done
+#33 exporting manifest sha256:af9624bb511c7180deb9fdb90928e2af6af8c834e1a268b2c70e3b8b2f8c112d done
+#33 exporting config sha256:5812dc7514484c044cb470c6481ab93ffcc9dcb598d3e2bcea4106141012b3b0 done
+#33 exporting attestation manifest sha256:3514a75c23d98754e20656140544ed284541f976c6612cc43fd1d5da68f3256c done
+#33 exporting manifest list sha256:8b5008039383492e5b176e336fdccc15351ac98882b3909be28afb93370325f0 done
+#33 naming to docker.io/library/reader-dev:local done
+#33 unpacking to docker.io/library/reader-dev:local
+#33 unpacking to docker.io/library/reader-dev:local 0.2s done
+#33 DONE 1.8s
+
+#34 resolving provenance for metadata file
+#34 DONE 0.0s
+ Image reader-dev:local Built 
