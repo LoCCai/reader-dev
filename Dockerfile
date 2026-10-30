@@ -17,7 +17,7 @@ COPY web-ui/public/fonts ./web-ui/public/fonts
 # rust-embed 编译期嵌入前端（需先构建 dist——见下方 web 阶段；顺序：web 先构建，builder 再编译）
 COPY --from=web /web/dist ./web-ui/dist
 ENV RUSTFLAGS="--cfg reqwest_unstable"
-RUN cargo build --release
+RUN cargo build --release --locked -j2
 
 # ============================================================
 # reader-dev (Rust) 多阶段构建

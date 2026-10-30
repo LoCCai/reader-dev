@@ -9,3 +9,13 @@ tests
 __pycache__
 *.md
 web-ui/node_modules
+
+# Runtime data and credentials are never part of an image build context.
+.env
+.env.*
+data
+work
+.mimosa
+*.db
+*.db-wal
+*.db-shm
