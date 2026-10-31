@@ -3863,6 +3863,7 @@ async fn get_book_content(
         .parse::<i64>()
         .unwrap_or(0)
         == 1;
+    let refresh = matches!(param_of(&params, body_json.as_ref(), "refresh").as_str(), "1" | "true");
     // legacy 参数：epubContent（1=EPUB XHTML 原文模式）——本地 EPUB 返回基本 HTML 结构
     //（纯文本按段落 <p> 包裹；legacy 章节原文 XHTML 的最小对齐，前端 HTML 渲染直接可用）
     let epub_content = param_of(&params, body_json.as_ref(), "epubContent")
@@ -4082,14 +4083,16 @@ async fn get_book_content(
     // ---- 文本书（type=0）：正文缓存 + ruleContent 文本解析 ----
     // F-10：书源书正文缓存——book_url 为键 + chapter_index = chapterUrl md5 哈希，
     // 同 chapterUrl 直读（永久，清理接口 clearCache 可清）；local:// 键域不参与
-    if !book_url.is_empty() && !book_url.starts_with("local://") {
+    if !refresh && !book_url.is_empty() && !book_url.starts_with("local://") {
         let idx = crate::util::md5::chapter_url_hash(&chapter_url);
         if let Ok(Some(content)) = state
             .storage
             .get_chapter_content(&namespace, &book_url, idx)
             .await
         {
-            if !content.trim().is_empty() {
+            if !content.trim().is_empty()
+                && !crate::service::book::is_replace_rule_artifact(&content, &source)
+            {
                 tracing::debug!("getBookContent 命中正文缓存 [{book_url} #{idx}]");
                 // legacy：缓存命中同样保存书架进度（cache=1 纯缓存模式除外）
                 if !cache_only {
@@ -4102,7 +4105,7 @@ async fn get_book_content(
                     )
                     .await;
                 }
-                return Json(ReturnData::ok(serde_json::json!({ "content": content })));
+                return Json(ReturnData::ok(serde_json::json!({ "content": content, "isCache": true })));
             }
         }
     }
@@ -4254,21 +4257,16 @@ async fn export_book(
         return Json(ReturnData::err("请输入书籍链接")).into_response();
     }
     let format = param_of(&params, body_json.as_ref(), "format");
-    let format = if format.is_empty() {
-        "txt"
-    } else {
-        format.as_str()
-    };
     // F10（legacy）：isEpub=1 且未显式指定 format → epub
     let format = if format.is_empty() {
         let is_epub = param_of(&params, body_json.as_ref(), "isEpub");
         if is_epub == "1" {
             "epub"
         } else {
-            format
+            "txt"
         }
     } else {
-        format
+        format.as_str()
     };
     if !matches!(format, "txt" | "epub" | "html") {
         return Json(ReturnData::err("不支持的导出格式（txt|epub|html）")).into_response();
@@ -9243,6 +9241,25 @@ async fn delete_book_cache(
     }
 }
 
+fn append_book_cache_info(item: &mut Value, ns: &str, url: &str, count: i64, size: i64) {
+    let Some(obj) = item.as_object_mut() else { return };
+    // Publish both dialect spellings for legacy clients and the QWeb bridge.
+    obj.insert("cacheChapterCount".into(), json!(count));
+    obj.insert("cachedChapterCount".into(), json!(count));
+    obj.insert("cacheSize".into(), json!(size));
+    let total = obj.get("totalChapterNum").and_then(Value::as_i64).unwrap_or(0);
+    let mut status = if total > 0 && count >= total { "completed" }
+        else if count > 0 { "partial" } else { "idle" };
+    if let Some(progress) = crate::service::cache_job::progress_of(ns, url) {
+        let progress = progress.lock().unwrap_or_else(|e| e.into_inner());
+        status = if progress.cancelled { "cancelled" }
+            else if !progress.finished { "caching" }
+            else if progress.error.is_some() || progress.failed > 0 { "failed" }
+            else { status };
+    }
+    obj.insert("cacheStatus".into(), json!(status));
+}
+
 /// GET/POST /reader3/getShelfBookWithCacheInfo：书架书 + 缓存信息（缓存章数/正文大小）
 async fn get_shelf_book_with_cache_info(
     State(state): State<AppState>,
@@ -9273,10 +9290,7 @@ async fn get_shelf_book_with_cache_info(
                 .book_cache_info(&namespace, &b.book_url)
                 .await
                 .unwrap_or((0, 0));
-            if let Some(obj) = item.as_object_mut() {
-                obj.insert("cacheChapterCount".to_string(), json!(cache_chapter_count));
-                obj.insert("cacheSize".to_string(), json!(cache_size));
-            }
+            append_book_cache_info(&mut item, &namespace, &b.book_url, cache_chapter_count, cache_size);
             out.push(item);
         }
         return Json(ReturnData::ok(Value::Array(out)));
@@ -9295,10 +9309,7 @@ async fn get_shelf_book_with_cache_info(
         .await
         .unwrap_or((0, 0));
     let mut data = serde_json::to_value(book).unwrap_or(serde_json::Value::Null);
-    if let Some(obj) = data.as_object_mut() {
-        obj.insert("cacheChapterCount".to_string(), json!(cache_chapter_count));
-        obj.insert("cacheSize".to_string(), json!(cache_size));
-    }
+    append_book_cache_info(&mut data, &namespace, &url, cache_chapter_count, cache_size);
     Json(ReturnData::ok(data))
 }
 
@@ -16902,6 +16913,52 @@ mod tests {
         cleanup(state, dir).await;
     }
 
+    #[tokio::test]
+    async fn test_qweb_content_refresh_repairs_only_rule_artifacts() {
+        let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true);
+        let (state, dir) = test_state("qweb-replace-refresh").await;
+        let base_url = serve_bodies(vec![
+            "<div class=\"content\">刷新后的正文。</div>".to_string(),
+            "<div class=\"content\">修复后的正文。</div>".to_string(),
+        ]).await;
+        let base = base_url.trim_end_matches("/sources.json").to_string();
+        let source = crate::model::BookSource {
+            book_source_url: base.clone(), book_source_name: "QWeb正文回归".into(),
+            rule_content: Some(json!({"content":"div.content@text", "replaceRegex":"##[a-zA-Z0-9-]+\\.[a-zA-Z0-9-]+"})),
+            ..Default::default()
+        };
+        state.storage.save_book_source("default", &source).await.unwrap();
+        let book_url = "https://book.example/qweb-regression";
+        let chapter_url = format!("{base}/chapter");
+        let key = crate::util::md5::chapter_url_hash(&chapter_url);
+        state.storage.cache_chapter_content("default", book_url, key, "一", "旧的正常正文。").await.unwrap();
+        let params = |refresh: &str| -> HashMap<String,String> { [
+            ("url".into(), chapter_url.clone()), ("bookUrl".into(), book_url.into()),
+            ("bookSource".into(), base.clone()), ("refresh".into(), refresh.into()),
+        ].into_iter().collect() };
+        let ret = get_book_content(AxumState(state.clone()), Query(params("0")), HeaderMap::new(), None).await;
+        assert_eq!(ret.0.data["content"], "旧的正常正文。");
+        assert_eq!(ret.0.data["isCache"], true);
+        let ret = get_book_content(AxumState(state.clone()), Query(params("1")), HeaderMap::new(), None).await;
+        assert_eq!(ret.0.data["content"], "刷新后的正文。");
+        state.storage.cache_chapter_content("default", book_url, key, "一", "[a-zA-Z0-9-]+\\.[a-zA-Z0-9-]+坏文").await.unwrap();
+        let ret = get_book_content(AxumState(state.clone()), Query(params("0")), HeaderMap::new(), None).await;
+        assert_eq!(ret.0.data["content"], "修复后的正文。");
+        assert_eq!(state.storage.get_chapter_content("default", book_url, key).await.unwrap().as_deref(), Some("修复后的正文。"));
+        cleanup(state, dir).await;
+    }
+
+    #[test]
+    fn test_qweb_cache_counts_include_legacy_alias_and_partial_state() {
+        let mut value = json!({"totalChapterNum":3});
+        append_book_cache_info(&mut value, "qweb-fixture", "book", 1, 100);
+        assert_eq!(value["cacheChapterCount"], 1);
+        assert_eq!(value["cachedChapterCount"], 1);
+        assert_eq!(value["cacheStatus"], "partial");
+        append_book_cache_info(&mut value, "qweb-fixture", "book", 3, 300);
+        assert_eq!(value["cacheStatus"], "completed");
+    }
+
     /// F-10 正文缓存：getBookContent 先查 book_chapters（chapterUrl md5 键）命中直读，
     /// 抓取成功后写回；local:// 与缺 bookUrl 不参与缓存
     #[tokio::test]
@@ -17892,6 +17949,15 @@ mod tests {
         assert!(txt.contains("第一章"));
         assert!(txt.contains("正文一 <甲> & 乙。"));
         assert!(txt.contains("正文二。"));
+
+        // QWeb/legacy alias must work without an explicit format parameter.
+        let mut alias_params = params("");
+        alias_params.remove("format");
+        alias_params.insert("isEpub".into(), "1".into());
+        let alias = export_book(AxumState(state.clone()), Query(alias_params), HeaderMap::new(), None).await;
+        assert_eq!(alias.headers().get("Content-Type").unwrap(), "application/epub+zip");
+        let alias_bytes = axum::body::to_bytes(alias.into_body(), 1024*1024).await.unwrap();
+        assert!(alias_bytes.starts_with(b"PK"));
 
         // epub（zip 构造验证：mimetype/container/OPF/spine 章节）
         let resp = export_book(

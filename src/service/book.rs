@@ -1584,6 +1584,20 @@ pub fn analyze_content_from(html: &str, source: &BookSource) -> String {
     analyze_content_from_with_vars(html, source, &mut crate::parser::rule::RuleVars::new())
 }
 
+/// Narrow signature of the old empty-pattern replacement bug. Only bodies
+/// beginning with the source's literal replacement regex are re-fetched;
+/// healthy cached prose is retained and no bulk cache cleanup is needed.
+pub(crate) fn is_replace_rule_artifact(content: &str, source: &BookSource) -> bool {
+    source.rule_content.as_ref()
+        .and_then(|v| v.get("replaceRegex"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|rr| rr.split("&&").any(|segment| {
+            let Some(pattern) = segment.trim().strip_prefix("##") else { return false };
+            let pattern = pattern.split("##").next().unwrap_or("");
+            pattern.chars().count() >= 8 && content.trim_start().starts_with(pattern)
+        }))
+}
+
 /// [`analyze_content_from`] 带变量版本（@put/@get 贯通详情→目录→正文）
 pub fn analyze_content_from_with_vars(
     html: &str,
@@ -1629,6 +1643,11 @@ pub fn analyze_content_from_with_vars(
     if let Some(rr) = &rule.replace_regex {
         for seg in rr.split("&&") {
             let seg = seg.trim();
+            // Legacy SourceRule pure replacement syntax has an empty
+            // selector: ##pattern[##replacement]. It does NOT mean replace
+            // the empty pattern with the regex text (which corrupts every
+            // character of the body). Keep bare-pattern compatibility too.
+            let seg = seg.strip_prefix("##").unwrap_or(seg);
             if seg.is_empty() {
                 continue;
             }
@@ -2607,6 +2626,34 @@ mod tests {
     }
 
     /// E9：replaceRegex 多段链（&&）+ ### 尾标仅首次替换 + 无 ## 段删除语义
+    #[test]
+    fn test_analyze_content_replace_leading_hashes_keeps_body() {
+        let mut src = test_source();
+        src.rule_content = Some(serde_json::json!({
+            "content": ".font_max@html##第\\(\\d+/\\d+\\)页",
+            "replaceRegex": "##[a-zA-Z0-9-]+[a-zA-Z0-9-].*\\.[a-zA-Z0-9-].*"
+        }));
+        let html = r#"<div class="font_max"><p>第一章 开局</p><p>这是真实的小说正文。</p><p>第(1/2)页</p></div>"#;
+        let content = analyze_content_from(html, &src);
+        assert!(content.contains("这是真实的小说正文。"), "{content}");
+        assert!(!content.contains("a-zA-Z"), "清洗规则不得变成正文: {content}");
+        assert!(!content.contains("第(1/2)页"));
+    }
+
+    #[test]
+    fn test_analyze_content_replace_leading_hashes_removes_footer() {
+        let mut src = test_source();
+        src.rule_content = Some(serde_json::json!({
+            "content": "id.chaptercontent@html",
+            "replaceRegex": "##.*第.*页.*|.*本章未完.*|阅读网址.*"
+        }));
+        let html = "<div id=\"chaptercontent\">小说正文第一段。<br/>\n小说正文第二段。<br/>\n本章未完，请翻页\n</div>";
+        let content = analyze_content_from(html, &src);
+        assert!(content.contains("小说正文第一段。"), "{content}");
+        assert!(!content.contains(".*"), "{content}");
+        assert!(!content.contains("本章未完"), "{content}");
+    }
+
     #[test]
     fn test_analyze_content_replace_multi_segment() {
         let mut src = test_source();
